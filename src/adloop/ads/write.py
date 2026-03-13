@@ -230,6 +230,77 @@ def remove_entity(
     return plan.to_preview()
 
 
+def draft_campaign(
+    config: AdLoopConfig,
+    *,
+    customer_id: str = "",
+    campaign_name: str = "",
+    daily_budget: float = 0,
+    bidding_strategy: str = "",
+    target_cpa: float = 0,
+    target_roas: float = 0,
+    channel_type: str = "SEARCH",
+    ad_group_name: str = "",
+    keywords: list[dict] | None = None,
+) -> dict:
+    """Draft a full campaign structure — returns preview, does NOT execute.
+
+    Creates: CampaignBudget + Campaign (PAUSED) + AdGroup + optional Keywords.
+    Ads are NOT included — use draft_responsive_search_ad separately after the
+    campaign exists.
+    """
+    from adloop.safety.guards import (
+        SafetyViolation,
+        check_blocked_operation,
+        check_budget_cap,
+    )
+    from adloop.safety.preview import ChangePlan, store_plan
+
+    try:
+        check_blocked_operation("create_campaign", config.safety)
+    except SafetyViolation as e:
+        return {"error": str(e)}
+
+    errors, warnings = _validate_campaign(
+        config,
+        campaign_name=campaign_name,
+        daily_budget=daily_budget,
+        bidding_strategy=bidding_strategy,
+        target_cpa=target_cpa,
+        target_roas=target_roas,
+        channel_type=channel_type,
+        keywords=keywords,
+    )
+    if errors:
+        return {"error": "Validation failed", "details": errors}
+
+    try:
+        check_budget_cap(daily_budget, config.safety)
+    except SafetyViolation as e:
+        return {"error": str(e)}
+
+    plan = ChangePlan(
+        operation="create_campaign",
+        entity_type="campaign",
+        customer_id=customer_id,
+        changes={
+            "campaign_name": campaign_name,
+            "daily_budget": daily_budget,
+            "bidding_strategy": bidding_strategy.upper(),
+            "target_cpa": target_cpa if target_cpa else None,
+            "target_roas": target_roas if target_roas else None,
+            "channel_type": channel_type.upper(),
+            "ad_group_name": ad_group_name or campaign_name,
+            "keywords": keywords,
+        },
+    )
+    store_plan(plan)
+    preview = plan.to_preview()
+    if warnings:
+        preview["warnings"] = warnings
+    return preview
+
+
 # ---------------------------------------------------------------------------
 # confirm_and_apply — the only function that actually mutates Google Ads
 # ---------------------------------------------------------------------------
@@ -404,6 +475,93 @@ def _validate_rsa(
     return errors
 
 
+_VALID_BIDDING_STRATEGIES = {
+    "MAXIMIZE_CONVERSIONS",
+    "MAXIMIZE_CONVERSION_VALUE",
+    "TARGET_CPA",
+    "TARGET_ROAS",
+    "TARGET_SPEND",
+    "MANUAL_CPC",
+}
+
+_VALID_CHANNEL_TYPES = {"SEARCH", "DISPLAY", "SHOPPING", "VIDEO", "PERFORMANCE_MAX"}
+
+
+def _validate_campaign(
+    config: AdLoopConfig,
+    *,
+    campaign_name: str,
+    daily_budget: float,
+    bidding_strategy: str,
+    target_cpa: float,
+    target_roas: float,
+    channel_type: str,
+    keywords: list[dict] | None,
+) -> tuple[list[str], list[str]]:
+    """Validate campaign draft inputs. Returns (errors, warnings)."""
+    errors = []
+    warnings = []
+
+    if not campaign_name or not campaign_name.strip():
+        errors.append("campaign_name is required")
+    if daily_budget <= 0:
+        errors.append("daily_budget must be greater than 0")
+
+    bs = bidding_strategy.upper()
+    if bs not in _VALID_BIDDING_STRATEGIES:
+        errors.append(
+            f"bidding_strategy must be one of {sorted(_VALID_BIDDING_STRATEGIES)}, "
+            f"got '{bidding_strategy}'"
+        )
+    if bs == "TARGET_CPA" and not target_cpa:
+        errors.append("target_cpa is required when bidding_strategy is TARGET_CPA")
+    if bs == "TARGET_ROAS" and not target_roas:
+        errors.append("target_roas is required when bidding_strategy is TARGET_ROAS")
+
+    ct = channel_type.upper()
+    if ct not in _VALID_CHANNEL_TYPES:
+        errors.append(
+            f"channel_type must be one of {sorted(_VALID_CHANNEL_TYPES)}, "
+            f"got '{channel_type}'"
+        )
+
+    if keywords:
+        has_broad = any(
+            kw.get("match_type", "").upper() == "BROAD" for kw in keywords
+        )
+        if has_broad and bs not in _SMART_BIDDING_STRATEGIES:
+            errors.append(
+                f"BROAD match keywords require Smart Bidding "
+                f"(tCPA/tROAS/Maximize Conversions). "
+                f"'{bidding_strategy}' is not a Smart Bidding strategy. "
+                f"Use PHRASE or EXACT match instead."
+            )
+        for i, kw in enumerate(keywords):
+            if not kw.get("text"):
+                errors.append(f"Keyword {i + 1} has no text")
+            mt = kw.get("match_type", "").upper()
+            if mt not in _VALID_MATCH_TYPES:
+                errors.append(
+                    f"Keyword {i + 1} has invalid match_type '{mt}' "
+                    "(must be EXACT, PHRASE, or BROAD)"
+                )
+
+    if target_cpa > 0 and daily_budget < 5 * target_cpa:
+        warnings.append(
+            f"Daily budget €{daily_budget:.2f} is less than 5x target CPA "
+            f"€{target_cpa:.2f}. Google recommends at least 5x target CPA "
+            f"(€{5 * target_cpa:.2f}/day) for sufficient learning data."
+        )
+
+    if bs == "MANUAL_CPC":
+        warnings.append(
+            "MANUAL_CPC bidding requires constant monitoring. Consider using "
+            "MAXIMIZE_CONVERSIONS or TARGET_CPA for automated optimization."
+        )
+
+    return errors, warnings
+
+
 def _validate_keywords(ad_group_id: str, keywords: list[dict]) -> list[str]:
     errors = []
     if not ad_group_id:
@@ -472,6 +630,7 @@ def _execute_plan(config: AdLoopConfig, plan: object) -> dict:
     cid = normalize_customer_id(plan.customer_id)
 
     dispatch = {
+        "create_campaign": _apply_create_campaign,
         "create_responsive_search_ad": _apply_create_rsa,
         "add_keywords": _apply_add_keywords,
         "add_negative_keywords": _apply_add_negative_keywords,
@@ -497,6 +656,109 @@ def _execute_plan(config: AdLoopConfig, plan: object) -> dict:
         return handler(client, cid, plan.entity_type, plan.entity_id)
 
     return handler(client, cid, plan.changes)
+
+
+def _apply_create_campaign(client: object, cid: str, changes: dict) -> dict:
+    """Create campaign + budget + ad group + optional keywords atomically."""
+    service = client.get_service("GoogleAdsService")
+    campaign_service = client.get_service("CampaignService")
+    budget_service = client.get_service("CampaignBudgetService")
+    ad_group_service = client.get_service("AdGroupService")
+
+    operations = []
+
+    # 1. CampaignBudget (temp ID: -1)
+    budget_op = client.get_type("MutateOperation")
+    budget = budget_op.campaign_budget_operation.create
+    budget.resource_name = budget_service.campaign_budget_path(cid, "-1")
+    budget.name = f"Budget - {changes['campaign_name']}"
+    budget.amount_micros = int(changes["daily_budget"] * 1_000_000)
+    budget.delivery_method = client.enums.BudgetDeliveryMethodEnum.STANDARD
+    budget.explicitly_shared = False
+    operations.append(budget_op)
+
+    # 2. Campaign (temp ID: -2, references budget -1)
+    campaign_op = client.get_type("MutateOperation")
+    campaign = campaign_op.campaign_operation.create
+    campaign.resource_name = campaign_service.campaign_path(cid, "-2")
+    campaign.name = changes["campaign_name"]
+    campaign.campaign_budget = budget_service.campaign_budget_path(cid, "-1")
+    campaign.status = client.enums.CampaignStatusEnum.PAUSED
+
+    channel = changes.get("channel_type", "SEARCH")
+    campaign.advertising_channel_type = getattr(
+        client.enums.AdvertisingChannelTypeEnum, channel
+    )
+
+    bs = changes["bidding_strategy"]
+    if bs == "MAXIMIZE_CONVERSIONS":
+        campaign.maximize_conversions.target_cpa_micros = 0
+        if changes.get("target_cpa"):
+            campaign.maximize_conversions.target_cpa_micros = int(
+                changes["target_cpa"] * 1_000_000
+            )
+    elif bs == "TARGET_CPA":
+        campaign.maximize_conversions.target_cpa_micros = int(
+            changes["target_cpa"] * 1_000_000
+        )
+    elif bs == "MAXIMIZE_CONVERSION_VALUE":
+        campaign.maximize_conversion_value.target_roas = 0
+        if changes.get("target_roas"):
+            campaign.maximize_conversion_value.target_roas = changes["target_roas"]
+    elif bs == "TARGET_ROAS":
+        campaign.maximize_conversion_value.target_roas = changes["target_roas"]
+    elif bs == "TARGET_SPEND":
+        campaign.target_spend.target_spend_micros = 0
+    elif bs == "MANUAL_CPC":
+        campaign.manual_cpc.enhanced_cpc_enabled = False
+
+    campaign.network_settings.target_google_search = True
+    campaign.network_settings.target_search_network = False
+    campaign.network_settings.target_content_network = False
+
+    operations.append(campaign_op)
+
+    # 3. AdGroup (temp ID: -3, references campaign -2)
+    ag_op = client.get_type("MutateOperation")
+    ad_group = ag_op.ad_group_operation.create
+    ad_group.resource_name = ad_group_service.ad_group_path(cid, "-3")
+    ad_group.name = changes.get("ad_group_name", changes["campaign_name"])
+    ad_group.campaign = campaign_service.campaign_path(cid, "-2")
+    ad_group.status = client.enums.AdGroupStatusEnum.ENABLED
+    ad_group.type_ = client.enums.AdGroupTypeEnum.SEARCH_STANDARD
+    operations.append(ag_op)
+
+    # 4. Keywords (reference ad_group -3)
+    kw_list = changes.get("keywords") or []
+    for kw in kw_list:
+        kw_op = client.get_type("MutateOperation")
+        criterion = kw_op.ad_group_criterion_operation.create
+        criterion.ad_group = ad_group_service.ad_group_path(cid, "-3")
+        criterion.keyword.text = kw["text"]
+        criterion.keyword.match_type = getattr(
+            client.enums.KeywordMatchTypeEnum, kw["match_type"].upper()
+        )
+        operations.append(kw_op)
+
+    response = service.mutate(customer_id=cid, mutate_operations=operations)
+
+    resource_names = [r.mutate_operation_response for r in response.mutate_operation_responses]
+    results = {}
+    for i, resp in enumerate(response.mutate_operation_responses):
+        resp_type = resp.WhichOneof("response")
+        if resp_type:
+            inner = getattr(resp, resp_type)
+            resource = getattr(inner, "resource_name", str(inner))
+            if i == 0:
+                results["campaign_budget"] = resource
+            elif i == 1:
+                results["campaign"] = resource
+            elif i == 2:
+                results["ad_group"] = resource
+            else:
+                results.setdefault("keywords", []).append(resource)
+
+    return results
 
 
 def _apply_create_rsa(client: object, cid: str, changes: dict) -> dict:

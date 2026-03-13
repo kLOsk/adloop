@@ -44,10 +44,40 @@ You have access to AdLoop MCP tools that connect Google Ads and Google Analytics
 - `metrics.average_cpc_eur` is also pre-computed where available.
 - `get_ad_performance` returns full `headlines` and `descriptions` lists for RSAs.
 
+### Cross-Reference Tools (GA4 + Ads combined)
+
+| Tool | When to Use | Key Parameters |
+|------|-------------|----------------|
+| `analyze_campaign_conversions` | "What's my real CPA?", paid vs organic comparison, GDPR gap analysis | `date_range_start`, `date_range_end`, `campaign_name` (optional filter) |
+| `landing_page_analysis` | "Which landing pages convert?", identify pages with traffic but no conversions | `date_range_start`, `date_range_end` |
+| `attribution_check` | "Are my conversions tracked correctly?", Ads vs GA4 conversion discrepancies | `date_range_start`, `date_range_end`, `conversion_events` (optional GA4 event names) |
+
+These tools call both APIs internally and return unified results with computed `insights[]`. They are read-only — no mutations. Each returns a `date_range` and auto-generates conditional warnings (GDPR gaps, zero conversions, attribution mismatches, orphaned URLs).
+
+### Tracking Tools
+
+| Tool | When to Use | Key Parameters |
+|------|-------------|----------------|
+| `validate_tracking` | Compare codebase event code against actual GA4 events — find missing/broken tracking | `expected_events` (list of event names found in code), `date_range_start`, `date_range_end` |
+| `generate_tracking_code` | Generate ready-to-paste GA4 gtag JavaScript for an event | `event_name`, `event_params` (optional), `trigger` (form_submit/button_click/page_load) |
+
+`validate_tracking` requires the AI to first search the codebase for `gtag('event', ...)` or `dataLayer.push({event: ...})` calls, extract event names, then pass them to the tool. The tool queries GA4 and returns a structured comparison (matched, missing, unexpected, auto-collected).
+
+`generate_tracking_code` includes recommended parameters for well-known GA4 events (sign_up, purchase, etc.) and optionally checks if the event already fires in GA4.
+
+### Planning Tools
+
+| Tool | When to Use | Key Parameters |
+|------|-------------|----------------|
+| `estimate_budget` | Budget planning before launching a campaign — forecasts clicks, impressions, cost for a set of keywords | `keywords` (list of {text, match_type, max_cpc}), `daily_budget` (optional), `geo_target_id`, `language_id`, `forecast_days` |
+
+`estimate_budget` calls the Google Ads Keyword Planner API (read-only — creates nothing). Returns forecast metrics for the specified keywords and optional budget, including daily estimates and insights about budget sufficiency. Common geo targets: 2276=Germany, 2840=USA, 2826=UK. Common languages: 1000=English, 1001=German, 1002=French.
+
 ### Google Ads Write Tools (ALL require safety confirmation)
 
 | Tool | What It Does | Validation |
 |------|-------------|------------|
+| `draft_campaign` | Create full campaign structure preview (budget + campaign + ad group + optional keywords) | `campaign_name`, `daily_budget` (budget cap enforced), `bidding_strategy`, keywords validated for match type safety |
 | `draft_responsive_search_ad` | Create RSA preview (does NOT publish) | 3-15 headlines (≤30 chars), 2-4 descriptions (≤90 chars), final_url required |
 | `draft_keywords` | Propose keyword additions (does NOT add) | Each keyword needs `text` and `match_type` (EXACT/PHRASE/BROAD) |
 | `add_negative_keywords` | Propose negative keywords (does NOT add) | `campaign_id`, keyword list, `match_type` |
@@ -63,7 +93,8 @@ You have access to AdLoop MCP tools that connect Google Ads and Google Analytics
 4. Only call with `dry_run=false` after explicit user confirmation
 
 **Safety behaviors:**
-- New RSAs are created as PAUSED — user must explicitly enable them after review.
+- New campaigns and RSAs are created as PAUSED — user must explicitly enable them after review.
+- `draft_campaign` enforces the `max_daily_budget` safety cap, rejects BROAD match + non-Smart Bidding, and warns if budget is below 5x target CPA.
 - `remove_entity` is IRREVERSIBLE — always prefer `pause_entity` unless the user explicitly wants permanent removal. Removal triggers double confirmation in the safety layer.
 - `remove_entity` supports `entity_type` values: "campaign", "ad_group", "ad", "keyword", "negative_keyword". Use "negative_keyword" to remove campaign-level negative keywords.
 - `require_dry_run: true` in config overrides `dry_run=false` — the user must change the config to allow real mutations.
@@ -112,20 +143,20 @@ Most websites (especially in the EU) use a GDPR cookie consent banner. This has 
 ### When user asks about performance or "how are my ads doing"
 
 1. Call `get_campaign_performance` for the relevant date range
-2. If they mention specific keywords or search terms, also call `get_keyword_performance` or `get_search_terms`
-3. Present a summary with the key metrics: spend (`metrics.cost`), clicks, conversions, CPA (`metrics.cpa`), CTR
-4. Highlight anything concerning: zero conversions, high CPA, low quality scores, wasteful search terms
-5. Compare against best practices (see Marketing Best Practices section)
+2. If they mention conversions, CPA, or "is it worth it", call `analyze_campaign_conversions` instead — it gives Ads + GA4 data in one call with GDPR-aware cost-per-conversion
+3. If they mention specific keywords or search terms, also call `get_keyword_performance` or `get_search_terms`
+4. Present a summary with the key metrics: spend (`metrics.cost`), clicks, conversions, CPA (`metrics.cpa`), CTR
+5. Highlight anything concerning: zero conversions, high CPA, low quality scores, wasteful search terms
+6. Compare against best practices (see Marketing Best Practices section)
 
 ### When user asks about conversions or conversion drops
 
-1. Start with `run_ga4_report` — pull conversion events for the affected period vs. a comparison period. Use `dimensions=["eventName"]` and `metrics=["eventCount"]` with the relevant date ranges.
-2. Use `run_ga4_report` with `dimensions=["pagePath"]` and `metrics=["sessions", "conversions"]` to identify which pages dropped
-3. Call `get_campaign_performance` to check if traffic volume or source mix changed
-4. Call `get_search_terms` to see if search intent shifted
-5. **Before concluding tracking is broken:** Compare Ads clicks vs GA4 sessions. If clicks > sessions, factor in GDPR consent (see section above). Only diagnose a tracking issue if the gap is abnormally large or affects all traffic sources equally.
-6. If the user's codebase is accessible (Cursor native), search for recent changes to the affected pages
-7. Present a unified diagnosis combining analytics + ads + code insights
+1. Call `attribution_check` with relevant date range and `conversion_events` if the user mentions specific events (e.g. sign_up, purchase) — this does the Ads vs GA4 comparison in one call and auto-generates insights
+2. If the discrepancy needs page-level drill-down, call `landing_page_analysis` to see which pages get paid traffic but don't convert
+3. Call `get_search_terms` to see if search intent shifted
+4. **Before concluding tracking is broken:** Check the `insights` from `attribution_check` — it already factors in GDPR consent gaps. Only diagnose a tracking issue if the tool's insights suggest it.
+5. If the user's codebase is accessible (Cursor native), search for recent changes to the affected pages
+6. Present a unified diagnosis combining the cross-reference tool insights with code analysis
 
 ### When user wants to create an ad
 
@@ -154,13 +185,36 @@ Most websites (especially in the EU) use a GDPR cookie consent banner. This has 
 6. Present the preview with any warnings
 7. Wait for explicit user approval
 
+### When user wants to create a new campaign
+
+1. Call `get_campaign_performance` to understand the existing campaign structure — avoid duplicate campaign names
+2. If the user hasn't specified a budget, call `estimate_budget` with proposed keywords to get a data-driven budget recommendation
+3. **Pre-write checks (CRITICAL):**
+   - Has the user specified a bidding strategy? If not, recommend MAXIMIZE_CONVERSIONS or TARGET_CPA over MANUAL_CPC. Never default to MANUAL_CPC.
+   - Does the account have conversion tracking working? Call `attribution_check` — if zero conversions across the board, WARN that new campaigns won't help until tracking is fixed.
+   - Is the proposed budget reasonable? Must be ≤ `max_daily_budget` in config, and ideally ≥ 5x target CPA.
+3. Call `draft_campaign` with campaign name, daily budget, bidding strategy, ad group name, and optional keywords
+4. Review the preview and any `warnings` (budget sufficiency, MANUAL_CPC warning, BROAD match rejection)
+5. Present the complete preview to the user — emphasize the campaign will be created as PAUSED
+6. After campaign creation, remind the user to add ads via `draft_responsive_search_ad` and then enable the campaign via `enable_entity`
+7. Wait for explicit user approval before calling `confirm_and_apply`
+
+### When user asks "how much should I spend" or "what budget do I need"
+
+1. Ask the user for their target keywords (or suggest some based on the business context)
+2. Ask for the target geography and language (or infer from the existing account)
+3. Call `estimate_budget` with the keywords, match types, and optional daily budget
+4. Present the forecast: estimated clicks, impressions, cost, and avg CPC
+5. If the user provided a daily budget, highlight whether it's sufficient to capture most available traffic
+6. Use the forecast to inform `draft_campaign` decisions — the estimated daily cost guides the budget parameter
+
 ### When user asks about tracking or event issues
 
 1. **First, consider GDPR consent** — if Ads clicks > GA4 sessions, this is likely consent rejection, not broken tracking. State this before investigating further.
-2. Call `get_tracking_events` to see what GA4 actually receives
-3. If codebase is accessible, search for gtag/dataLayer event code and look for consent mode implementation (`gtag('consent', ...)`)
-4. Compare what the code sends vs what GA4 reports
-5. Identify mismatches and suggest fixes — distinguish between consent-caused gaps (normal) and actual tracking bugs (code errors, missing events, wrong property ID)
+2. If the codebase is accessible, search for `gtag('event'` and `dataLayer.push` calls to extract event names. Also look for consent mode implementation (`gtag('consent', ...)`)
+3. Call `validate_tracking` with the extracted event names — it compares codebase events against actual GA4 data and returns matched, missing, and unexpected events
+4. Review the `insights[]` from `validate_tracking` — missing events indicate code not deployed or behind untriggered conditions; unexpected events may come from tag managers
+5. If the user needs to add new tracking, use `generate_tracking_code` to produce the gtag snippet with recommended parameters
 
 ### When user asks to add negative keywords
 
@@ -177,6 +231,27 @@ Most websites (especially in the EU) use a GDPR cookie consent banner. This has 
 2. Call `pause_entity` or `enable_entity` with the entity type and ID
 3. Present the preview with a clear warning about impact (e.g. "This will stop all ads in this campaign")
 4. Wait for confirmation
+
+### When user asks about landing page performance
+
+1. Call `landing_page_analysis` — it combines ad final URLs with GA4 page data in one call
+2. Review the `insights[]` for pages with traffic but zero conversions, high bounce rates, or orphaned URLs
+3. If the codebase is accessible, read the flagged landing pages to identify UX or content issues
+4. Present the results sorted by paid sessions, highlighting problem pages
+
+### When user asks "is my tracking working" or "are conversions set up correctly"
+
+1. Call `attribution_check` with `conversion_events` set to the expected events (e.g. `["sign_up", "purchase"]`)
+2. The tool checks: do these events exist in GA4? Do they fire from paid traffic? Does Ads agree?
+3. If the `insights[]` mention missing events or zero counts, search the codebase for tracking code and then call `validate_tracking` with the extracted event names for a structured comparison
+4. If the `insights[]` mention GDPR consent gaps, explain that this is normal EU behavior, not broken tracking
+5. If tracking code needs to be added, use `generate_tracking_code` to produce ready-to-paste gtag snippets with the right parameters
+
+### When user asks "paid vs organic" or "which channel converts better"
+
+1. Call `analyze_campaign_conversions` — it returns both paid campaign metrics and non-paid channel conversion rates
+2. Compare `campaigns[].ga4_conversion_rate` (paid) vs `non_paid_channels[].conversion_rate` (organic/direct/referral)
+3. If paid conversion rate is significantly lower, investigate landing page relevance and ad targeting before increasing spend
 
 ## Default Parameters
 

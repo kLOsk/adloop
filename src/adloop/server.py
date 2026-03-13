@@ -63,7 +63,26 @@ def health_check() -> dict:
     Run this first if other tools are failing. Returns status for each service
     and actionable guidance if something is broken.
     """
-    status = {"ga4": "unknown", "ads": "unknown", "config": "ok"}
+    from adloop.ads.client import GOOGLE_ADS_API_VERSION
+
+    status = {
+        "ga4": "unknown",
+        "ads": "unknown",
+        "config": "ok",
+        "google_ads_api_version": GOOGLE_ADS_API_VERSION,
+    }
+
+    try:
+        from google.ads.googleads.client import _DEFAULT_VERSION
+        if _DEFAULT_VERSION != GOOGLE_ADS_API_VERSION:
+            status["ads_version_note"] = (
+                f"AdLoop is pinned to {GOOGLE_ADS_API_VERSION} but the "
+                f"google-ads library defaults to {_DEFAULT_VERSION}. "
+                f"A newer API version is available — update "
+                f"GOOGLE_ADS_API_VERSION in ads/client.py when ready to migrate."
+            )
+    except ImportError:
+        pass
 
     try:
         from adloop.ga4.reports import get_account_summaries as _ga4_test
@@ -321,6 +340,93 @@ def get_negative_keywords(
 
 @mcp.tool(annotations=_READONLY)
 @_safe
+def analyze_campaign_conversions(
+    date_range_start: str = "",
+    date_range_end: str = "",
+    customer_id: str = "",
+    property_id: str = "",
+    campaign_name: str = "",
+) -> dict:
+    """Campaign clicks → GA4 conversions mapping — the real cost-per-conversion.
+
+    Combines Google Ads campaign metrics with GA4 session/conversion data to
+    reveal click-to-session ratios (GDPR indicator), compare Ads-reported vs
+    GA4-reported conversions, and compute cost-per-GA4-conversion.
+
+    Also returns non-paid channel conversion rates for comparison context.
+    Date format: "YYYY-MM-DD". Empty = last 30 days.
+    """
+    from adloop.crossref import analyze_campaign_conversions as _impl
+
+    return _impl(
+        _config,
+        customer_id=customer_id or _config.ads.customer_id,
+        property_id=property_id or _config.ga4.property_id,
+        date_range_start=date_range_start,
+        date_range_end=date_range_end,
+        campaign_name=campaign_name,
+    )
+
+
+@mcp.tool(annotations=_READONLY)
+@_safe
+def landing_page_analysis(
+    date_range_start: str = "",
+    date_range_end: str = "",
+    customer_id: str = "",
+    property_id: str = "",
+) -> dict:
+    """Analyze which landing pages convert and which don't.
+
+    Combines ad final URLs with GA4 page-level data to show paid traffic
+    sessions, conversion rates, bounce rates, and engagement per landing page.
+    Identifies pages that get ad clicks but zero conversions and orphaned URLs.
+    Date format: "YYYY-MM-DD". Empty = last 30 days.
+    """
+    from adloop.crossref import landing_page_analysis as _impl
+
+    return _impl(
+        _config,
+        customer_id=customer_id or _config.ads.customer_id,
+        property_id=property_id or _config.ga4.property_id,
+        date_range_start=date_range_start,
+        date_range_end=date_range_end,
+    )
+
+
+@mcp.tool(annotations=_READONLY)
+@_safe
+def attribution_check(
+    date_range_start: str = "",
+    date_range_end: str = "",
+    customer_id: str = "",
+    property_id: str = "",
+    conversion_events: list[str] | None = None,
+) -> dict:
+    """Compare Ads-reported conversions vs GA4 — find tracking discrepancies.
+
+    Checks whether conversions reported by Google Ads match what GA4 records,
+    diagnoses GDPR consent gaps, attribution model differences, and missing
+    conversion event configuration.
+
+    conversion_events: optional list of GA4 event names to specifically check
+    (e.g. ["sign_up", "purchase"]). If omitted, compares aggregate totals only.
+    Date format: "YYYY-MM-DD". Empty = last 30 days.
+    """
+    from adloop.crossref import attribution_check as _impl
+
+    return _impl(
+        _config,
+        customer_id=customer_id or _config.ads.customer_id,
+        property_id=property_id or _config.ga4.property_id,
+        date_range_start=date_range_start,
+        date_range_end=date_range_end,
+        conversion_events=conversion_events,
+    )
+
+
+@mcp.tool(annotations=_READONLY)
+@_safe
 def run_gaql(
     query: str,
     customer_id: str = "",
@@ -346,6 +452,48 @@ def run_gaql(
 # ---------------------------------------------------------------------------
 # Google Ads Write Tools (Safety Layer)
 # ---------------------------------------------------------------------------
+
+
+@mcp.tool(annotations=_WRITE)
+@_safe
+def draft_campaign(
+    campaign_name: str,
+    daily_budget: float,
+    bidding_strategy: str,
+    customer_id: str = "",
+    target_cpa: float = 0,
+    target_roas: float = 0,
+    channel_type: str = "SEARCH",
+    ad_group_name: str = "",
+    keywords: list[dict] | None = None,
+) -> dict:
+    """Draft a full campaign structure — returns a PREVIEW, does NOT create anything.
+
+    Creates: CampaignBudget + Campaign (PAUSED) + AdGroup + optional Keywords.
+    Ads are NOT included — use draft_responsive_search_ad after the campaign exists.
+
+    bidding_strategy: MAXIMIZE_CONVERSIONS | TARGET_CPA | TARGET_ROAS |
+                      MAXIMIZE_CONVERSION_VALUE | TARGET_SPEND | MANUAL_CPC
+    target_cpa: required if bidding_strategy is TARGET_CPA (in account currency)
+    target_roas: required if bidding_strategy is TARGET_ROAS
+    keywords: list of {"text": "keyword", "match_type": "EXACT|PHRASE|BROAD"}
+
+    Call confirm_and_apply with the returned plan_id to execute.
+    """
+    from adloop.ads.write import draft_campaign as _impl
+
+    return _impl(
+        _config,
+        customer_id=customer_id or _config.ads.customer_id,
+        campaign_name=campaign_name,
+        daily_budget=daily_budget,
+        bidding_strategy=bidding_strategy,
+        target_cpa=target_cpa,
+        target_roas=target_roas,
+        channel_type=channel_type,
+        ad_group_name=ad_group_name,
+        keywords=keywords,
+    )
 
 
 @mcp.tool(annotations=_WRITE)
@@ -525,3 +673,106 @@ def confirm_and_apply(
     from adloop.ads.write import confirm_and_apply as _impl
 
     return _impl(_config, plan_id=plan_id, dry_run=dry_run)
+
+
+# ---------------------------------------------------------------------------
+# Tracking Tools
+# ---------------------------------------------------------------------------
+
+
+@mcp.tool(annotations=_READONLY)
+@_safe
+def validate_tracking(
+    expected_events: list[str],
+    property_id: str = "",
+    date_range_start: str = "28daysAgo",
+    date_range_end: str = "today",
+) -> dict:
+    """Compare tracking events found in the codebase against actual GA4 data.
+
+    First, search the user's codebase for gtag('event', ...) or dataLayer.push
+    calls and extract event names. Then pass those names here to check which
+    ones actually fire in GA4.
+
+    Returns: matched events, events missing from GA4, unexpected GA4 events,
+    and auto-collected events (page_view, session_start, etc.).
+    """
+    from adloop.tracking import validate_tracking as _impl
+
+    return _impl(
+        _config,
+        expected_events=expected_events,
+        property_id=property_id or _config.ga4.property_id,
+        date_range_start=date_range_start,
+        date_range_end=date_range_end,
+    )
+
+
+@mcp.tool(annotations=_READONLY)
+@_safe
+def generate_tracking_code(
+    event_name: str,
+    event_params: dict | None = None,
+    trigger: str = "",
+    property_id: str = "",
+    check_existing: bool = True,
+) -> dict:
+    """Generate a GA4 event tracking JavaScript snippet.
+
+    Produces ready-to-paste gtag code for the specified event. Includes
+    recommended parameters for well-known GA4 events (sign_up, purchase, etc.).
+    Optionally checks GA4 to warn if the event already fires.
+
+    trigger: "form_submit", "button_click", or "page_load" — wraps the gtag
+    call in an appropriate event listener. Empty = bare gtag call.
+    """
+    from adloop.tracking import generate_tracking_code as _impl
+
+    return _impl(
+        _config,
+        event_name=event_name,
+        event_params=event_params,
+        trigger=trigger,
+        property_id=property_id or _config.ga4.property_id,
+        check_existing=check_existing,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Planning Tools
+# ---------------------------------------------------------------------------
+
+
+@mcp.tool(annotations=_READONLY)
+@_safe
+def estimate_budget(
+    keywords: list[dict],
+    daily_budget: float = 0,
+    geo_target_id: str = "2276",
+    language_id: str = "1000",
+    forecast_days: int = 30,
+    customer_id: str = "",
+) -> dict:
+    """Forecast clicks, impressions, and cost for a set of keywords.
+
+    Uses Google Ads Keyword Planner to estimate campaign performance without
+    creating anything. Essential for budget planning before launching campaigns.
+
+    keywords: list of {"text": "keyword", "match_type": "EXACT|PHRASE|BROAD", "max_cpc": 1.50}
+        max_cpc is optional (defaults to 1.00 in account currency)
+    geo_target_id: geo target constant (2276=Germany, 2840=USA, 2826=UK, 2250=France)
+    language_id: language constant (1000=English, 1001=German, 1002=French, 1003=Spanish)
+    daily_budget: if provided, insights will show what % of traffic the budget captures
+    forecast_days: forecast horizon in days (default 30)
+    """
+    from adloop.ads.forecast import estimate_budget as _impl
+
+    return _impl(
+        _config,
+        keywords=keywords,
+        daily_budget=daily_budget,
+        geo_target_id=geo_target_id,
+        language_id=language_id,
+        forecast_days=forecast_days,
+        customer_id=customer_id or _config.ads.customer_id,
+    )

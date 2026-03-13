@@ -9,9 +9,14 @@ if TYPE_CHECKING:
 
     from adloop.config import AdLoopConfig
 
+# Pin the API version so library upgrades don't silently break field names,
+# enum values, or mutate operation structures. Bump this deliberately when
+# migrating to a new API version — never let it float to the library default.
+GOOGLE_ADS_API_VERSION = "v23"
+
 
 def get_ads_client(config: AdLoopConfig) -> GoogleAdsClient:
-    """Return an authenticated Google Ads API client."""
+    """Return an authenticated Google Ads API client pinned to a specific API version."""
     from google.ads.googleads.client import GoogleAdsClient
 
     from adloop.auth import get_ads_credentials
@@ -21,6 +26,7 @@ def get_ads_client(config: AdLoopConfig) -> GoogleAdsClient:
     client_config = {
         "developer_token": config.ads.developer_token,
         "use_proto_plus": True,
+        "version": GOOGLE_ADS_API_VERSION,
     }
 
     if config.ads.login_customer_id:
