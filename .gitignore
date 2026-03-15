@@ -31,6 +31,10 @@ docs/
 .DS_Store
 Thumbs.db
 
+# Reports and guides (contain real business data)
+reports/
+guides/
+
 # AdLoop credentials (should be in ~/.adloop/, not in repo)
 credentials.json
 token.json
