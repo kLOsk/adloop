@@ -1,4 +1,4 @@
-Gerar relatório semanal de performance do Google Ads + GA4 e salvar no Diesel BI.
+Gerar relatório semanal COMPLETO de performance do Google Ads + GA4 e salvar no Diesel BI.
 
 ## 1. Puxar dados (adloop MCP)
 
@@ -19,42 +19,103 @@ Gerar relatório semanal de performance do Google Ads + GA4 e salvar no Diesel B
 - Calcular gasto desperdiçado em termos irrelevantes
 - Considerar GDPR antes de diagnosticar tracking como quebrado
 
-## 3. Gerar relatório
+## 3. Gerar relatório (OBRIGATÓRIO: seguir esta estrutura)
 
-Usar o padrão conciso: bullets, tabelas pequenas, ações claras.
-Estrutura: Resumo → Campanhas → Keywords → Desperdício → Ações
+O body do relatório DEVE conter TODAS estas seções em markdown. Não resumir, não pular seções.
+
+```markdown
+# Disbra — Relatório Semanal {ANO}-W{SEMANA}
+
+> {data_inicio} a {data_fim} | Gerado via Claude + AdLoop
+
+## Resumo
+
+- **Gasto:** R$ X | **Conversões:** X | **CPA:** R$ X
+- **Clicks:** X | **CTR:** X% | **CPC médio:** R$ X
+- vs semana anterior: gasto {+/-X%}, conversões {+/-X%}, CPA {+/-X%}
+
+## Campanhas
+
+| Campanha | Status | Gasto | Conv | CPA | CTR | vs Anterior |
+|----------|--------|-------|------|-----|-----|-------------|
+(todas as campanhas com dados)
+
+**Observações:**
+- (destaques, problemas, oportunidades por campanha)
+
+## Top Keywords
+
+| Keyword | Match | Gasto | Conv | CPA | QS | Tendência |
+|---------|-------|-------|------|-----|----|-----------|
+(top 10 por gasto)
+
+**Problemas:**
+- (keywords com QS baixo, CPA alto, etc)
+
+## Search Terms — Desperdício
+
+**R$ X em Y termos sem conversão**
+
+| Termo | Clicks | Gasto | Problema |
+|-------|--------|-------|----------|
+(todos os termos com gasto > R$5 e 0 conversões)
+
+**Termos promissores:**
+
+| Termo | Clicks | Conv | Taxa |
+|-------|--------|------|------|
+(termos com boa taxa de conversão)
+
+## GDPR Gap
+
+| Ads Clicks | GA4 Sessions | Ratio | Status |
+|-----------|-------------|-------|--------|
+(dados do analyze_campaign_conversions)
+
+## Diagnóstico
+
+### O que está bom
+- (bullets)
+
+### O que precisa de atenção
+- (bullets com números)
+
+## Ações Recomendadas
+
+| # | Ação | Prioridade | Impacto Estimado |
+|---|------|-----------|-----------------|
+(todas as ações, numeradas, priorizadas)
+```
 
 ## 4. Salvar no Diesel BI (diesel-bi MCP)
 
-Chamar as 3 tools do Diesel BI MCP com company_slug "disbra":
+Chamar as 3 tools com company_slug "disbra":
 
 ### 4a. salvar_relatorio
-```
-report_type: "weekly"
-title: "Relatório Semanal — {ANO}-W{SEMANA}"
-period_start / period_end: datas da semana
-body: markdown completo do relatório
-summary: 2-3 frases do resumo executivo
-kpis: { spend, conversions, cpa, clicks, ctr, cpc }
-```
+- report_type: "weekly"
+- title: "Relatório Semanal — {ANO}-W{SEMANA}"
+- period_start / period_end: datas da semana
+- body: **O MARKDOWN COMPLETO das seções acima. NÃO resumir.**
+- summary: 2-3 frases do resumo executivo (para o card na listagem)
+- kpis: { "spend": X, "conversions": X, "cpa": X, "clicks": X, "ctr": X, "cpc": X }
+- source: "adloop"
+- status: "published"
 
 ### 4b. salvar_insights (com o report_id retornado)
-Cada ação recomendada vira um insight:
-```
-category: "negative_keywords" | "budget" | "bidding" | "ad_copy" | "campaign_structure" | "tracking"
-priority: "high" | "medium" | "low"
-title: descrição curta
-description: detalhe
-impact: estimativa de economia/melhoria
-```
+Cada ação recomendada da seção "Ações Recomendadas" vira um insight separado:
+- category: "negative_keywords" | "budget" | "bidding" | "ad_copy" | "campaign_structure" | "tracking" | "landing_page" | "general"
+- priority: "high" | "medium" | "low"
+- title: descrição curta da ação
+- description: detalhe com números (ex: "Sol Diesel gastou R$17 sem conversão em 30 dias")
+- impact: estimativa (ex: "~R$360/ano economia", "+15% CTR", "evita R$500/mês desperdício")
 
 ### 4c. salvar_kpi_snapshot
-```
-period_type: "weekly"
-spend, clicks, impressions, conversions, cpa, ctr, cpc
-waste_amount: total gasto em termos sem conversão
-insights_count: quantos insights gerados
-```
+- period_type: "weekly"
+- period_start / period_end
+- spend, clicks, impressions, conversions, cpa, ctr, cpc
+- top_campaign: nome da campanha com menor CPA
+- waste_amount: total gasto em termos sem conversão
+- insights_count: quantos insights gerados
 
 ## 5. Também salvar .md local
 
