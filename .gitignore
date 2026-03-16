@@ -44,3 +44,4 @@ token.json
 .pytest_cache/
 htmlcov/
 .coverage
+.playwright-mcp/
