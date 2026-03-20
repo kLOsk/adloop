@@ -6,10 +6,36 @@ Every write tool returns a preview/plan. Nothing executes until
 
 from __future__ import annotations
 
+import hashlib
+import struct
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from adloop.config import AdLoopConfig
+
+
+_STRUCTURED_SNIPPET_HEADERS = {
+    "Amenities",
+    "Brands",
+    "Courses",
+    "Degree programs",
+    "Destinations",
+    "Featured Hotels",
+    "Insurance coverage",
+    "Models",
+    "Neighborhoods",
+    "Services",
+    "Shows",
+    "Styles",
+    "Types",
+}
+
+_VALID_IMAGE_MIME_TYPES = {
+    "image/gif": "IMAGE_GIF",
+    "image/jpeg": "IMAGE_JPEG",
+    "image/png": "IMAGE_PNG",
+}
 
 
 # ---------------------------------------------------------------------------
@@ -56,6 +82,104 @@ def _validate_urls(urls: list[str], timeout: int = 10) -> dict[str, str | None]:
             results[url] = str(e)
 
     return results
+
+
+def _normalize_display_network_setting(
+    display_network_enabled: bool | None,
+    display_expansion_enabled: bool | None,
+) -> tuple[bool | None, list[str]]:
+    """Normalize the deprecated alias to one canonical display network flag."""
+    errors = []
+    if (
+        display_network_enabled is not None
+        and display_expansion_enabled is not None
+        and display_network_enabled != display_expansion_enabled
+    ):
+        errors.append(
+            "display_network_enabled and display_expansion_enabled must match "
+            "when both are provided"
+        )
+    if errors:
+        return None, errors
+    if display_network_enabled is not None:
+        return display_network_enabled, []
+    return display_expansion_enabled, []
+
+
+def _parse_image_metadata(path_str: str) -> dict[str, object]:
+    """Validate a local image file and return metadata used for asset creation."""
+    path = Path(path_str).expanduser()
+    if not path.exists():
+        raise ValueError(f"Image file does not exist: {path_str}")
+    if not path.is_file():
+        raise ValueError(f"Image path is not a file: {path_str}")
+
+    data = path.read_bytes()
+    mime_type, width, height = _detect_image_type_and_size(data)
+    return {
+        "path": str(path),
+        "name": _build_image_asset_name(path, data),
+        "mime_type": mime_type,
+        "width": width,
+        "height": height,
+    }
+
+
+def _build_image_asset_name(path: Path, data: bytes) -> str:
+    """Build a deterministic asset name required by Google Ads image assets."""
+    digest = hashlib.sha1(data).hexdigest()[:12]
+    stem = path.stem.strip() or "image"
+    return f"AdLoop image {stem[:80]} {digest}"
+
+
+def _detect_image_type_and_size(data: bytes) -> tuple[str, int, int]:
+    """Return MIME type plus width/height for supported local image files."""
+    if data.startswith(b"\x89PNG\r\n\x1a\n") and len(data) >= 24:
+        width, height = struct.unpack(">II", data[16:24])
+        return "image/png", width, height
+
+    if data[:6] in (b"GIF87a", b"GIF89a") and len(data) >= 10:
+        width, height = struct.unpack("<HH", data[6:10])
+        return "image/gif", width, height
+
+    if data.startswith(b"\xff\xd8"):
+        index = 2
+        while index + 1 < len(data):
+            if data[index] != 0xFF:
+                index += 1
+                continue
+            while index < len(data) and data[index] == 0xFF:
+                index += 1
+            if index >= len(data):
+                break
+
+            marker = data[index]
+            index += 1
+            if marker in {0xD8, 0xD9}:
+                continue
+            if index + 1 >= len(data):
+                break
+
+            segment_length = struct.unpack(">H", data[index:index + 2])[0]
+            if segment_length < 2 or index + segment_length > len(data):
+                break
+
+            if marker in {
+                0xC0, 0xC1, 0xC2, 0xC3,
+                0xC5, 0xC6, 0xC7,
+                0xC9, 0xCA, 0xCB,
+                0xCD, 0xCE, 0xCF,
+            }:
+                if index + 7 > len(data):
+                    break
+                height, width = struct.unpack(">HH", data[index + 3:index + 7])
+                return "image/jpeg", width, height
+
+            index += segment_length
+
+    raise ValueError(
+        "Unsupported image type. Use a local PNG, JPEG, or GIF file."
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -217,6 +341,61 @@ def add_negative_keywords(
     return plan.to_preview()
 
 
+def update_ad_group(
+    config: AdLoopConfig,
+    *,
+    customer_id: str = "",
+    ad_group_id: str = "",
+    ad_group_name: str = "",
+    max_cpc: float = 0,
+) -> dict:
+    """Draft an ad group update for name and manual CPC bid."""
+    from adloop.safety.guards import SafetyViolation, check_blocked_operation
+    from adloop.safety.preview import ChangePlan, store_plan
+
+    try:
+        check_blocked_operation("update_ad_group", config.safety)
+    except SafetyViolation as e:
+        return {"error": str(e)}
+
+    errors = []
+    if not ad_group_id:
+        errors.append("ad_group_id is required")
+    if max_cpc < 0:
+        errors.append("max_cpc cannot be negative")
+    if max_cpc:
+        uses_manual_cpc = _ad_group_uses_manual_cpc(config, customer_id, ad_group_id)
+        if uses_manual_cpc is False:
+            errors.append("max_cpc requires an ad group in a MANUAL_CPC campaign")
+        elif uses_manual_cpc is None:
+            errors.append(
+                f"Unable to verify bidding strategy for ad_group_id '{ad_group_id}'"
+            )
+
+    has_any_change = bool(ad_group_name.strip() or max_cpc)
+    if not has_any_change:
+        errors.append("No changes specified — provide ad_group_name and/or max_cpc")
+
+    if errors:
+        return {"error": "Validation failed", "details": errors}
+
+    changes: dict = {"ad_group_id": ad_group_id}
+    if ad_group_name.strip():
+        changes["ad_group_name"] = ad_group_name.strip()
+    if max_cpc:
+        changes["max_cpc"] = max_cpc
+
+    plan = ChangePlan(
+        operation="update_ad_group",
+        entity_type="ad_group",
+        entity_id=ad_group_id,
+        customer_id=customer_id,
+        changes=changes,
+    )
+    store_plan(plan)
+    return plan.to_preview()
+
+
 def pause_entity(
     config: AdLoopConfig,
     *,
@@ -304,6 +483,10 @@ def draft_campaign(
     keywords: list[dict] | None = None,
     geo_target_ids: list[str] | None = None,
     language_ids: list[str] | None = None,
+    search_partners_enabled: bool = False,
+    display_network_enabled: bool | None = None,
+    display_expansion_enabled: bool | None = None,
+    max_cpc: float = 0,
 ) -> dict:
     """Draft a full campaign structure — returns preview, does NOT execute.
 
@@ -328,6 +511,15 @@ def draft_campaign(
     except SafetyViolation as e:
         return {"error": str(e)}
 
+    normalized_display_network_enabled, alias_errors = _normalize_display_network_setting(
+        display_network_enabled,
+        display_expansion_enabled,
+    )
+    if alias_errors:
+        return {"error": "Validation failed", "details": alias_errors}
+    if normalized_display_network_enabled is None:
+        normalized_display_network_enabled = False
+
     errors, warnings = _validate_campaign(
         config,
         campaign_name=campaign_name,
@@ -340,6 +532,9 @@ def draft_campaign(
         geo_target_ids=geo_target_ids,
         language_ids=language_ids,
         customer_id=customer_id,
+        search_partners_enabled=search_partners_enabled,
+        display_network_enabled=normalized_display_network_enabled,
+        max_cpc=max_cpc,
     )
     if errors:
         return {"error": "Validation failed", "details": errors}
@@ -364,6 +559,9 @@ def draft_campaign(
             "keywords": keywords,
             "geo_target_ids": geo_target_ids or [],
             "language_ids": language_ids or [],
+            "search_partners_enabled": search_partners_enabled,
+            "display_network_enabled": normalized_display_network_enabled,
+            "max_cpc": max_cpc if max_cpc else None,
         },
     )
     store_plan(plan)
@@ -444,6 +642,10 @@ def update_campaign(
     daily_budget: float = 0,
     geo_target_ids: list[str] | None = None,
     language_ids: list[str] | None = None,
+    search_partners_enabled: bool | None = None,
+    display_network_enabled: bool | None = None,
+    display_expansion_enabled: bool | None = None,
+    max_cpc: float = 0,
 ) -> dict:
     """Draft an update to an existing campaign — returns preview, does NOT execute.
 
@@ -465,6 +667,12 @@ def update_campaign(
     errors = []
     warnings = []
 
+    normalized_display_network_enabled, alias_errors = _normalize_display_network_setting(
+        display_network_enabled,
+        display_expansion_enabled,
+    )
+    errors.extend(alias_errors)
+
     if not campaign_id:
         errors.append("campaign_id is required")
 
@@ -478,6 +686,8 @@ def update_campaign(
         errors.append("target_cpa is required when bidding_strategy is TARGET_CPA")
     if bs == "TARGET_ROAS" and not target_roas:
         errors.append("target_roas is required when bidding_strategy is TARGET_ROAS")
+    if max_cpc < 0:
+        errors.append("max_cpc cannot be negative")
 
     if daily_budget and daily_budget <= 0:
         errors.append("daily_budget must be greater than 0")
@@ -492,9 +702,21 @@ def update_campaign(
         errors.append("geo_target_ids cannot be empty — provide at least one geo target")
     if language_ids is not None and len(language_ids) == 0:
         errors.append("language_ids cannot be empty — provide at least one language")
+    if max_cpc:
+        strategy_for_cap = bs or _campaign_bidding_strategy(config, customer_id, campaign_id)
+        if strategy_for_cap is None:
+            errors.append("campaign_id was not found")
+        elif strategy_for_cap != "TARGET_SPEND":
+            errors.append("max_cpc requires TARGET_SPEND bidding_strategy")
 
     has_any_change = any([
-        bs, daily_budget, geo_target_ids is not None, language_ids is not None,
+        bs,
+        daily_budget,
+        geo_target_ids is not None,
+        language_ids is not None,
+        search_partners_enabled is not None,
+        normalized_display_network_enabled is not None,
+        max_cpc,
     ])
     if not has_any_change:
         errors.append("No changes specified — provide at least one parameter to update")
@@ -529,6 +751,12 @@ def update_campaign(
         changes["geo_target_ids"] = geo_target_ids
     if language_ids is not None:
         changes["language_ids"] = language_ids
+    if search_partners_enabled is not None:
+        changes["search_partners_enabled"] = search_partners_enabled
+    if normalized_display_network_enabled is not None:
+        changes["display_network_enabled"] = normalized_display_network_enabled
+    if max_cpc:
+        changes["max_cpc"] = max_cpc
 
     plan = ChangePlan(
         operation="update_campaign",
@@ -542,6 +770,110 @@ def update_campaign(
     if warnings:
         preview["warnings"] = warnings
     return preview
+
+
+def draft_callouts(
+    config: AdLoopConfig,
+    *,
+    customer_id: str = "",
+    campaign_id: str = "",
+    callouts: list[str] | None = None,
+) -> dict:
+    """Draft campaign callout assets."""
+    from adloop.safety.guards import SafetyViolation, check_blocked_operation
+    from adloop.safety.preview import ChangePlan, store_plan
+
+    try:
+        check_blocked_operation("create_callouts", config.safety)
+    except SafetyViolation as e:
+        return {"error": str(e)}
+
+    validated_callouts, errors = _validate_callouts(campaign_id, callouts or [])
+    if errors:
+        return {"error": "Validation failed", "details": errors}
+
+    plan = ChangePlan(
+        operation="create_callouts",
+        entity_type="campaign_asset",
+        entity_id=campaign_id,
+        customer_id=customer_id,
+        changes={
+            "campaign_id": campaign_id,
+            "callouts": validated_callouts,
+        },
+    )
+    store_plan(plan)
+    return plan.to_preview()
+
+
+def draft_structured_snippets(
+    config: AdLoopConfig,
+    *,
+    customer_id: str = "",
+    campaign_id: str = "",
+    snippets: list[dict] | None = None,
+) -> dict:
+    """Draft campaign structured snippet assets."""
+    from adloop.safety.guards import SafetyViolation, check_blocked_operation
+    from adloop.safety.preview import ChangePlan, store_plan
+
+    try:
+        check_blocked_operation("create_structured_snippets", config.safety)
+    except SafetyViolation as e:
+        return {"error": str(e)}
+
+    validated_snippets, errors = _validate_structured_snippets(
+        campaign_id, snippets or []
+    )
+    if errors:
+        return {"error": "Validation failed", "details": errors}
+
+    plan = ChangePlan(
+        operation="create_structured_snippets",
+        entity_type="campaign_asset",
+        entity_id=campaign_id,
+        customer_id=customer_id,
+        changes={
+            "campaign_id": campaign_id,
+            "snippets": validated_snippets,
+        },
+    )
+    store_plan(plan)
+    return plan.to_preview()
+
+
+def draft_image_assets(
+    config: AdLoopConfig,
+    *,
+    customer_id: str = "",
+    campaign_id: str = "",
+    image_paths: list[str] | None = None,
+) -> dict:
+    """Draft campaign image assets from local files."""
+    from adloop.safety.guards import SafetyViolation, check_blocked_operation
+    from adloop.safety.preview import ChangePlan, store_plan
+
+    try:
+        check_blocked_operation("create_image_assets", config.safety)
+    except SafetyViolation as e:
+        return {"error": str(e)}
+
+    validated_images, errors = _validate_image_assets(campaign_id, image_paths or [])
+    if errors:
+        return {"error": "Validation failed", "details": errors}
+
+    plan = ChangePlan(
+        operation="create_image_assets",
+        entity_type="campaign_asset",
+        entity_id=campaign_id,
+        customer_id=customer_id,
+        changes={
+            "campaign_id": campaign_id,
+            "images": validated_images,
+        },
+    )
+    store_plan(plan)
+    return plan.to_preview()
 
 
 def draft_sitelinks(
@@ -755,6 +1087,137 @@ _SMART_BIDDING_STRATEGIES = {
 }
 
 
+def _campaign_uses_manual_cpc(
+    config: AdLoopConfig, customer_id: str, campaign_id: str
+) -> bool | None:
+    """Return True when the campaign exists and uses MANUAL_CPC."""
+    bidding_strategy = _campaign_bidding_strategy(config, customer_id, campaign_id)
+    if bidding_strategy is None:
+        return None
+    return bidding_strategy == "MANUAL_CPC"
+
+
+def _campaign_bidding_strategy(
+    config: AdLoopConfig, customer_id: str, campaign_id: str
+) -> str | None:
+    """Return the bidding strategy type for the campaign, if it exists."""
+    from adloop.ads.gaql import execute_query
+
+    query = f"""
+        SELECT campaign.bidding_strategy_type
+        FROM campaign
+        WHERE campaign.id = {campaign_id}
+        LIMIT 1
+    """
+    rows = execute_query(config, customer_id, query)
+    if not rows:
+        return None
+    return rows[0].get("campaign.bidding_strategy_type")
+
+
+def _ad_group_uses_manual_cpc(
+    config: AdLoopConfig, customer_id: str, ad_group_id: str
+) -> bool | None:
+    """Return True when the ad group exists in a MANUAL_CPC campaign."""
+    from adloop.ads.gaql import execute_query
+
+    query = f"""
+        SELECT campaign.bidding_strategy_type
+        FROM ad_group
+        WHERE ad_group.id = {ad_group_id}
+        LIMIT 1
+    """
+    rows = execute_query(config, customer_id, query)
+    if not rows:
+        return None
+    return rows[0].get("campaign.bidding_strategy_type") == "MANUAL_CPC"
+
+
+def _validate_callouts(
+    campaign_id: str, callouts: list[str]
+) -> tuple[list[str], list[str]]:
+    errors = []
+    validated = []
+
+    if not campaign_id:
+        errors.append("campaign_id is required")
+    if not callouts:
+        errors.append("At least one callout is required")
+
+    for index, callout in enumerate(callouts):
+        text = callout.strip()
+        if not text:
+            errors.append(f"Callout {index + 1}: text is required")
+        elif len(text) > 25:
+            errors.append(
+                f"Callout {index + 1}: '{text}' is {len(text)} chars (max 25)"
+            )
+        else:
+            validated.append(text)
+
+    return validated, errors
+
+
+def _validate_structured_snippets(
+    campaign_id: str, snippets: list[dict]
+) -> tuple[list[dict], list[str]]:
+    errors = []
+    validated = []
+
+    if not campaign_id:
+        errors.append("campaign_id is required")
+    if not snippets:
+        errors.append("At least one structured snippet is required")
+
+    for index, snippet in enumerate(snippets):
+        header = snippet.get("header", "").strip()
+        values = [value.strip() for value in snippet.get("values", [])]
+
+        if header not in _STRUCTURED_SNIPPET_HEADERS:
+            errors.append(
+                f"Structured snippet {index + 1}: header must be one of "
+                f"{sorted(_STRUCTURED_SNIPPET_HEADERS)}"
+            )
+        if len(values) < 3 or len(values) > 10:
+            errors.append(
+                f"Structured snippet {index + 1}: values must contain 3-10 items"
+            )
+        for value_index, value in enumerate(values):
+            if not value:
+                errors.append(
+                    f"Structured snippet {index + 1}: value {value_index + 1} is required"
+                )
+            elif len(value) > 25:
+                errors.append(
+                    f"Structured snippet {index + 1}: value '{value}' is "
+                    f"{len(value)} chars (max 25)"
+                )
+
+        validated.append({"header": header, "values": values})
+
+    return validated, errors
+
+
+def _validate_image_assets(
+    campaign_id: str, image_paths: list[str]
+) -> tuple[list[dict[str, object]], list[str]]:
+    errors = []
+    validated = []
+
+    if not campaign_id:
+        errors.append("campaign_id is required")
+    if not image_paths:
+        errors.append("At least one image path is required")
+
+    for index, image_path in enumerate(image_paths):
+        try:
+            validated.append(_parse_image_metadata(image_path))
+        except ValueError as exc:
+            errors.append(f"Image {index + 1}: {exc}")
+
+    return validated, errors
+
+
 def _check_broad_match_safety(
     config: AdLoopConfig,
     customer_id: str,
@@ -851,6 +1314,9 @@ def _validate_campaign(
     geo_target_ids: list[str] | None,
     language_ids: list[str] | None,
     customer_id: str = "",
+    search_partners_enabled: bool = False,
+    display_network_enabled: bool = False,
+    max_cpc: float = 0,
 ) -> tuple[list[str], list[str]]:
     """Validate campaign draft inputs. Returns (errors, warnings)."""
     errors = []
@@ -888,6 +1354,14 @@ def _validate_campaign(
             f"channel_type must be one of {sorted(_VALID_CHANNEL_TYPES)}, "
             f"got '{channel_type}'"
         )
+    if ct != "SEARCH" and search_partners_enabled:
+        errors.append("search_partners_enabled is only supported for SEARCH campaigns")
+    if ct != "SEARCH" and display_network_enabled:
+        errors.append("display_network_enabled is only supported for SEARCH campaigns")
+    if max_cpc < 0:
+        errors.append("max_cpc cannot be negative")
+    if max_cpc and bs not in {"MANUAL_CPC", "TARGET_SPEND"}:
+        errors.append("max_cpc requires MANUAL_CPC or TARGET_SPEND bidding_strategy")
 
     if keywords:
         has_broad = any(
@@ -1128,12 +1602,16 @@ def _execute_plan(config: AdLoopConfig, plan: object) -> dict:
         "create_campaign": _apply_create_campaign,
         "create_ad_group": _apply_create_ad_group,
         "update_campaign": _apply_update_campaign,
+        "update_ad_group": _apply_update_ad_group,
         "create_responsive_search_ad": _apply_create_rsa,
         "add_keywords": _apply_add_keywords,
         "add_negative_keywords": _apply_add_negative_keywords,
         "pause_entity": _apply_status_change,
         "enable_entity": _apply_status_change,
         "remove_entity": _apply_remove,
+        "create_callouts": _apply_create_callouts,
+        "create_structured_snippets": _apply_create_structured_snippets,
+        "create_image_assets": _apply_create_image_assets,
         "create_sitelinks": _apply_create_sitelinks,
     }
 
@@ -1154,6 +1632,28 @@ def _execute_plan(config: AdLoopConfig, plan: object) -> dict:
         return handler(client, cid, plan.entity_type, plan.entity_id)
 
     return handler(client, cid, plan.changes)
+
+
+def _apply_update_ad_group(client: object, cid: str, changes: dict) -> dict:
+    """Update an ad group's name and/or manual CPC bid."""
+    from google.protobuf import field_mask_pb2
+
+    service = client.get_service("AdGroupService")
+    operation = client.get_type("AdGroupOperation")
+    ad_group = operation.update
+    ad_group.resource_name = service.ad_group_path(cid, changes["ad_group_id"])
+
+    field_paths = []
+    if changes.get("ad_group_name"):
+        ad_group.name = changes["ad_group_name"]
+        field_paths.append("name")
+    if changes.get("max_cpc"):
+        ad_group.cpc_bid_micros = int(changes["max_cpc"] * 1_000_000)
+        field_paths.append("cpc_bid_micros")
+
+    operation.update_mask = field_mask_pb2.FieldMask(paths=field_paths)
+    response = service.mutate_ad_groups(customer_id=cid, operations=[operation])
+    return {"resource_name": response.results[0].resource_name}
 
 
 def _apply_create_campaign(client: object, cid: str, changes: dict) -> dict:
@@ -1207,12 +1707,20 @@ def _apply_create_campaign(client: object, cid: str, changes: dict) -> dict:
         campaign.maximize_conversion_value.target_roas = changes["target_roas"]
     elif bs == "TARGET_SPEND":
         campaign.target_spend.target_spend_micros = 0
+        if changes.get("max_cpc"):
+            campaign.target_spend.cpc_bid_ceiling_micros = int(
+                changes["max_cpc"] * 1_000_000
+            )
     elif bs == "MANUAL_CPC":
         campaign.manual_cpc.enhanced_cpc_enabled = False
 
     campaign.network_settings.target_google_search = True
-    campaign.network_settings.target_search_network = False
-    campaign.network_settings.target_content_network = False
+    campaign.network_settings.target_search_network = changes.get(
+        "search_partners_enabled", False
+    )
+    campaign.network_settings.target_content_network = changes.get(
+        "display_network_enabled", False
+    )
 
     # EU political advertising declaration — required for campaigns that may
     # serve in EU countries. This is an ENUM, not a bool. Value 3 means
@@ -1232,6 +1740,8 @@ def _apply_create_campaign(client: object, cid: str, changes: dict) -> dict:
     ad_group.campaign = campaign_service.campaign_path(cid, "-2")
     ad_group.status = client.enums.AdGroupStatusEnum.ENABLED
     ad_group.type_ = client.enums.AdGroupTypeEnum.SEARCH_STANDARD
+    if bs == "MANUAL_CPC" and changes.get("max_cpc"):
+        ad_group.cpc_bid_micros = int(changes["max_cpc"] * 1_000_000)
     operations.append(ag_op)
 
     # 4. Keywords (reference ad_group -3)
@@ -1353,9 +1863,16 @@ def _apply_update_campaign(client: object, cid: str, changes: dict) -> dict:
     campaign_id = changes["campaign_id"]
     resource_name = campaign_service.campaign_path(cid, campaign_id)
 
-    # Bid strategy change
+    # Bid strategy and campaign-level setting changes
     bs = changes.get("bidding_strategy")
-    if bs:
+    search_partners_enabled = changes.get("search_partners_enabled")
+    display_network_enabled = changes.get("display_network_enabled")
+    if (
+        bs
+        or search_partners_enabled is not None
+        or display_network_enabled is not None
+        or changes.get("max_cpc")
+    ):
         campaign_op = client.get_type("MutateOperation")
         campaign = campaign_op.campaign_operation.update
         campaign.resource_name = resource_name
@@ -1388,6 +1905,19 @@ def _apply_update_campaign(client: object, cid: str, changes: dict) -> dict:
         elif bs == "MANUAL_CPC":
             campaign.manual_cpc.enhanced_cpc_enabled = False
             field_paths.append("manual_cpc.enhanced_cpc_enabled")
+
+        if changes.get("max_cpc"):
+            campaign.target_spend.cpc_bid_ceiling_micros = int(
+                changes["max_cpc"] * 1_000_000
+            )
+            field_paths.append("target_spend.cpc_bid_ceiling_micros")
+
+        if search_partners_enabled is not None:
+            campaign.network_settings.target_search_network = search_partners_enabled
+            field_paths.append("network_settings.target_search_network")
+        if display_network_enabled is not None:
+            campaign.network_settings.target_content_network = display_network_enabled
+            field_paths.append("network_settings.target_content_network")
 
         if field_paths:
             campaign_op.campaign_operation.update_mask.CopyFrom(
@@ -1752,36 +2282,32 @@ def _apply_status_change(
     return {"resource_name": response.results[0].resource_name}
 
 
-def _apply_create_sitelinks(client: object, cid: str, changes: dict) -> dict:
-    """Create sitelink assets and link them to a campaign."""
+def _apply_campaign_assets(
+    client: object,
+    cid: str,
+    campaign_id: str,
+    assets: list[dict],
+    field_type: object,
+    populate_asset: object,
+) -> dict:
+    """Create assets and link them to a campaign via CampaignAsset."""
     asset_service = client.get_service("AssetService")
-    campaign_asset_service = client.get_service("CampaignAssetService")
     googleads_service = client.get_service("GoogleAdsService")
-
-    campaign_id = changes["campaign_id"]
-    sitelinks = changes["sitelinks"]
     operations = []
 
-    # Create Asset resources (one per sitelink) with temp IDs starting at -1
-    for i, sl in enumerate(sitelinks):
+    for i, payload in enumerate(assets):
         op = client.get_type("MutateOperation")
         asset = op.asset_operation.create
         asset.resource_name = asset_service.asset_path(cid, str(-(i + 1)))
-        asset.sitelink_asset.link_text = sl["link_text"]
-        asset.final_urls.append(sl["final_url"])
-        if sl.get("description1"):
-            asset.sitelink_asset.description1 = sl["description1"]
-        if sl.get("description2"):
-            asset.sitelink_asset.description2 = sl["description2"]
+        populate_asset(asset, payload)
         operations.append(op)
 
-    # Link each asset to the campaign
-    for i in range(len(sitelinks)):
+    for i in range(len(assets)):
         op = client.get_type("MutateOperation")
         ca = op.campaign_asset_operation.create
         ca.asset = asset_service.asset_path(cid, str(-(i + 1)))
         ca.campaign = googleads_service.campaign_path(cid, campaign_id)
-        ca.field_type = client.enums.AssetFieldTypeEnum.SITELINK
+        ca.field_type = field_type
         operations.append(op)
 
     response = googleads_service.mutate(
@@ -1789,7 +2315,7 @@ def _apply_create_sitelinks(client: object, cid: str, changes: dict) -> dict:
     )
 
     results = {"assets": [], "campaign_assets": []}
-    num_sitelinks = len(sitelinks)
+    num_assets = len(assets)
     for i, resp in enumerate(response.mutate_operation_responses):
         resource = None
         if resp.asset_result.resource_name:
@@ -1798,9 +2324,90 @@ def _apply_create_sitelinks(client: object, cid: str, changes: dict) -> dict:
             resource = resp.campaign_asset_result.resource_name
 
         if resource:
-            if i < num_sitelinks:
+            if i < num_assets:
                 results["assets"].append(resource)
             else:
                 results["campaign_assets"].append(resource)
 
     return results
+
+
+def _apply_create_callouts(client: object, cid: str, changes: dict) -> dict:
+    """Create callout assets and link them to a campaign."""
+
+    def populate(asset: object, payload: dict) -> None:
+        asset.callout_asset.callout_text = payload["callout_text"]
+
+    assets = [{"callout_text": text} for text in changes["callouts"]]
+    return _apply_campaign_assets(
+        client,
+        cid,
+        changes["campaign_id"],
+        assets,
+        client.enums.AssetFieldTypeEnum.CALLOUT,
+        populate,
+    )
+
+
+def _apply_create_structured_snippets(
+    client: object, cid: str, changes: dict
+) -> dict:
+    """Create structured snippet assets and link them to a campaign."""
+
+    def populate(asset: object, payload: dict) -> None:
+        asset.structured_snippet_asset.header = payload["header"]
+        asset.structured_snippet_asset.values.extend(payload["values"])
+
+    return _apply_campaign_assets(
+        client,
+        cid,
+        changes["campaign_id"],
+        changes["snippets"],
+        client.enums.AssetFieldTypeEnum.STRUCTURED_SNIPPET,
+        populate,
+    )
+
+
+def _apply_create_image_assets(client: object, cid: str, changes: dict) -> dict:
+    """Create image assets from local files and link them to a campaign."""
+
+    def populate(asset: object, payload: dict) -> None:
+        image_path = Path(str(payload["path"]))
+        image_bytes = image_path.read_bytes()
+        mime_type_name = _VALID_IMAGE_MIME_TYPES[str(payload["mime_type"])]
+        asset.name = str(payload.get("name") or _build_image_asset_name(image_path, image_bytes))
+        asset.type_ = client.enums.AssetTypeEnum.IMAGE
+        asset.image_asset.data = image_bytes
+        asset.image_asset.mime_type = getattr(client.enums.MimeTypeEnum, mime_type_name)
+        asset.image_asset.full_size.width_pixels = int(payload["width"])
+        asset.image_asset.full_size.height_pixels = int(payload["height"])
+
+    return _apply_campaign_assets(
+        client,
+        cid,
+        changes["campaign_id"],
+        changes["images"],
+        client.enums.AssetFieldTypeEnum.AD_IMAGE,
+        populate,
+    )
+
+
+def _apply_create_sitelinks(client: object, cid: str, changes: dict) -> dict:
+    """Create sitelink assets and link them to a campaign."""
+
+    def populate(asset: object, payload: dict) -> None:
+        asset.sitelink_asset.link_text = payload["link_text"]
+        asset.final_urls.append(payload["final_url"])
+        if payload.get("description1"):
+            asset.sitelink_asset.description1 = payload["description1"]
+        if payload.get("description2"):
+            asset.sitelink_asset.description2 = payload["description2"]
+
+    return _apply_campaign_assets(
+        client,
+        cid,
+        changes["campaign_id"],
+        changes["sitelinks"],
+        client.enums.AssetFieldTypeEnum.SITELINK,
+        populate,
+    )
