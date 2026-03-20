@@ -26,6 +26,61 @@ mcp = FastMCP(
 _config = load_config()
 
 
+def _structured_error(fn_name: str, exc: Exception) -> dict:
+    """Translate common auth failures into actionable structured errors."""
+    err = str(exc)
+    err_lower = err.lower()
+
+    if "developer_token_not_approved" in err_lower or "only approved for use with test accounts" in err_lower:
+        return {
+            "error": (
+                "Google Ads authorization failed — developer token is not "
+                "approved for production accounts."
+            ),
+            "hint": (
+                "This developer token can only access Google Ads test accounts. "
+                "Apply for Basic or Standard access in the Google Ads API Center, "
+                "or switch AdLoop to a test account."
+            ),
+            "auth_error": "DEVELOPER_TOKEN_NOT_APPROVED",
+        }
+
+    if "developer_token_invalid" in err_lower or "developer token is not valid" in err_lower:
+        return {
+            "error": "Google Ads authentication failed — developer token is invalid.",
+            "hint": (
+                "Update `ads.developer_token` in `~/.adloop/config.yaml` with "
+                "the token from your Google Ads manager account API Center. "
+                "OAuth is working if GA4 tools succeed."
+            ),
+            "auth_error": "DEVELOPER_TOKEN_INVALID",
+        }
+
+    if "invalid_grant" in err_lower or "revoked" in err_lower:
+        return {
+            "error": "Authentication failed — OAuth token expired or revoked.",
+            "hint": (
+                "Delete ~/.adloop/token.json and re-run any tool to "
+                "trigger re-authorization. If this keeps happening, "
+                "publish the GCP consent screen to 'In production'."
+            ),
+            "auth_error": "INVALID_GRANT",
+        }
+
+    if "statuscode.unauthenticated" in err_lower:
+        return {
+            "error": "Authentication failed — Google rejected the request as unauthenticated.",
+            "hint": (
+                "If GA4 tools work but Ads tools fail, check `ads.developer_token`. "
+                "Otherwise delete ~/.adloop/token.json and re-run any tool to "
+                "trigger re-authorization."
+            ),
+            "details": err,
+        }
+
+    return {"error": err, "tool": fn_name}
+
+
 def _safe(fn: Callable) -> Callable:
     """Wrap a tool function so exceptions return structured error dicts."""
 
@@ -36,17 +91,7 @@ def _safe(fn: Callable) -> Callable:
         except RuntimeError as e:
             return {"error": str(e)}
         except Exception as e:
-            err = str(e).lower()
-            if "invalid_grant" in err or "revoked" in err:
-                return {
-                    "error": "Authentication failed — OAuth token expired or revoked.",
-                    "hint": (
-                        "Delete ~/.adloop/token.json and re-run any tool to "
-                        "trigger re-authorization. If this keeps happening, "
-                        "publish the GCP consent screen to 'In production'."
-                    ),
-                }
-            return {"error": str(e), "tool": fn.__name__}
+            return _structured_error(fn.__name__, e)
 
     return wrapper
 
@@ -91,8 +136,15 @@ def health_check() -> dict:
         status["ga4"] = "ok"
         status["ga4_properties"] = result.get("total_properties", 0)
     except Exception as e:
+        parsed = _structured_error("health_check", e)
         status["ga4"] = "error"
-        status["ga4_error"] = str(e)
+        status["ga4_error"] = parsed["error"]
+        if "hint" in parsed:
+            status["ga4_hint"] = parsed["hint"]
+        if "auth_error" in parsed:
+            status["ga4_auth_error"] = parsed["auth_error"]
+        if "details" in parsed:
+            status["ga4_error_details"] = parsed["details"]
 
     try:
         from adloop.ads.read import list_accounts as _ads_test
@@ -101,18 +153,21 @@ def health_check() -> dict:
         status["ads"] = "ok"
         status["ads_accounts"] = result.get("total_accounts", 0)
     except Exception as e:
+        parsed = _structured_error("health_check", e)
         status["ads"] = "error"
-        status["ads_error"] = str(e)
+        status["ads_error"] = parsed["error"]
+        if "hint" in parsed:
+            status["ads_hint"] = parsed["hint"]
+        if "auth_error" in parsed:
+            status["ads_auth_error"] = parsed["auth_error"]
+        if "details" in parsed:
+            status["ads_error_details"] = parsed["details"]
 
     if status["ga4"] == "error" or status["ads"] == "error":
-        any_error = status.get("ga4_error", "") + status.get("ads_error", "")
-        if "invalid_grant" in any_error.lower() or "revoked" in any_error.lower():
-            status["hint"] = (
-                "OAuth token expired or revoked. Delete ~/.adloop/token.json "
-                "and re-run health_check to trigger re-authorization. "
-                "To prevent recurring expiry, publish the GCP consent screen "
-                "from 'Testing' to 'In production'."
-            )
+        if status.get("ads_hint"):
+            status["hint"] = status["ads_hint"]
+        elif status.get("ga4_hint"):
+            status["hint"] = status["ga4_hint"]
 
     return status
 
@@ -468,6 +523,10 @@ def draft_campaign(
     channel_type: str = "SEARCH",
     ad_group_name: str = "",
     keywords: list[dict] | None = None,
+    search_partners_enabled: bool = False,
+    display_network_enabled: bool | None = None,
+    display_expansion_enabled: bool | None = None,
+    max_cpc: float = 0,
 ) -> dict:
     """Draft a full campaign structure — returns a PREVIEW, does NOT create anything.
 
@@ -480,6 +539,12 @@ def draft_campaign(
     target_cpa: required if bidding_strategy is TARGET_CPA (in account currency)
     target_roas: required if bidding_strategy is TARGET_ROAS
     keywords: list of {"text": "keyword", "match_type": "EXACT|PHRASE|BROAD"}
+    search_partners_enabled: include ads on Search partners
+    display_network_enabled: enable Search campaign display expansion
+    display_expansion_enabled: alias for display_network_enabled
+    max_cpc: manual CPC bid for the initial ad group when bidding_strategy is
+        MANUAL_CPC, or the Maximize Clicks CPC cap when bidding_strategy is
+        TARGET_SPEND
     geo_target_ids: REQUIRED list of geo target constant IDs
         Common: "2276" Germany, "2040" Austria, "2756" Switzerland, "2840" USA,
         "2826" UK, "2250" France. Full list: Google Ads API geo target constants.
@@ -504,6 +569,10 @@ def draft_campaign(
         keywords=keywords,
         geo_target_ids=geo_target_ids,
         language_ids=language_ids,
+        search_partners_enabled=search_partners_enabled,
+        display_network_enabled=display_network_enabled,
+        display_expansion_enabled=display_expansion_enabled,
+        max_cpc=max_cpc,
     )
 
 
@@ -518,6 +587,10 @@ def update_campaign(
     daily_budget: float = 0,
     geo_target_ids: list[str] | None = None,
     language_ids: list[str] | None = None,
+    search_partners_enabled: bool | None = None,
+    display_network_enabled: bool | None = None,
+    display_expansion_enabled: bool | None = None,
+    max_cpc: float = 0,
 ) -> dict:
     """Draft an update to an existing campaign — returns a PREVIEW, does NOT apply.
 
@@ -533,6 +606,11 @@ def update_campaign(
         "2040" Austria, "2756" Switzerland, "2840" USA, "2826" UK
     language_ids: REPLACES all language targets. Common IDs: "1001" German,
         "1000" English, "1002" French, "1004" Spanish
+    search_partners_enabled: include ads on Search partners
+    display_network_enabled: enable Search campaign display expansion
+    display_expansion_enabled: alias for display_network_enabled
+    max_cpc: Maximize Clicks CPC cap when bidding_strategy is TARGET_SPEND, or
+        when the existing campaign already uses TARGET_SPEND
 
     Call confirm_and_apply with the returned plan_id to execute.
     """
@@ -548,6 +626,10 @@ def update_campaign(
         daily_budget=daily_budget,
         geo_target_ids=geo_target_ids,
         language_ids=language_ids,
+        search_partners_enabled=search_partners_enabled,
+        display_network_enabled=display_network_enabled,
+        display_expansion_enabled=display_expansion_enabled,
+        max_cpc=max_cpc,
     )
 
 
@@ -625,6 +707,100 @@ def add_negative_keywords(
         campaign_id=campaign_id,
         keywords=keywords,
         match_type=match_type,
+    )
+
+
+@mcp.tool(annotations=_WRITE)
+@_safe
+def draft_ad_group(
+    campaign_id: str,
+    ad_group_name: str,
+    customer_id: str = "",
+    max_cpc: float = 0,
+) -> dict:
+    """Draft a paused SEARCH_STANDARD ad group in an existing campaign."""
+    from adloop.ads.write import draft_ad_group as _impl
+
+    return _impl(
+        _config,
+        customer_id=customer_id or _config.ads.customer_id,
+        campaign_id=campaign_id,
+        ad_group_name=ad_group_name,
+        max_cpc=max_cpc,
+    )
+
+
+@mcp.tool(annotations=_WRITE)
+@_safe
+def update_ad_group(
+    ad_group_id: str,
+    customer_id: str = "",
+    ad_group_name: str = "",
+    max_cpc: float = 0,
+) -> dict:
+    """Draft an ad group update for name and/or manual CPC bid."""
+    from adloop.ads.write import update_ad_group as _impl
+
+    return _impl(
+        _config,
+        customer_id=customer_id or _config.ads.customer_id,
+        ad_group_id=ad_group_id,
+        ad_group_name=ad_group_name,
+        max_cpc=max_cpc,
+    )
+
+
+@mcp.tool(annotations=_WRITE)
+@_safe
+def draft_callouts(
+    campaign_id: str,
+    callouts: list[str],
+    customer_id: str = "",
+) -> dict:
+    """Draft campaign callout assets — returns a PREVIEW."""
+    from adloop.ads.write import draft_callouts as _impl
+
+    return _impl(
+        _config,
+        customer_id=customer_id or _config.ads.customer_id,
+        campaign_id=campaign_id,
+        callouts=callouts,
+    )
+
+
+@mcp.tool(annotations=_WRITE)
+@_safe
+def draft_structured_snippets(
+    campaign_id: str,
+    snippets: list[dict],
+    customer_id: str = "",
+) -> dict:
+    """Draft campaign structured snippet assets — returns a PREVIEW."""
+    from adloop.ads.write import draft_structured_snippets as _impl
+
+    return _impl(
+        _config,
+        customer_id=customer_id or _config.ads.customer_id,
+        campaign_id=campaign_id,
+        snippets=snippets,
+    )
+
+
+@mcp.tool(annotations=_WRITE)
+@_safe
+def draft_image_assets(
+    campaign_id: str,
+    image_paths: list[str],
+    customer_id: str = "",
+) -> dict:
+    """Draft campaign image assets from local PNG, JPEG, or GIF files."""
+    from adloop.ads.write import draft_image_assets as _impl
+
+    return _impl(
+        _config,
+        customer_id=customer_id or _config.ads.customer_id,
+        campaign_id=campaign_id,
+        image_paths=image_paths,
     )
 
 

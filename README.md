@@ -42,7 +42,7 @@ Every tool exists because of an actual problem hit while running real Google Ads
 
 The best features come from real workflows. If you're using AdLoop and find yourself wishing it could do something it can't, **open an issue describing your situation** — not just "add feature X" but "I was trying to do Y and couldn't because Z." The context matters more than the request.
 
-## All 26 Tools
+## All 33 Tools
 
 > **Quick start:** `pip install adloop` or `git clone https://github.com/kLOsk/adloop.git && cd adloop && uv sync && uv run adloop init`
 
@@ -102,8 +102,14 @@ All write operations follow a **draft → preview → confirm** workflow. Nothin
 
 | Tool | What It Does |
 |------|-------------|
-| `draft_campaign` | Create a full campaign structure — budget + campaign (PAUSED) + ad group + optional keywords. Validates bidding strategy, enforces budget caps, rejects unsafe BROAD match + Manual CPC combinations. |
+| `draft_campaign` | Create a full campaign structure — budget + campaign (PAUSED) + ad group + optional keywords. Supports Search partners, display expansion, and `max_cpc` for either MANUAL_CPC initial ad-group bids or TARGET_SPEND (Maximize Clicks) CPC caps. |
+| `update_campaign` | Modify existing campaign settings — bidding, budget, geo/language targeting, Search partners, display expansion, and TARGET_SPEND (Maximize Clicks) `max_cpc` caps. |
+| `draft_ad_group` | Create a paused SEARCH_STANDARD ad group inside an existing campaign, with optional MANUAL_CPC `max_cpc`. |
+| `update_ad_group` | Update an ad group name and/or MANUAL_CPC `max_cpc`. Use `pause_entity` / `enable_entity` for ad-group status changes. |
 | `draft_responsive_search_ad` | Create RSA preview (3-15 headlines ≤30 chars, 2-4 descriptions ≤90 chars). Warns if headline/description count is below best practice. |
+| `draft_callouts` | Create campaign callout assets from 1-25 character text snippets. |
+| `draft_structured_snippets` | Create campaign structured snippet assets using official header values and 3-10 snippet values. |
+| `draft_image_assets` | Create campaign image assets from local PNG, JPEG, or GIF files. |
 | `draft_keywords` | Propose keyword additions with match types. Proactively checks bidding strategy — blocks BROAD match on Manual CPC campaigns. |
 | `add_negative_keywords` | Propose negative keywords to reduce wasted spend |
 | `pause_entity` | Pause a campaign, ad group, ad, or keyword |

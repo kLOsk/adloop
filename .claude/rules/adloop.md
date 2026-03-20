@@ -1,3 +1,6 @@
+---
+description: AdLoop MCP orchestration — Google Ads + GA4 + codebase intelligence
+---
 
 # AdLoop — AI Orchestration Rules
 
@@ -72,9 +75,14 @@ These tools call both APIs internally and return unified results with computed `
 
 | Tool | What It Does | Validation |
 |------|-------------|------------|
-| `draft_campaign` | Create full campaign structure (budget + campaign + ad group + keywords + geo/language targeting) | `campaign_name`, `daily_budget`, `bidding_strategy`, `geo_target_ids` (REQUIRED), `language_ids` (REQUIRED), keywords validated |
-| `update_campaign` | Modify existing campaign settings — bid strategy, budget, geo targets, language targets | `campaign_id` (REQUIRED), plus any of: `bidding_strategy`, `daily_budget`, `geo_target_ids`, `language_ids` |
+| `draft_campaign` | Create full campaign structure (budget + campaign + ad group + keywords + geo/language targeting) | `campaign_name`, `daily_budget`, `bidding_strategy`, `geo_target_ids` (REQUIRED), `language_ids` (REQUIRED), optional `search_partners_enabled`, `display_network_enabled`, `display_expansion_enabled`, optional `max_cpc` for MANUAL_CPC ad-group bids or TARGET_SPEND CPC caps |
+| `update_campaign` | Modify existing campaign settings — bid strategy, budget, geo targets, language targets, Search partners, display expansion | `campaign_id` (REQUIRED), plus any of: `bidding_strategy`, `daily_budget`, `geo_target_ids`, `language_ids`, `search_partners_enabled`, `display_network_enabled`, TARGET_SPEND `max_cpc` |
+| `draft_ad_group` | Create a paused SEARCH_STANDARD ad group in an existing campaign | `campaign_id`, `ad_group_name`, optional MANUAL_CPC `max_cpc` |
+| `update_ad_group` | Update ad group name and/or MANUAL_CPC `max_cpc` | `ad_group_id`, optional `ad_group_name`, optional `max_cpc` |
 | `draft_responsive_search_ad` | Create RSA preview (does NOT publish) | 3-15 headlines (≤30 chars), 2-4 descriptions (≤90 chars), final_url required, path1/path2 (≤15 chars each) |
+| `draft_callouts` | Create callout assets for a campaign (does NOT publish) | `campaign_id`, `callouts` list with 1-25 chars each |
+| `draft_structured_snippets` | Create structured snippet assets for a campaign (does NOT publish) | `campaign_id`, `snippets` list of `{header, values}` with official header values and 3-10 values |
+| `draft_image_assets` | Create image assets for a campaign from local files (does NOT publish) | `campaign_id`, `image_paths` list of local PNG/JPEG/GIF files |
 | `draft_sitelinks` | Create sitelink extensions for a campaign (does NOT publish) | `campaign_id`, `sitelinks` list of {link_text ≤25 chars, final_url, description1 ≤35 chars, description2 ≤35 chars} |
 | `draft_keywords` | Propose keyword additions (does NOT add) | Each keyword needs `text` and `match_type` (EXACT/PHRASE/BROAD) |
 | `add_negative_keywords` | Propose negative keywords (does NOT add) | `campaign_id`, keyword list, `match_type` |
@@ -92,7 +100,10 @@ These tools call both APIs internally and return unified results with computed `
 **Safety behaviors:**
 - New campaigns and RSAs are created as PAUSED — user must explicitly enable them after review.
 - `draft_campaign` REQUIRES `geo_target_ids` and `language_ids` — campaigns without targeting waste budget. The tool rejects drafts with missing targeting.
-- `draft_campaign` enforces the `max_daily_budget` safety cap, rejects BROAD match + non-Smart Bidding, and warns if budget is below 5x target CPA.
+- `draft_campaign` enforces the `max_daily_budget` safety cap, rejects BROAD match + non-Smart Bidding, warns if budget is below 5x target CPA, and interprets `max_cpc` by bidding strategy: MANUAL_CPC seeds the initial ad-group bid, TARGET_SPEND sets the Maximize Clicks CPC ceiling.
+- `display_network_enabled` is the canonical Search display-expansion flag. `display_expansion_enabled` is only a compatibility alias and should be normalized away before presenting the plan to the user.
+- `update_ad_group` is the right tool for later MANUAL_CPC bid changes. Use `update_campaign` for TARGET_SPEND (Maximize Clicks) `max_cpc` changes.
+- Ad-group pause/enable is already handled by `pause_entity` / `enable_entity` with `entity_type="ad_group"`; do not invent a separate pause tool.
 - `update_campaign` replaces geo/language targets entirely (not append). Pass the full desired list.
 - `remove_entity` is IRREVERSIBLE — always prefer `pause_entity` unless the user explicitly wants permanent removal. Removal triggers double confirmation in the safety layer.
 - `remove_entity` supports `entity_type` values: "campaign", "ad_group", "ad", "keyword", "negative_keyword", "campaign_asset". Use "negative_keyword" to remove campaign-level negative keywords. Use "campaign_asset" to remove sitelinks and other asset links from a campaign.

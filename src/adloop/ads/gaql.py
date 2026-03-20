@@ -63,6 +63,16 @@ def run_gaql(
 # ---------------------------------------------------------------------------
 
 _GAQL_ERROR_HINTS = {
+    "DEVELOPER_TOKEN_NOT_APPROVED": (
+        "Your Google Ads developer token is only approved for test accounts. "
+        "Apply for Basic or Standard access in the Google Ads API Center, "
+        "or use a test account."
+    ),
+    "DEVELOPER_TOKEN_INVALID": (
+        "Your Google Ads developer token is invalid. Update "
+        "`ads.developer_token` in `~/.adloop/config.yaml` using the token "
+        "from your manager account API Center."
+    ),
     "EXPECTED_REFERENCED_FIELD_IN_SELECT_CLAUSE": (
         "Fields used in ORDER BY or HAVING must also appear in the SELECT clause. "
         "Add the missing field to your SELECT."
