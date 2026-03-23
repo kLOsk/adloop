@@ -275,8 +275,8 @@ def remove_entity(
     if errors:
         return {"error": "Validation failed", "details": errors}
 
-    # Normalize campaign_asset IDs: commas → tildes
-    if entity_type == "campaign_asset":
+    # Normalize composite IDs: commas → tildes
+    if entity_type in ("campaign_asset", "customer_asset"):
         entity_id = entity_id.replace(",", "~")
 
     plan = ChangePlan(
@@ -683,7 +683,9 @@ def confirm_and_apply(
 
 _VALID_MATCH_TYPES = {"EXACT", "PHRASE", "BROAD"}
 _VALID_ENTITY_TYPES = {"campaign", "ad_group", "ad", "keyword"}
-_REMOVABLE_ENTITY_TYPES = _VALID_ENTITY_TYPES | {"negative_keyword", "campaign_asset"}
+_REMOVABLE_ENTITY_TYPES = _VALID_ENTITY_TYPES | {
+    "negative_keyword", "campaign_asset", "asset", "customer_asset",
+}
 
 _SMART_BIDDING_STRATEGIES = {
     "MAXIMIZE_CONVERSIONS",
@@ -1421,6 +1423,34 @@ def _apply_remove(
         resp_inner = response.mutate_operation_responses[0]
         if resp_inner.campaign_asset_result.resource_name:
             return {"resource_name": resp_inner.campaign_asset_result.resource_name}
+        return {"resource_name": resource_name, "status": "removed"}
+
+    elif entity_type == "asset":
+        service = client.get_service("AssetService")
+        operation = client.get_type("AssetOperation")
+        operation.remove = service.asset_path(cid, entity_id)
+        response = service.mutate_assets(
+            customer_id=cid, operations=[operation]
+        )
+
+    elif entity_type == "customer_asset":
+        parts = entity_id.replace(",", "~").split("~")
+        if len(parts) != 2:
+            raise ValueError(
+                f"customer_asset entity_id must be "
+                f"'assetId~fieldType', got '{entity_id}'"
+            )
+        ca_service = client.get_service("CustomerAssetService")
+        resource_name = ca_service.customer_asset_path(cid, parts[0], parts[1])
+        ga_service = client.get_service("GoogleAdsService")
+        op = client.get_type("MutateOperation")
+        op.customer_asset_operation.remove = resource_name
+        response = ga_service.mutate(
+            customer_id=cid, mutate_operations=[op]
+        )
+        resp_inner = response.mutate_operation_responses[0]
+        if resp_inner.customer_asset_result.resource_name:
+            return {"resource_name": resp_inner.customer_asset_result.resource_name}
         return {"resource_name": resource_name, "status": "removed"}
 
     else:

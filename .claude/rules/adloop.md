@@ -83,7 +83,7 @@ These tools call both APIs internally and return unified results with computed `
 | `add_negative_keywords` | Propose negative keywords (does NOT add) | `campaign_id`, keyword list, `match_type` |
 | `pause_entity` | Propose pausing campaign/ad group/ad/keyword | `entity_type`, `entity_id` |
 | `enable_entity` | Propose enabling paused entity | `entity_type`, `entity_id` |
-| `remove_entity` | Propose REMOVING an entity (irreversible) | `entity_type` (incl. "negative_keyword", "campaign_asset"), `entity_id` |
+| `remove_entity` | Propose REMOVING an entity (irreversible) | `entity_type` (incl. "negative_keyword", "campaign_asset", "asset", "customer_asset"), `entity_id` |
 | `confirm_and_apply` | Execute a previously previewed change | `plan_id` from a draft tool, `dry_run` (default true) |
 
 **Write tool workflow:**
@@ -98,7 +98,7 @@ These tools call both APIs internally and return unified results with computed `
 - `draft_campaign` enforces the `max_daily_budget` safety cap, rejects BROAD match + non-Smart Bidding, and warns if budget is below 5x target CPA.
 - `update_campaign` replaces geo/language targets entirely (not append). Pass the full desired list.
 - `remove_entity` is IRREVERSIBLE — always prefer `pause_entity` unless the user explicitly wants permanent removal. Removal triggers double confirmation in the safety layer.
-- `remove_entity` supports `entity_type` values: "campaign", "ad_group", "ad", "keyword", "negative_keyword", "campaign_asset". Use "negative_keyword" to remove campaign-level negative keywords. Use "campaign_asset" to remove sitelinks and other asset links from a campaign.
+- `remove_entity` supports `entity_type` values: "campaign", "ad_group", "ad", "keyword", "negative_keyword", "campaign_asset", "asset", "customer_asset". Use "negative_keyword" to remove campaign-level negative keywords. Use "campaign_asset" to remove sitelinks and other asset links from a campaign. Use "asset" to remove a standalone asset. Use "customer_asset" to remove a customer-level asset link.
 - `require_dry_run: true` in config overrides `dry_run=false` — the user must change the config to allow real mutations.
 - All operations (including dry runs) are logged to `~/.adloop/audit.log`.
 

@@ -693,9 +693,14 @@ def remove_entity(
 ) -> dict:
     """Draft REMOVING an entity — returns a PREVIEW. This is IRREVERSIBLE.
 
-    entity_type: "campaign", "ad_group", "ad", "keyword", or "negative_keyword"
-    entity_id: The resource ID. For keywords use "adGroupId~criterionId".
-               For negative_keywords use the campaign criterion ID.
+    entity_type: "campaign", "ad_group", "ad", "keyword", "negative_keyword",
+                 "campaign_asset", "asset", or "customer_asset"
+    entity_id: The resource ID.
+               For keywords: "adGroupId~criterionId"
+               For negative_keywords: the campaign criterion ID
+               For campaign_asset: "campaignId~assetId~fieldType"
+               For asset: simple asset ID
+               For customer_asset: "assetId~fieldType"
 
     WARNING: Removed entities cannot be re-enabled. Use pause_entity instead
     if you just want to temporarily disable something.
