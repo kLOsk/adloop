@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+from adloop.ads.currency import get_currency_code
+
 if TYPE_CHECKING:
     from adloop.config import AdLoopConfig
 
@@ -57,7 +59,8 @@ def get_campaign_performance(
     """
 
     rows = execute_query(config, customer_id, query)
-    _enrich_cost_fields(rows)
+    currency_code = get_currency_code(config, customer_id)
+    _enrich_cost_fields(rows, currency_code)
 
     return {"campaigns": rows, "total_campaigns": len(rows)}
 
@@ -90,7 +93,8 @@ def get_ad_performance(
     """
 
     rows = execute_query(config, customer_id, query)
-    _enrich_cost_fields(rows)
+    currency_code = get_currency_code(config, customer_id)
+    _enrich_cost_fields(rows, currency_code)
 
     return {"ads": rows, "total_ads": len(rows)}
 
@@ -122,7 +126,8 @@ def get_keyword_performance(
     """
 
     rows = execute_query(config, customer_id, query)
-    _enrich_cost_fields(rows)
+    currency_code = get_currency_code(config, customer_id)
+    _enrich_cost_fields(rows, currency_code)
 
     return {"keywords": rows, "total_keywords": len(rows)}
 
@@ -176,7 +181,8 @@ def get_search_terms(
         """
 
     rows = execute_query(config, customer_id, query)
-    _enrich_cost_fields(rows)
+    currency_code = get_currency_code(config, customer_id)
+    _enrich_cost_fields(rows, currency_code)
 
     return {"search_terms": rows, "total_search_terms": len(rows)}
 
@@ -223,7 +229,7 @@ def _date_clause(start: str, end: str) -> str:
     return "AND segments.date DURING LAST_30_DAYS"
 
 
-def _enrich_cost_fields(rows: list[dict]) -> None:
+def _enrich_cost_fields(rows: list[dict], currency_code: str = "EUR") -> None:
     """Add human-readable cost and CPA fields computed from cost_micros."""
     for row in rows:
         cost_micros = row.get("metrics.cost_micros", 0) or 0
@@ -235,4 +241,6 @@ def _enrich_cost_fields(rows: list[dict]) -> None:
 
         avg_cpc_micros = row.get("metrics.average_cpc", 0) or 0
         if avg_cpc_micros:
-            row["metrics.average_cpc_eur"] = round(avg_cpc_micros / 1_000_000, 2)
+            row["metrics.average_cpc_amount"] = round(avg_cpc_micros / 1_000_000, 2)
+
+        row["metrics.currency"] = currency_code

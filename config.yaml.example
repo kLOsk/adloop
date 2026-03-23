@@ -40,7 +40,7 @@ ads:
   login_customer_id: ""
 
 safety:
-  # Maximum daily budget allowed per campaign (EUR).
+  # Maximum daily budget allowed per campaign (in your account's currency).
   # AdLoop will reject any campaign creation or budget change above this.
   max_daily_budget: 50.00
 

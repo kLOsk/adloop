@@ -61,10 +61,12 @@ def analyze_campaign_conversions(
     reveal the real cost-per-conversion (using GA4 as source of truth) and
     detect GDPR consent gaps via click-to-session ratios.
     """
+    from adloop.ads.currency import format_currency, get_currency_code
     from adloop.ads.read import get_campaign_performance
     from adloop.ga4.reports import run_ga4_report
 
     start, end = _default_date_range(date_range_start, date_range_end)
+    currency_code = get_currency_code(config, customer_id)
 
     ads_result = get_campaign_performance(
         config, customer_id=customer_id, date_range_start=start, date_range_end=end
@@ -154,7 +156,7 @@ def analyze_campaign_conversions(
 
         if ads_cost > 0 and ga4_conversions == 0 and ads_conversions == 0:
             insights.append(
-                f"Zero conversions for '{name}' despite €{ads_cost:.2f} spend "
+                f"Zero conversions for '{name}' despite {format_currency(ads_cost, currency_code)} spend "
                 f"— check conversion tracking setup in both Google Ads and GA4"
             )
 
@@ -340,10 +342,12 @@ def attribution_check(
     they're caused by GDPR consent, attribution model differences, or
     misconfigured conversion actions.
     """
+    from adloop.ads.currency import format_currency, get_currency_code
     from adloop.ads.read import get_campaign_performance
     from adloop.ga4.reports import run_ga4_report
 
     start, end = _default_date_range(date_range_start, date_range_end)
+    currency_code = get_currency_code(config, customer_id)
 
     ads_result = get_campaign_performance(
         config, customer_id=customer_id, date_range_start=start, date_range_end=end
@@ -447,7 +451,7 @@ def attribution_check(
         if ads_total_cost > 0:
             insights.append(
                 f"Zero conversions in both Google Ads and GA4 despite "
-                f"€{ads_total_cost:.2f} ad spend — conversion tracking is likely "
+                f"{format_currency(ads_total_cost, currency_code)} ad spend — conversion tracking is likely "
                 f"not configured or conversion actions are not linked to campaigns"
             )
     elif ads_total_conversions > 0 and ga4_paid_conversions == 0:

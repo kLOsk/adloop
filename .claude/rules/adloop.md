@@ -1,3 +1,6 @@
+---
+description: AdLoop MCP orchestration — Google Ads + GA4 + codebase intelligence
+---
 
 # AdLoop — AI Orchestration Rules
 
@@ -35,8 +38,8 @@ You have access to AdLoop MCP tools that connect Google Ads and Google Analytics
 | `run_gaql` | Custom queries not covered by other tools | `query`, `format` (table/json/csv) |
 
 **Return format notes:**
-- Ads read tools automatically compute `metrics.cost` (EUR) and `metrics.cpa` from `metrics.cost_micros` — no manual division needed.
-- `metrics.average_cpc_eur` is also pre-computed where available.
+- Ads read tools automatically compute `metrics.cost` and `metrics.cpa` from `metrics.cost_micros` — no manual division needed. `metrics.currency` contains the account's currency code (auto-detected).
+- `metrics.average_cpc_amount` is also pre-computed where available.
 - `get_ad_performance` returns full `headlines` and `descriptions` lists for RSAs.
 
 ### Cross-Reference Tools (GA4 + Ads combined)

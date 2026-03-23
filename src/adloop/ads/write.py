@@ -339,6 +339,7 @@ def draft_campaign(
         keywords=keywords,
         geo_target_ids=geo_target_ids,
         language_ids=language_ids,
+        customer_id=customer_id,
     )
     if errors:
         return {"error": "Validation failed", "details": errors}
@@ -448,9 +449,11 @@ def update_campaign(
         )
 
     if daily_budget and target_cpa > 0 and daily_budget < 5 * target_cpa:
+        from adloop.ads.currency import format_currency, get_currency_code
+        currency_code = get_currency_code(config, customer_id)
         warnings.append(
-            f"Daily budget €{daily_budget:.2f} is less than 5x target CPA "
-            f"€{target_cpa:.2f}. Google recommends at least 5x."
+            f"Daily budget {format_currency(daily_budget, currency_code)} is less than 5x target CPA "
+            f"{format_currency(target_cpa, currency_code)}. Google recommends at least 5x."
         )
 
     changes: dict = {"campaign_id": campaign_id}
@@ -785,6 +788,7 @@ def _validate_campaign(
     keywords: list[dict] | None,
     geo_target_ids: list[str] | None,
     language_ids: list[str] | None,
+    customer_id: str = "",
 ) -> tuple[list[str], list[str]]:
     """Validate campaign draft inputs. Returns (errors, warnings)."""
     errors = []
@@ -845,10 +849,12 @@ def _validate_campaign(
                 )
 
     if target_cpa > 0 and daily_budget < 5 * target_cpa:
+        from adloop.ads.currency import format_currency, get_currency_code
+        currency_code = get_currency_code(config, customer_id)
         warnings.append(
-            f"Daily budget €{daily_budget:.2f} is less than 5x target CPA "
-            f"€{target_cpa:.2f}. Google recommends at least 5x target CPA "
-            f"(€{5 * target_cpa:.2f}/day) for sufficient learning data."
+            f"Daily budget {format_currency(daily_budget, currency_code)} is less than 5x target CPA "
+            f"{format_currency(target_cpa, currency_code)}. Google recommends at least 5x target CPA "
+            f"({format_currency(5 * target_cpa, currency_code)}/day) for sufficient learning data."
         )
 
     if bs == "MANUAL_CPC":
