@@ -42,7 +42,7 @@ Every tool exists because of an actual problem hit while running real Google Ads
 
 The best features come from real workflows. If you're using AdLoop and find yourself wishing it could do something it can't, **open an issue describing your situation** — not just "add feature X" but "I was trying to do Y and couldn't because Z." The context matters more than the request.
 
-## All 33 Tools
+## All 38 Tools
 
 > **Quick start:** `pip install adloop` or `git clone https://github.com/kLOsk/adloop.git && cd adloop && uv sync && uv run adloop init`
 
@@ -71,6 +71,11 @@ The best features come from real workflows. If you're using AdLoop and find your
 | `get_keyword_performance` | Keywords — quality scores, competitive metrics |
 | `get_search_terms` | What users actually searched before clicking |
 | `get_negative_keywords` | List existing negative keywords for a campaign or all campaigns |
+| `get_recommendations` | Google's auto-generated recommendations with type, estimated impact, and campaign context |
+| `get_pmax_performance` | Performance Max campaign metrics with network breakdown + asset group ad strength |
+| `get_asset_performance` | Per-asset details for PMax — field type, serving status, content |
+| `get_detailed_asset_performance` | Top-performing asset combinations — which headline+description+image combos Google selects most |
+| `get_audience_performance` | Audience segment performance — remarketing, in-market, affinity, demographics |
 | `run_gaql` | Arbitrary GAQL queries for anything else |
 
 ### Cross-Reference Tools (GA4 + Ads Combined)
@@ -328,7 +333,7 @@ All configuration lives in `~/.adloop/config.yaml`. See [`config.yaml.example`](
 ```
 src/adloop/
 ├── __init__.py        # Entry point — routes 'adloop init' to wizard, otherwise starts MCP server
-├── server.py          # FastMCP server — 26 tool registrations with safety annotations
+├── server.py          # FastMCP server — 38 tool registrations with safety annotations
 ├── config.py          # Config loader (~/.adloop/config.yaml)
 ├── auth.py            # OAuth 2.0 Desktop flow + service account support + token refresh handling
 ├── cli.py             # Interactive 'adloop init' setup wizard
@@ -341,7 +346,8 @@ src/adloop/
 ├── ads/
 │   ├── client.py      # Google Ads API client (version-pinned)
 │   ├── gaql.py        # GAQL query execution with human-readable error parsing
-│   ├── read.py        # Campaign, ad, keyword, search term, negative keyword reads
+│   ├── read.py        # Campaign, ad, keyword, search term, negative keyword, recommendations, audience reads
+│   ├── pmax.py        # Performance Max tools — campaign/asset group performance, asset labels, top combinations
 │   ├── write.py       # Draft campaign, RSA, keywords; pause, enable, remove, confirm
 │   └── forecast.py    # Budget estimation via Keyword Planner API
 └── safety/

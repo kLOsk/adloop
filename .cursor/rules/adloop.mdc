@@ -37,12 +37,21 @@ You have access to AdLoop MCP tools that connect Google Ads and Google Analytics
 | `get_keyword_performance` | Keyword analysis — quality scores, competitive metrics | `date_range_start`, `date_range_end` |
 | `get_search_terms` | Find negative keyword opportunities and understand user intent | `date_range_start`, `date_range_end` |
 | `get_negative_keywords` | List existing negative keywords for a campaign or all campaigns | `campaign_id` (optional) |
+| `get_recommendations` | Google's auto-generated recommendations with estimated impact — budget, keyword, bid strategy, ad copy suggestions | `recommendation_types` (optional filter), `campaign_id` (optional) |
+| `get_pmax_performance` | Performance Max campaign metrics with network breakdown + asset group ad strength | `date_range_start`, `date_range_end` |
+| `get_asset_performance` | Per-asset details for PMax — field type, serving status, content. Use with `get_detailed_asset_performance` for quality signals | `campaign_id` (optional) |
+| `get_detailed_asset_performance` | Top-performing asset combinations — which headline+description+image combos Google selects most | `campaign_id` (optional) |
+| `get_audience_performance` | Audience segment metrics — remarketing, in-market, affinity, demographics | `date_range_start`, `date_range_end`, `campaign_id` (optional) |
 | `run_gaql` | Custom queries not covered by other tools | `query`, `format` (table/json/csv) |
 
 **Return format notes:**
 - Ads read tools automatically compute `metrics.cost` and `metrics.cpa` from `metrics.cost_micros` — no manual division needed. `metrics.currency` contains the account's currency code (auto-detected).
 - `metrics.average_cpc_amount` is also pre-computed where available.
 - `get_ad_performance` returns full `headlines` and `descriptions` lists for RSAs.
+- `get_recommendations` returns `estimated_improvement` per recommendation (potential minus base metrics) and `insights[]` that flag self-serving budget recommendations.
+- PMax tools: `get_pmax_performance` returns `insights[]` flagging weak ad strength and zero-conversion asset groups. `segments.ad_network_type` includes MIXED — a Google catch-all for most PMax traffic. Full channel splits (Search vs YouTube vs Display vs Discover) are not available via the API.
+- `get_asset_performance` returns `by_status` and `by_field_type` summaries. Note: per-asset performance labels (BEST/GOOD/LOW) are not available for PMax assets in API v23. Use `get_detailed_asset_performance` for quality signals via top combinations.
+- `get_audience_performance` works for campaigns with explicit audience targeting. PMax audience targeting is automatic and may not appear in this report.
 
 ### Cross-Reference Tools (GA4 + Ads combined)
 
@@ -157,11 +166,13 @@ Most websites (especially in the EU) use a GDPR cookie consent banner. This has 
 ### When user asks about performance or "how are my ads doing"
 
 1. Call `get_campaign_performance` for the relevant date range
-2. If they mention conversions, CPA, or "is it worth it", call `analyze_campaign_conversions` instead — it gives Ads + GA4 data in one call with GDPR-aware cost-per-conversion
-3. If they mention specific keywords or search terms, also call `get_keyword_performance` or `get_search_terms`
-4. Present a summary with the key metrics: spend (`metrics.cost`), clicks, conversions, CPA (`metrics.cpa`), CTR
-5. Highlight anything concerning: zero conversions, high CPA, low quality scores, wasteful search terms
-6. Compare against best practices (see Marketing Best Practices section)
+2. If results include Performance Max campaigns (`campaign.advertising_channel_type = PERFORMANCE_MAX`), also call `get_pmax_performance` for asset group ad strength and network breakdown — PMax campaigns need different analysis than Search campaigns
+3. If they mention conversions, CPA, or "is it worth it", call `analyze_campaign_conversions` instead — it gives Ads + GA4 data in one call with GDPR-aware cost-per-conversion
+4. If they mention specific keywords or search terms, also call `get_keyword_performance` or `get_search_terms`
+5. Present a summary with the key metrics: spend (`metrics.cost`), clicks, conversions, CPA (`metrics.cpa`), CTR
+6. Highlight anything concerning: zero conversions, high CPA, low quality scores, wasteful search terms
+7. Compare against best practices (see Marketing Best Practices section)
+8. If the account has active Google recommendations, mention that `get_recommendations` can surface Google's suggestions for improvement
 
 ### When user asks about conversions or conversion drops
 
@@ -302,6 +313,39 @@ Most websites (especially in the EU) use a GDPR cookie consent banner. This has 
 2. Compare `campaigns[].ga4_conversion_rate` (paid) vs `non_paid_channels[].conversion_rate` (organic/direct/referral)
 3. If paid conversion rate is significantly lower, investigate landing page relevance and ad targeting before increasing spend
 
+### When user asks about Performance Max or PMax campaigns
+
+1. Call `get_pmax_performance` for campaign-level metrics with network breakdown and asset group ad strength
+2. Review `insights[]` — weak ad strength and zero-conversion asset groups are the most actionable findings
+3. If ad strength is POOR or AVERAGE, call `get_asset_performance` to see which specific assets are underperforming (LOW label) and which asset types are missing
+4. Call `get_detailed_asset_performance` to see which headline+description+image combinations Google selects most — this reveals what's actually working
+5. If the user wants to improve PMax performance:
+   - Replace LOW-performing assets with new ones
+   - Ensure minimum asset diversity: at least 5 headlines, 5 descriptions, 5 marketing images, 1 landscape image, 1 logo, 1 YouTube video (recommended)
+   - Check that final URLs point to relevant, working landing pages
+6. Note: PMax campaigns are partially opaque. `segments.ad_network_type` gives SEARCH, CONTENT, YOUTUBE_SEARCH, YOUTUBE_WATCH, and MIXED — but MIXED is a catch-all for most PMax traffic. Full per-channel transparency is not available via the API.
+
+### When user asks about Google's recommendations or "what does Google suggest"
+
+1. Call `get_recommendations` to retrieve all active (non-dismissed) recommendations
+2. Review the `by_type` summary and `insights[]` — these flag self-serving budget recommendations
+3. **NEVER blindly endorse Google's recommendations.** Cross-reference each recommendation against actual account data:
+   - If Google says "raise budget" but the campaign has zero conversions → bad advice. Fix tracking/landing pages first.
+   - If Google says "add keywords" but existing keywords have quality score < 5 → bad advice. Fix relevance first.
+   - If Google says "switch to Maximize Conversions" and the campaign uses Manual CPC → likely good advice, but verify conversion tracking works.
+   - If Google says "use Broad Match" and the campaign isn't on Smart Bidding → reject per safety rule 7.
+4. Use `estimated_improvement` to prioritize: recommendations with >1 estimated additional conversion are worth investigating
+5. For keyword recommendations, call `get_keyword_performance` to check existing keyword overlap before acting
+6. Present recommendations grouped by type with your assessment of each — the user should understand which ones are genuinely helpful vs which ones just increase Google's revenue
+
+### When user asks about audience performance or targeting
+
+1. Call `get_audience_performance` for the relevant date range
+2. If filtered to a specific campaign, also call `get_campaign_performance` for context on the campaign's overall performance
+3. Compare audience segment metrics: which segments convert best? Which have high spend but zero conversions?
+4. For PMax campaigns, note that audience targeting is automatic — audience performance data may not appear in the `ad_group_audience_view` report. Audience signals in PMax are configured at the asset group level and serve as hints, not hard targeting.
+5. For Display/Search campaigns with explicit audience overlays, use the data to recommend bid adjustments or audience exclusions
+
 ## Default Parameters
 
 When the user doesn't specify:
@@ -337,6 +381,11 @@ LIMIT n
 | `campaign_budget` | Budget information |
 | `bidding_strategy` | Bidding strategy details |
 | `customer_client` | List accounts under an MCC (uses login_customer_id) |
+| `asset_group` | PMax asset group data (ad strength, status) |
+| `asset_group_asset` | PMax per-asset performance labels |
+| `asset_group_top_combination_view` | PMax top asset combinations |
+| `recommendation` | Google's auto-generated recommendations |
+| `ad_group_audience_view` | Audience segment performance |
 
 ### Common Fields
 
@@ -500,3 +549,6 @@ When advising on Google Ads:
 - **Display paths**: Always set `path1` and `path2` on RSAs. They cost nothing, improve ad relevance, and make the display URL informative (e.g. `example.com/Features/Pricing` instead of bare `example.com`). Derive them from the landing page path or the ad's core message. Max 15 chars each.
 - **Sitelinks**: Every campaign should have at least 4 sitelinks. They increase ad real estate (more screen space = higher CTR), direct users to key pages, and are free. Good candidates: pricing, features, signup/trial, about, key product pages. Use `draft_sitelinks` to create them. Link text max 25 chars, descriptions max 35 chars each.
 - **Clicks vs sessions gap**: Never report a clicks > sessions discrepancy as a tracking bug without first accounting for GDPR consent. In the EU, 30-70% of users may reject analytics cookies. This is normal, not broken.
+- **Performance Max asset diversity**: PMax campaigns need diverse assets to perform well. Minimum recommended: 5+ headlines (max 30 chars), 5+ long headlines (max 90 chars), 5+ descriptions (max 90 chars), 5+ marketing images (1200x628), 5+ square images (1200x1200), 1+ logo (1200x1200), 1+ landscape logo (1200x300). A YouTube video is strongly recommended. Ad strength below GOOD usually means missing asset types.
+- **PMax transparency limitations**: The Google Ads API does not provide full channel-level breakdowns for PMax. `segments.ad_network_type` returns SEARCH, CONTENT, YOUTUBE_SEARCH, YOUTUBE_WATCH, and MIXED — but MIXED is a catch-all for most traffic. Do not promise users exact Search vs Display vs YouTube splits. Be honest about what the data shows and what it doesn't.
+- **Google recommendations are not neutral**: Google's auto-generated recommendations optimize for Google's revenue, not necessarily the advertiser's ROI. Budget increase and Broad Match recommendations should always be cross-referenced against actual conversion data. Bid strategy recommendations (switch to Smart Bidding) are usually sound. Keyword recommendations may be too broad. Never blindly apply recommendations — evaluate each one against the account's actual performance.

@@ -393,6 +393,159 @@ def get_negative_keywords(
     )
 
 
+# ---------------------------------------------------------------------------
+# Google Ads — Recommendations, Performance Max & Audience Tools
+# ---------------------------------------------------------------------------
+
+
+@mcp.tool(annotations=_READONLY)
+@_safe
+def get_recommendations(
+    customer_id: str = "",
+    recommendation_types: list[str] | None = None,
+    campaign_id: str = "",
+) -> dict:
+    """Retrieve Google's auto-generated recommendations with estimated impact.
+
+    Returns each recommendation's type, associated campaign/ad group, current
+    (base) and projected (potential) metrics, and the estimated improvement.
+
+    recommendation_types: optional filter — e.g. ["KEYWORD", "TARGET_CPA_OPT_IN",
+        "MAXIMIZE_CONVERSIONS_OPT_IN", "RESPONSIVE_SEARCH_AD"]. Empty = all types.
+    campaign_id: optional — scope to a single campaign.
+
+    Includes insights that flag budget-increase recommendations (often self-serving)
+    and highlight high-impact suggestions worth investigating.
+    """
+    from adloop.ads.read import get_recommendations as _impl
+
+    return _impl(
+        _config,
+        customer_id=customer_id or _config.ads.customer_id,
+        recommendation_types=recommendation_types,
+        campaign_id=campaign_id,
+    )
+
+
+@mcp.tool(annotations=_READONLY)
+@_safe
+def get_pmax_performance(
+    customer_id: str = "",
+    date_range_start: str = "",
+    date_range_end: str = "",
+) -> dict:
+    """Get Performance Max campaign and asset group performance.
+
+    Returns two result sets:
+    - campaigns: PMax campaign metrics broken down by ad_network_type (SEARCH,
+      CONTENT, YOUTUBE_SEARCH, YOUTUBE_WATCH, MIXED). Note: MIXED is a catch-all
+      that Google uses for most PMax traffic — full channel splits are not
+      available via the API.
+    - asset_groups: per-asset-group metrics including ad_strength (EXCELLENT,
+      GOOD, AVERAGE, POOR).
+
+    Includes insights flagging weak ad strength, zero-conversion asset groups,
+    and network type distribution.
+    Date format: "YYYY-MM-DD". Empty = last 30 days.
+    """
+    from adloop.ads.pmax import get_pmax_performance as _impl
+
+    return _impl(
+        _config,
+        customer_id=customer_id or _config.ads.customer_id,
+        date_range_start=date_range_start,
+        date_range_end=date_range_end,
+    )
+
+
+@mcp.tool(annotations=_READONLY)
+@_safe
+def get_asset_performance(
+    customer_id: str = "",
+    campaign_id: str = "",
+) -> dict:
+    """Get per-asset details for Performance Max campaigns.
+
+    Returns each asset's field_type (HEADLINE, DESCRIPTION, MARKETING_IMAGE,
+    YOUTUBE_VIDEO, etc.), primary_status (ELIGIBLE, NOT_ELIGIBLE, PAUSED,
+    PENDING), and content (text or image URL).
+
+    Note: per-asset performance labels (BEST/GOOD/LOW) are not available for
+    PMax assets in Google Ads API v23. Use get_detailed_asset_performance to
+    see which asset combinations Google selects most — the closest proxy for
+    individual asset quality.
+
+    campaign_id: optional filter to a single PMax campaign.
+    Includes by_status and by_field_type summaries.
+    """
+    from adloop.ads.pmax import get_asset_performance as _impl
+
+    return _impl(
+        _config,
+        customer_id=customer_id or _config.ads.customer_id,
+        campaign_id=campaign_id,
+    )
+
+
+@mcp.tool(annotations=_READONLY)
+@_safe
+def get_detailed_asset_performance(
+    customer_id: str = "",
+    campaign_id: str = "",
+) -> dict:
+    """Get top-performing asset combinations for Performance Max campaigns.
+
+    Shows which headline + description + image combinations Google selects
+    most often. Each combination lists the assets used and their field types.
+    This data helps identify which creative elements work well together.
+
+    campaign_id: optional filter to a single PMax campaign.
+    """
+    from adloop.ads.pmax import get_detailed_asset_performance as _impl
+
+    return _impl(
+        _config,
+        customer_id=customer_id or _config.ads.customer_id,
+        campaign_id=campaign_id,
+    )
+
+
+@mcp.tool(annotations=_READONLY)
+@_safe
+def get_audience_performance(
+    customer_id: str = "",
+    date_range_start: str = "",
+    date_range_end: str = "",
+    campaign_id: str = "",
+) -> dict:
+    """Get audience segment performance metrics.
+
+    Returns performance by audience type — remarketing lists (USER_LIST),
+    in-market segments (USER_INTEREST), affinity, demographics (AGE_RANGE,
+    GENDER), etc. Shows display_name, impressions, clicks, cost, conversions,
+    CTR, and CPC for each audience.
+
+    Works for campaigns with explicit audience targeting (Search, Display).
+    PMax audience targeting is automatic and may not appear in this report.
+    campaign_id: optional filter to a single campaign.
+    Date format: "YYYY-MM-DD". Empty = last 30 days.
+    """
+    from adloop.ads.read import get_audience_performance as _impl
+
+    return _impl(
+        _config,
+        customer_id=customer_id or _config.ads.customer_id,
+        date_range_start=date_range_start,
+        date_range_end=date_range_end,
+        campaign_id=campaign_id,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Cross-Reference Tools (GA4 + Ads Combined)
+# ---------------------------------------------------------------------------
+
+
 @mcp.tool(annotations=_READONLY)
 @_safe
 def analyze_campaign_conversions(

@@ -1,7 +1,7 @@
 [project]
 name = "adloop"
-version = "0.2.0"
-description = "MCP server connecting Google Ads + GA4 + codebase into one AI-driven feedback loop"
+version = "0.3.0"
+description = "Stop switching between Google Ads, GA4, and your code editor to figure out why conversions dropped."
 readme = "README.md"
 authors = [
     { name = "Daniel Klose", email = "info@daniel-klose.com" }

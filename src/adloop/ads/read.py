@@ -217,9 +217,214 @@ def get_negative_keywords(
     return {"negative_keywords": rows, "total_negative_keywords": len(rows)}
 
 
+def get_recommendations(
+    config: AdLoopConfig,
+    *,
+    customer_id: str = "",
+    recommendation_types: list[str] | None = None,
+    campaign_id: str = "",
+) -> dict:
+    """Retrieve Google's auto-generated recommendations with estimated impact.
+
+    Uses the service directly (not ``execute_query``) because
+    ``recommendation.impact`` sub-fields are not individually selectable
+    in GAQL — the impact object must be extracted from the proto.
+    """
+    from adloop.ads.client import get_ads_client, normalize_customer_id
+
+    client = get_ads_client(config)
+    service = client.get_service("GoogleAdsService")
+    cid = normalize_customer_id(customer_id)
+
+    type_filter = ""
+    if recommendation_types:
+        types_str = ", ".join(f"'{t}'" for t in recommendation_types)
+        type_filter = f"AND recommendation.type IN ({types_str})"
+
+    query = f"""
+        SELECT recommendation.resource_name,
+               recommendation.type,
+               recommendation.campaign,
+               recommendation.ad_group,
+               recommendation.dismissed,
+               recommendation.impact
+        FROM recommendation
+        WHERE recommendation.dismissed = FALSE
+          {type_filter}
+    """
+
+    rows: list[dict] = []
+    for row in service.search(customer_id=cid, query=query):
+        rec = row.recommendation
+        rec_type = rec.type_.name if hasattr(rec.type_, "name") else str(rec.type_)
+
+        impact = rec.impact
+        base = impact.base_metrics
+        pot = impact.potential_metrics
+
+        base_impressions = _round_metric(getattr(base, "impressions", 0))
+        base_clicks = _round_metric(getattr(base, "clicks", 0))
+        base_cost_micros = getattr(base, "cost_micros", 0) or 0
+        base_conversions = _round_metric(getattr(base, "conversions", 0))
+
+        pot_impressions = _round_metric(getattr(pot, "impressions", 0))
+        pot_clicks = _round_metric(getattr(pot, "clicks", 0))
+        pot_cost_micros = getattr(pot, "cost_micros", 0) or 0
+        pot_conversions = _round_metric(getattr(pot, "conversions", 0))
+
+        entry = {
+            "recommendation.type": rec_type,
+            "recommendation.campaign": rec.campaign,
+            "recommendation.ad_group": rec.ad_group or "",
+            "recommendation.dismissed": rec.dismissed,
+            "impact.base": {
+                "impressions": base_impressions,
+                "clicks": base_clicks,
+                "cost_micros": base_cost_micros,
+                "cost": round(base_cost_micros / 1_000_000, 2),
+                "conversions": base_conversions,
+            },
+            "impact.potential": {
+                "impressions": pot_impressions,
+                "clicks": pot_clicks,
+                "cost_micros": pot_cost_micros,
+                "cost": round(pot_cost_micros / 1_000_000, 2),
+                "conversions": pot_conversions,
+            },
+            "estimated_improvement": {
+                "impressions": _improvement(base_impressions, pot_impressions),
+                "clicks": _improvement(base_clicks, pot_clicks),
+                "cost": _improvement(
+                    round(base_cost_micros / 1_000_000, 2),
+                    round(pot_cost_micros / 1_000_000, 2),
+                ),
+                "conversions": _improvement(base_conversions, pot_conversions),
+            },
+        }
+        rows.append(entry)
+
+    if campaign_id:
+        rows = [
+            r for r in rows
+            if str(campaign_id) in str(r.get("recommendation.campaign", ""))
+        ]
+
+    type_counts: dict[str, int] = {}
+    for row in rows:
+        rtype = row.get("recommendation.type", "UNKNOWN")
+        type_counts[rtype] = type_counts.get(rtype, 0) + 1
+
+    _BUDGET_TYPES = {
+        "CAMPAIGN_BUDGET", "MOVE_UNUSED_BUDGET",
+        "FORECASTING_CAMPAIGN_BUDGET", "MARGINAL_ROI_CAMPAIGN_BUDGET",
+    }
+
+    insights: list[str] = []
+    if not rows:
+        insights.append("No active recommendations found.")
+    else:
+        insights.append(
+            f"{len(rows)} active recommendation(s) across {len(type_counts)} type(s): "
+            f"{dict(sorted(type_counts.items(), key=lambda x: -x[1]))}"
+        )
+
+        budget_recs = [r for r in rows if r.get("recommendation.type") in _BUDGET_TYPES]
+        if budget_recs:
+            insights.append(
+                f"{len(budget_recs)} recommendation(s) are budget-related. "
+                f"Google often suggests spending more — cross-reference with actual "
+                f"conversion data before accepting."
+            )
+
+        high_impact = [
+            r for r in rows
+            if (r.get("estimated_improvement", {}).get("conversions", 0) or 0) > 1
+        ]
+        if high_impact:
+            types = set(r.get("recommendation.type") for r in high_impact)
+            insights.append(
+                f"{len(high_impact)} recommendation(s) estimate >1 additional conversion: "
+                f"types {types}. Validate against your actual CPA before acting."
+            )
+
+    return {
+        "recommendations": rows,
+        "total_recommendations": len(rows),
+        "by_type": type_counts,
+        "insights": insights,
+    }
+
+
+def get_audience_performance(
+    config: AdLoopConfig,
+    *,
+    customer_id: str = "",
+    date_range_start: str = "",
+    date_range_end: str = "",
+    campaign_id: str = "",
+) -> dict:
+    """Get audience segment performance metrics (remarketing, in-market, affinity, demographics)."""
+    from adloop.ads.gaql import execute_query
+
+    date_clause = _date_clause(date_range_start, date_range_end)
+
+    campaign_filter = ""
+    if campaign_id:
+        campaign_filter = f"AND campaign.id = {campaign_id}"
+
+    query = f"""
+        SELECT campaign.id, campaign.name,
+               campaign.advertising_channel_type,
+               ad_group.id, ad_group.name,
+               ad_group_criterion.display_name,
+               ad_group_criterion.type,
+               metrics.impressions, metrics.clicks, metrics.cost_micros,
+               metrics.conversions, metrics.ctr, metrics.average_cpc
+        FROM ad_group_audience_view
+        WHERE campaign.status != 'REMOVED'
+          {date_clause}
+          {campaign_filter}
+        ORDER BY metrics.cost_micros DESC
+        LIMIT 200
+    """
+
+    rows = execute_query(config, customer_id, query)
+    currency_code = get_currency_code(config, customer_id)
+    _enrich_cost_fields(rows, currency_code)
+
+    insights: list[str] = []
+    if not rows:
+        insights.append(
+            "No audience performance data found. This account's campaigns may not "
+            "have explicit audience targeting (remarketing lists, in-market segments, "
+            "demographics). PMax audience targeting is automatic and does not appear "
+            "in this report."
+        )
+
+    return {"audiences": rows, "total_audiences": len(rows), "insights": insights}
+
+
 # ---------------------------------------------------------------------------
 # Internal helpers
 # ---------------------------------------------------------------------------
+
+
+def _round_metric(value: object) -> float:
+    """Round an API metric to 4 decimal places, collapsing near-zero to 0."""
+    v = float(value or 0)
+    r = round(v, 4)
+    return 0.0 if abs(r) < 0.0001 else r
+
+
+def _improvement(base: float, potential: float) -> float | None:
+    """Compute estimated improvement, returning None when Google has no estimate.
+
+    The API returns 0 for potential when it doesn't have a projection for that
+    metric. Naively subtracting would produce a misleading negative number.
+    """
+    if potential == 0 and base != 0:
+        return None
+    return round(potential - base, 4)
 
 
 def _date_clause(start: str, end: str) -> str:
