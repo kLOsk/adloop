@@ -1,0 +1,82 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Privacy Policy — AdLoop</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; color: #1a1a2e; background: #fafafa; line-height: 1.7; }
+        .container { max-width: 720px; margin: 0 auto; padding: 2rem 1.5rem; }
+        header { padding: 2rem 0 1rem; }
+        h1 { font-size: 1.8rem; margin-bottom: 0.25rem; }
+        .updated { font-size: 0.9rem; color: #777; margin-bottom: 1.5rem; }
+        .back { font-size: 0.9rem; color: #555; text-decoration: none; }
+        .back:hover { text-decoration: underline; }
+        h2 { font-size: 1.2rem; margin: 2rem 0 0.5rem; border-bottom: 2px solid #eee; padding-bottom: 0.3rem; }
+        p { margin: 0.5rem 0; }
+        ul { padding-left: 1.5rem; margin: 0.5rem 0; }
+        li { margin: 0.3rem 0; }
+        a { color: #1a1a2e; }
+        code { background: #f0f0f5; padding: 0.1rem 0.35rem; border-radius: 3px; font-size: 0.9em; }
+        footer { text-align: center; margin-top: 3rem; padding: 2rem 0; border-top: 1px solid #eee; font-size: 0.9rem; color: #777; }
+        footer a { color: #555; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <header>
+            <a href="/" class="back">← AdLoop</a>
+            <h1>Privacy Policy</h1>
+            <p class="updated">Last updated: April 2, 2026</p>
+        </header>
+
+        <p>AdLoop is an open-source, locally-run tool. It has no backend, no servers, and no telemetry.</p>
+
+        <h2>What AdLoop Accesses</h2>
+        <p>When you authorize AdLoop, you grant it permission to:</p>
+        <ul>
+            <li><strong>Read your Google Analytics (GA4) data</strong> — property summaries, reports, realtime data, event configurations</li>
+            <li><strong>Modify GA4 settings</strong> — required by the Google Analytics Admin API scope, though AdLoop currently uses it only for read operations (listing properties)</li>
+            <li><strong>Read and manage your Google Ads account</strong> — campaigns, ads, keywords, search terms, performance metrics, and the ability to create/pause/modify campaigns and ads</li>
+        </ul>
+        <p>These permissions are requested through Google's standard OAuth consent flow. You see exactly which permissions are requested before granting them.</p>
+
+        <h2>How Your Data Is Handled</h2>
+        <ul>
+            <li><strong>All data stays on your machine.</strong> AdLoop runs locally as an MCP server inside your code editor. There is no AdLoop server, cloud service, or hosted backend.</li>
+            <li><strong>OAuth tokens are stored locally</strong> at <code>~/.adloop/token.json</code> on your filesystem. They are never transmitted anywhere except back to Google's APIs to authenticate requests.</li>
+            <li><strong>No data is collected, stored, or transmitted to AdLoop's developers or any third party.</strong> The only network requests AdLoop makes are directly to Google's APIs on your behalf.</li>
+            <li><strong>No analytics or telemetry.</strong> AdLoop does not track usage, collect crash reports, or phone home in any way.</li>
+            <li><strong>Audit logs are local.</strong> All operations are logged to <code>~/.adloop/audit.log</code> on your machine for your own review.</li>
+        </ul>
+
+        <h2>Third-Party Services</h2>
+        <p>AdLoop communicates exclusively with Google's APIs:</p>
+        <ul>
+            <li>Google Analytics Data API (<code>analyticsdata.googleapis.com</code>)</li>
+            <li>Google Analytics Admin API (<code>analyticsadmin.googleapis.com</code>)</li>
+            <li>Google Ads API (<code>googleads.googleapis.com</code>)</li>
+        </ul>
+        <p>No other third-party services are contacted.</p>
+
+        <h2>Revoking Access</h2>
+        <p>You can revoke AdLoop's access to your Google account at any time:</p>
+        <ol style="padding-left: 1.5rem;">
+            <li>Go to <a href="https://myaccount.google.com/permissions">Google Account → Security → Third-party apps with account access</a></li>
+            <li>Find "AdLoop" and click <strong>Remove Access</strong></li>
+            <li>Delete <code>~/.adloop/token.json</code> from your machine</li>
+        </ol>
+
+        <h2>Open Source</h2>
+        <p>AdLoop's source code is publicly available at <a href="https://github.com/kLOsk/adloop">github.com/kLOsk/adloop</a>. You can audit exactly what the tool does with your data.</p>
+
+        <h2>Contact</h2>
+        <p>For privacy questions: <a href="mailto:info@daniel-klose.com">info@daniel-klose.com</a></p>
+
+        <footer>
+            <p><a href="/">AdLoop</a> · <a href="https://github.com/kLOsk/adloop">Source Code</a> · MIT License</p>
+        </footer>
+    </div>
+</body>
+</html>

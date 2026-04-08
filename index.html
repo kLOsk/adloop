@@ -1,0 +1,83 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AdLoop — Google Ads + GA4 in Your Code Editor</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; color: #1a1a2e; background: #fafafa; line-height: 1.6; }
+        .container { max-width: 720px; margin: 0 auto; padding: 2rem 1.5rem; }
+        header { text-align: center; padding: 3rem 0 2rem; }
+        h1 { font-size: 2.2rem; margin-bottom: 0.5rem; }
+        .tagline { font-size: 1.1rem; color: #555; max-width: 500px; margin: 0 auto 1.5rem; }
+        .cta { display: inline-block; background: #1a1a2e; color: #fff; padding: 0.75rem 2rem; border-radius: 6px; text-decoration: none; font-size: 1rem; font-family: monospace; margin: 0.5rem 0; }
+        .cta:hover { background: #2d2d4e; }
+        .links { margin-top: 1rem; font-size: 0.95rem; }
+        .links a { color: #555; margin: 0 0.75rem; }
+        section { margin: 2.5rem 0; }
+        h2 { font-size: 1.3rem; margin-bottom: 0.75rem; border-bottom: 2px solid #eee; padding-bottom: 0.4rem; }
+        ul { padding-left: 1.5rem; }
+        li { margin: 0.4rem 0; }
+        .tools-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 0.75rem; margin-top: 0.75rem; }
+        .tool-count { background: #f0f0f5; border-radius: 8px; padding: 0.75rem 1rem; text-align: center; }
+        .tool-count strong { display: block; font-size: 1.5rem; color: #1a1a2e; }
+        .tool-count span { font-size: 0.85rem; color: #666; }
+        footer { text-align: center; margin-top: 3rem; padding: 2rem 0; border-top: 1px solid #eee; font-size: 0.9rem; color: #777; }
+        footer a { color: #555; }
+        code { background: #f0f0f5; padding: 0.15rem 0.4rem; border-radius: 3px; font-size: 0.9em; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>AdLoop</h1>
+            <p class="tagline">Stop switching between Google Ads, GA4, and your code editor to figure out why conversions dropped.</p>
+            <a href="https://pypi.org/project/adloop/" class="cta">pip install adloop</a>
+            <div class="links">
+                <a href="https://github.com/kLOsk/adloop">GitHub</a>
+                <a href="https://pypi.org/project/adloop/">PyPI</a>
+                <a href="/privacy">Privacy Policy</a>
+            </div>
+        </header>
+
+        <section>
+            <h2>What It Does</h2>
+            <p>AdLoop is an open-source <a href="https://modelcontextprotocol.io">MCP server</a> that gives your AI assistant read + write access to Google Ads and GA4 — with safety guardrails that prevent accidental spend.</p>
+            <ul>
+                <li>Cross-reference Ads clicks with GA4 sessions and conversions in one query</li>
+                <li>Pull search terms, find wasted spend, add negative keywords — without leaving your editor</li>
+                <li>Draft ads, create campaigns, manage keywords through natural language</li>
+                <li>Compare tracking code in your codebase against what GA4 actually receives</li>
+                <li>Diagnose GDPR consent gaps vs actual tracking issues automatically</li>
+            </ul>
+        </section>
+
+        <section>
+            <h2>38 Tools</h2>
+            <div class="tools-grid">
+                <div class="tool-count"><strong>4</strong><span>GA4 Read Tools</span></div>
+                <div class="tool-count"><strong>16</strong><span>Google Ads Tools</span></div>
+                <div class="tool-count"><strong>3</strong><span>Cross-Reference Tools</span></div>
+                <div class="tool-count"><strong>15</strong><span>Write + Safety Tools</span></div>
+            </div>
+        </section>
+
+        <section>
+            <h2>Safety First</h2>
+            <p>AdLoop manages real ad spend, so every write operation follows a <strong>draft → preview → confirm</strong> workflow. New campaigns and ads are created paused. Budget caps are enforced. Broad Match + Manual CPC is automatically blocked. Everything is logged.</p>
+        </section>
+
+        <section>
+            <h2>Quick Start</h2>
+            <p>Install and run the setup wizard:</p>
+            <p style="margin-top: 0.5rem;"><code>pip install adloop && adloop init</code></p>
+            <p style="margin-top: 0.75rem;">The wizard handles OAuth, discovers your GA4 properties and Ads accounts automatically, and generates the MCP configuration for your editor. No Google Cloud project required.</p>
+        </section>
+
+        <footer>
+            <p>MIT License · Made by <a href="https://github.com/kLOsk">Daniel Klose</a> · <a href="/privacy">Privacy Policy</a> · <a href="https://github.com/kLOsk/adloop">Source Code</a></p>
+        </footer>
+    </div>
+</body>
+</html>
