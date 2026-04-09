@@ -2,7 +2,7 @@
 
 import sys
 
-__version__ = "0.4.2"
+__version__ = "0.4.3"
 
 
 def main() -> None:
@@ -11,6 +11,10 @@ def main() -> None:
     Routes to the setup wizard when called as ``adloop init``,
     otherwise starts the MCP server.
     """
+    if len(sys.argv) > 1 and sys.argv[1] in ("--version", "-V"):
+        print(f"adloop {__version__}")
+        return
+
     if len(sys.argv) > 1 and sys.argv[1] == "init":
         from adloop.cli import run_init_wizard
 

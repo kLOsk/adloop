@@ -294,16 +294,17 @@ def run_init_wizard() -> None:
     _print()
 
     existing_config = None
+    _original_config_backup: str | None = None
     if _CONFIG_PATH.exists():
         _print(f"  Found existing config at {_CONFIG_PATH}")
         if not _prompt_bool("Overwrite existing configuration?", default=False):
             _print("  Keeping existing config. Exiting.")
             return
+        _original_config_backup = _CONFIG_PATH.read_text()
         try:
             import yaml
 
-            with open(_CONFIG_PATH) as f:
-                existing_config = yaml.safe_load(f) or {}
+            existing_config = yaml.safe_load(_original_config_backup) or {}
         except Exception:
             existing_config = {}
 
@@ -364,7 +365,8 @@ def run_init_wizard() -> None:
     step_num += 1
     _step_header(step_num, "Authorization & Account Discovery")
 
-    # Write a minimal temporary config for OAuth + discovery
+    # Write a temporary config for OAuth + discovery.  If the wizard is
+    # interrupted after this point, _cleanup_on_cancel restores the original.
     _ADLOOP_DIR.mkdir(parents=True, exist_ok=True)
     temp_config_yaml = _generate_config_yaml(
         project_id=project_id,
@@ -377,6 +379,40 @@ def run_init_wizard() -> None:
         require_dry_run=True,
     )
     _CONFIG_PATH.write_text(temp_config_yaml)
+
+    # Everything below uses the temp config for OAuth and discovery.
+    # If the wizard is interrupted, restore the original config (or remove
+    # the temp) so we never leave a half-baked config on disk.
+    try:
+        _run_wizard_post_config(
+            use_bundled=use_bundled,
+            credentials_path=credentials_path,
+            project_id=project_id,
+            developer_token=developer_token,
+            login_customer_id=login_customer_id,
+            step_num=step_num,
+            _existing=_existing,
+        )
+    except KeyboardInterrupt:
+        if _original_config_backup is not None:
+            _CONFIG_PATH.write_text(_original_config_backup)
+        elif _CONFIG_PATH.exists():
+            _CONFIG_PATH.unlink()
+        raise
+
+
+def _run_wizard_post_config(
+    *,
+    use_bundled: bool,
+    credentials_path: str,
+    project_id: str,
+    developer_token: str,
+    login_customer_id: str,
+    step_num: int,
+    _existing: object,
+) -> None:
+    """Run the wizard steps after the temp config has been written."""
+    from adloop.config import load_config
 
     # Optional: copy custom credentials to ~/.adloop/
     if not use_bundled and credentials_path:
@@ -395,13 +431,14 @@ def run_init_wizard() -> None:
     _print()
     oauth_ok = False
     try:
-        from adloop.config import load_config
         from adloop.auth import _oauth_flow
 
         cfg = load_config(str(_CONFIG_PATH))
         _oauth_flow(cfg)
         _print("  ✓ OAuth token saved")
         oauth_ok = True
+    except KeyboardInterrupt:
+        raise
     except Exception as exc:
         _print(f"  ✗ OAuth failed: {exc}")
         _print("    You can retry later — any AdLoop tool call will trigger auth.")
@@ -427,10 +464,12 @@ def run_init_wizard() -> None:
             else:
                 _print("  No GA4 properties found. Enter manually:")
                 property_id = _prompt_property_id()
+        except KeyboardInterrupt:
+            raise
         except Exception as exc:
             _print(f"  Could not auto-discover GA4 properties: {exc}")
             property_id = _prompt_property_id(
-                default=_existing("ga4", "property_id"),
+                default=_existing("ga4", "property_id"),  # type: ignore[operator]
             )
     else:
         step_num += 1
@@ -439,7 +478,7 @@ def run_init_wizard() -> None:
         _print("  → https://analytics.google.com → Admin → Property Settings")
         _print()
         property_id = _prompt_property_id(
-            default=_existing("ga4", "property_id"),
+            default=_existing("ga4", "property_id"),  # type: ignore[operator]
         )
 
     # Auto-discover Ads accounts
@@ -463,18 +502,20 @@ def run_init_wizard() -> None:
             else:
                 _print("  No Ads accounts found. Enter manually:")
                 customer_id = _prompt_customer_id("Ads Customer ID (XXX-XXX-XXXX)")
+        except KeyboardInterrupt:
+            raise
         except Exception as exc:
             _print(f"  Could not auto-discover Ads accounts: {exc}")
             customer_id = _prompt_customer_id(
                 "Ads Customer ID (XXX-XXX-XXXX)",
-                default=_existing("ads", "customer_id"),
+                default=_existing("ads", "customer_id"),  # type: ignore[operator]
             )
     else:
         step_num += 1
         _step_header(step_num, "Google Ads Account")
         customer_id = _prompt_customer_id(
             "Ads Customer ID (XXX-XXX-XXXX)",
-            default=_existing("ads", "customer_id"),
+            default=_existing("ads", "customer_id"),  # type: ignore[operator]
         )
 
     # Safety defaults
@@ -482,7 +523,7 @@ def run_init_wizard() -> None:
     _step_header(step_num, "Safety Defaults")
     budget_str = _prompt(
         "Max daily budget cap (safety limit)",
-        default=str(_existing("safety", "max_daily_budget", "50")),
+        default=str(_existing("safety", "max_daily_budget", "50")),  # type: ignore[operator]
         required=False,
     )
     try:

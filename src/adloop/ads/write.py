@@ -1626,6 +1626,35 @@ def _draft_status_change(
 # ---------------------------------------------------------------------------
 
 
+_MUTATE_RESPONSE_RESULT_FIELDS = [
+    "campaign_budget_result",
+    "campaign_result",
+    "ad_group_result",
+    "ad_group_ad_result",
+    "ad_group_criterion_result",
+    "campaign_criterion_result",
+    "asset_result",
+    "campaign_asset_result",
+    "customer_asset_result",
+]
+
+
+def _extract_resource_name(resp: object) -> str:
+    """Extract the resource_name from a MutateOperationResponse.
+
+    Uses direct field access instead of WhichOneof, which doesn't work on
+    proto-plus wrapped messages returned by the google-ads library.
+    """
+    for field in _MUTATE_RESPONSE_RESULT_FIELDS:
+        try:
+            result = getattr(resp, field, None)
+            if result and result.resource_name:
+                return result.resource_name
+        except Exception:
+            continue
+    return ""
+
+
 def _execute_plan(config: AdLoopConfig, plan: object) -> dict:
     """Dispatch to the right Google Ads mutate call based on plan.operation."""
     from adloop.ads.client import get_ads_client, normalize_customer_id
@@ -1818,22 +1847,20 @@ def _apply_create_campaign(client: object, cid: str, changes: dict) -> dict:
     num_geo = len(changes.get("geo_target_ids") or [])
     num_lang = len(changes.get("language_ids") or [])
     for i, resp in enumerate(response.mutate_operation_responses):
-        resp_type = resp.WhichOneof("response")
-        if resp_type:
-            inner = getattr(resp, resp_type)
-            resource = getattr(inner, "resource_name", str(inner))
+        rn = _extract_resource_name(resp)
+        if rn:
             if i == 0:
-                results["campaign_budget"] = resource
+                results["campaign_budget"] = rn
             elif i == 1:
-                results["campaign"] = resource
+                results["campaign"] = rn
             elif i == 2:
-                results["ad_group"] = resource
+                results["ad_group"] = rn
             elif i < 3 + num_keywords:
-                results.setdefault("keywords", []).append(resource)
+                results.setdefault("keywords", []).append(rn)
             elif i < 3 + num_keywords + num_geo:
-                results.setdefault("geo_targets", []).append(resource)
+                results.setdefault("geo_targets", []).append(rn)
             else:
-                results.setdefault("language_targets", []).append(resource)
+                results.setdefault("language_targets", []).append(rn)
 
     return results
 
@@ -1874,14 +1901,12 @@ def _apply_create_ad_group(client: object, cid: str, changes: dict) -> dict:
 
     results: dict = {}
     for i, resp in enumerate(response.mutate_operation_responses):
-        resp_type = resp.WhichOneof("response")
-        if resp_type:
-            inner = getattr(resp, resp_type)
-            resource = getattr(inner, "resource_name", str(inner))
+        rn = _extract_resource_name(resp)
+        if rn:
             if i == 0:
-                results["ad_group"] = resource
+                results["ad_group"] = rn
             else:
-                results.setdefault("keywords", []).append(resource)
+                results.setdefault("keywords", []).append(rn)
 
     return results
 
@@ -2039,11 +2064,7 @@ def _apply_update_campaign(client: object, cid: str, changes: dict) -> dict:
 
     results = {"updated": []}
     for resp in response.mutate_operation_responses:
-        rn = (
-            resp.campaign_result.resource_name
-            or resp.campaign_budget_result.resource_name
-            or resp.campaign_criterion_result.resource_name
-        )
+        rn = _extract_resource_name(resp)
         if rn:
             results["updated"].append(rn)
     return results

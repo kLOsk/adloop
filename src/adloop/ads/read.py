@@ -214,6 +214,11 @@ def get_negative_keywords(
     """
 
     rows = execute_query(config, customer_id, query)
+    for row in rows:
+        cid = row.get("campaign.id")
+        crit_id = row.get("campaign_criterion.criterion_id")
+        if cid and crit_id:
+            row["resource_id"] = f"{cid}~{crit_id}"
     return {"negative_keywords": rows, "total_negative_keywords": len(rows)}
 
 

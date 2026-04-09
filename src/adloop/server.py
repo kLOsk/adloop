@@ -1039,7 +1039,8 @@ def remove_entity(
                  "campaign_asset", "asset", or "customer_asset"
     entity_id: The resource ID.
                For keywords: "adGroupId~criterionId"
-               For negative_keywords: the campaign criterion ID
+               For negative_keywords: "campaignId~criterionId"
+                   (use the resource_id field from get_negative_keywords)
                For campaign_asset: "campaignId~assetId~fieldType"
                For asset: simple asset ID
                For customer_asset: "assetId~fieldType"
