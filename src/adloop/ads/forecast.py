@@ -162,7 +162,7 @@ _COMPETITION_LABELS = {0: "UNSPECIFIED", 1: "LOW", 2: "MEDIUM", 3: "HIGH"}
 def discover_keywords(
     config: AdLoopConfig,
     *,
-    seed_keywords: list[str] | None = None,
+    seed_keywords: list[str] = [],
     url: str = "",
     geo_target_id: str = "2276",
     language_id: str = "1000",
@@ -185,7 +185,7 @@ def discover_keywords(
     language_id: language constant (1000=English, 1001=German, 1002=French)
     page_size: max number of keyword ideas to return (default 50, max 1000)
     """
-    from adloop.ads.client import get_ads_client, normalize_customer_id
+    from adloop.ads.client import call_with_retry, get_ads_client, normalize_customer_id
 
     seed_keywords = seed_keywords or []
     if not seed_keywords and not url:
@@ -215,7 +215,7 @@ def discover_keywords(
     else:
         request.url_seed.url = url
 
-    response = kp_service.generate_keyword_ideas(request=request)
+    response = call_with_retry(kp_service.generate_keyword_ideas, request=request)
 
     ideas = []
     for idea in response:

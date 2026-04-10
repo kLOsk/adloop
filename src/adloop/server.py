@@ -1300,7 +1300,7 @@ def estimate_budget(
 @mcp.tool(annotations=_READONLY)
 @_safe
 def discover_keywords(
-    seed_keywords: list[str] | None = None,
+    seed_keywords: list[str] = [],
     url: str = "",
     geo_target_id: str = "2276",
     language_id: str = "1000",

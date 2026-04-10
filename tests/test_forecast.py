@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 from types import SimpleNamespace
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, call, patch
 
 import pytest
 
 from adloop.ads import forecast
+from adloop.ads.client import _is_rate_limit_error, call_with_retry
 from adloop.config import AdLoopConfig, AdsConfig, SafetyConfig
 
 
@@ -155,3 +156,70 @@ class TestDiscoverKeywords:
             forecast.discover_keywords(config, seed_keywords=["test"], page_size=9999)
 
         assert request_obj.page_size == 1000
+
+    def test_empty_seed_keywords_without_url_returns_error(self, config):
+        result = forecast.discover_keywords(config, seed_keywords=[])
+        assert "error" in result
+
+    def test_default_seed_keywords_is_empty_list_not_none(self, config):
+        """seed_keywords default must be [] so the MCP schema is array, not anyOf[array,null]."""
+        import inspect
+        sig = inspect.signature(forecast.discover_keywords)
+        default = sig.parameters["seed_keywords"].default
+        assert default == []
+        assert default is not None
+
+
+class TestCallWithRetry:
+    def test_returns_result_on_first_success(self):
+        fn = MagicMock(return_value="ok")
+        assert call_with_retry(fn, "arg", key="val") == "ok"
+        fn.assert_called_once_with("arg", key="val")
+
+    def test_non_rate_limit_error_raises_immediately(self):
+        fn = MagicMock(side_effect=ValueError("unexpected"))
+        with pytest.raises(ValueError, match="unexpected"):
+            call_with_retry(fn, max_attempts=4)
+        fn.assert_called_once()
+
+    def test_retries_on_rate_limit_and_eventually_succeeds(self):
+        rate_limit = Exception("RESOURCE_EXHAUSTED: quota exceeded")
+        fn = MagicMock(side_effect=[rate_limit, rate_limit, "success"])
+        with patch("adloop.ads.client.time.sleep") as mock_sleep:
+            result = call_with_retry(fn, max_attempts=4, base_delay=1.0)
+        assert result == "success"
+        assert fn.call_count == 3
+        assert mock_sleep.call_count == 2
+
+    def test_raises_after_max_attempts_exhausted(self):
+        rate_limit = Exception("RESOURCE_EXHAUSTED: quota exceeded")
+        fn = MagicMock(side_effect=rate_limit)
+        with patch("adloop.ads.client.time.sleep"):
+            with pytest.raises(Exception, match="RESOURCE_EXHAUSTED"):
+                call_with_retry(fn, max_attempts=3, base_delay=0.01)
+        assert fn.call_count == 3
+
+    def test_backoff_delay_grows_exponentially(self):
+        rate_limit = Exception("429 Too Many Requests")
+        fn = MagicMock(side_effect=[rate_limit, rate_limit, "ok"])
+        sleep_calls = []
+        with patch("adloop.ads.client.time.sleep", side_effect=lambda d: sleep_calls.append(d)):
+            with patch("adloop.ads.client.random.uniform", return_value=0.0):
+                call_with_retry(fn, max_attempts=4, base_delay=1.0)
+        assert sleep_calls[0] == pytest.approx(1.0)   # 1.0 * 2^0
+        assert sleep_calls[1] == pytest.approx(2.0)   # 1.0 * 2^1
+
+
+class TestIsRateLimitError:
+    @pytest.mark.parametrize("msg", [
+        "RESOURCE_EXHAUSTED: quota exceeded",
+        "status 429 Too Many Requests",
+        "RATE_LIMIT_EXCEEDED",
+        "QUOTA_EXCEEDED for the day",
+    ])
+    def test_detects_rate_limit_messages(self, msg):
+        assert _is_rate_limit_error(Exception(msg))
+
+    def test_ignores_unrelated_errors(self):
+        assert not _is_rate_limit_error(ValueError("some other error"))
+        assert not _is_rate_limit_error(Exception("INTERNAL: server error"))
