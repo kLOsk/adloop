@@ -79,6 +79,7 @@ These tools call both APIs internally and return unified results with computed `
 
 | Tool | When to Use | Key Parameters |
 |------|-------------|----------------|
+| `discover_keywords` | Discover new keyword ideas from seed keywords and/or a URL — returns avg monthly searches, competition, and bid range | `seed_keywords` (list, optional), `url` (optional), `geo_target_id`, `language_id`, `page_size` |
 | `estimate_budget` | Budget planning before launching a campaign — forecasts clicks, impressions, cost for a set of keywords | `keywords` (list of {text, match_type, max_cpc}), `daily_budget` (optional), `geo_target_id`, `language_id`, `forecast_days` |
 
 `estimate_budget` calls the Google Ads Keyword Planner API (read-only — creates nothing). Returns forecast metrics for the specified keywords and optional budget, including daily estimates and insights about budget sufficiency. Common geo targets: 2276=Germany, 2840=USA, 2826=UK. Common languages: 1000=English, 1001=German, 1002=French.
@@ -260,6 +261,17 @@ Most websites (especially in the EU) use a GDPR cookie consent banner. This has 
 4. Call `update_campaign` with only the parameters that need to change
 5. Present the preview — clearly show what's changing (old → new)
 6. Wait for explicit user approval before calling `confirm_and_apply`
+
+### When user wants to discover new keywords
+
+1. Ask whether to start with seed keywords, a URL, or both — these map directly to the two modes in Google Ads Keyword Planner UI
+2. Call `discover_keywords` with `seed_keywords`, `url`, or both, plus the target `geo_target_id` and `language_id`
+3. Review `insights[]` — highlights the highest-volume idea, high-competition terms to budget carefully for, and low-competition opportunities
+4. Present results grouped by competition level (LOW → MEDIUM → HIGH) so the user can quickly spot easy wins vs expensive battles
+5. For any ideas the user wants to act on, suggest the next step:
+   - Use `estimate_budget` with the selected keywords to forecast traffic and cost before committing
+   - Use `draft_keywords` to add them to an existing ad group
+   - Use `draft_campaign` to build a new campaign around them
 
 ### When user asks "how much should I spend" or "what budget do I need"
 

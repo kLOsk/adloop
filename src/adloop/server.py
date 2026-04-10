@@ -1295,3 +1295,40 @@ def estimate_budget(
         forecast_days=forecast_days,
         customer_id=customer_id or _config.ads.customer_id,
     )
+
+
+@mcp.tool(annotations=_READONLY)
+@_safe
+def discover_keywords(
+    seed_keywords: list[str] | None = None,
+    url: str = "",
+    geo_target_id: str = "2276",
+    language_id: str = "1000",
+    page_size: int = 50,
+    customer_id: str = "",
+) -> dict:
+    """Discover new keyword ideas using Google Ads Keyword Planner.
+
+    Mirrors the "Discover new keywords" UI in Keyword Planner:
+    - Start with keywords: pass seed_keywords (e.g. ["running shoes"])
+    - Start with a website: pass url (e.g. "https://example.com/products")
+    - Both together: keywords + url for more targeted ideas
+
+    Returns keyword ideas sorted by avg monthly search volume, with
+    competition level (LOW/MEDIUM/HIGH) and top-of-page bid range.
+
+    geo_target_id: geo target constant (2276=Germany, 2840=USA, 2826=UK)
+    language_id: language constant (1000=English, 1001=German, 1002=French)
+    page_size: max keyword ideas to return (default 50, max 1000)
+    """
+    from adloop.ads.forecast import discover_keywords as _impl
+
+    return _impl(
+        _config,
+        seed_keywords=seed_keywords,
+        url=url,
+        geo_target_id=geo_target_id,
+        language_id=language_id,
+        page_size=page_size,
+        customer_id=customer_id or _config.ads.customer_id,
+    )
