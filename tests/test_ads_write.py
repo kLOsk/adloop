@@ -9,7 +9,7 @@ import pytest
 from google.ads.googleads.client import GoogleAdsClient
 
 from adloop.ads.client import GOOGLE_ADS_API_VERSION
-from adloop.ads import write
+from adloop.ads import read, write
 from adloop.config import AdLoopConfig, AdsConfig, SafetyConfig
 from adloop.safety import preview as preview_store
 
@@ -681,6 +681,82 @@ class TestProposeNegativeKeywordList:
         plan_id = result["plan_id"]
         from adloop.safety import preview as preview_store
         assert plan_id in preview_store._pending_plans
+
+
+class TestGetNegativeKeywordLists:
+    def test_returns_list_of_shared_sets(self, config, monkeypatch):
+        fake_rows = [
+            {
+                "shared_set.id": "111",
+                "shared_set.name": "Brand Exclusions",
+                "shared_set.status": "ENABLED",
+                "shared_set.member_count": 5,
+                "shared_set.resource_name": "customers/123/sharedSets/111",
+            }
+        ]
+        monkeypatch.setattr(
+            "adloop.ads.gaql.execute_query", lambda *_a, **_kw: fake_rows
+        )
+        result = read.get_negative_keyword_lists(config, customer_id="123-456-7890")
+        assert result["total_lists"] == 1
+        assert result["negative_keyword_lists"][0]["shared_set.name"] == "Brand Exclusions"
+
+    def test_empty_account_returns_zero(self, config, monkeypatch):
+        monkeypatch.setattr("adloop.ads.gaql.execute_query", lambda *_a, **_kw: [])
+        result = read.get_negative_keyword_lists(config)
+        assert result["total_lists"] == 0
+        assert result["negative_keyword_lists"] == []
+
+
+class TestGetNegativeKeywordListKeywords:
+    def test_requires_shared_set_id(self, config):
+        result = read.get_negative_keyword_list_keywords(config)
+        assert result["error"] == "shared_set_id is required"
+
+    def test_returns_keywords_for_list(self, config, monkeypatch):
+        fake_rows = [
+            {
+                "shared_criterion.keyword.text": "free",
+                "shared_criterion.keyword.match_type": "EXACT",
+                "shared_set.id": "111",
+                "shared_set.name": "Brand Exclusions",
+            }
+        ]
+        monkeypatch.setattr(
+            "adloop.ads.gaql.execute_query", lambda *_a, **_kw: fake_rows
+        )
+        result = read.get_negative_keyword_list_keywords(
+            config, customer_id="123-456-7890", shared_set_id="111"
+        )
+        assert result["total_keywords"] == 1
+        assert result["shared_set_id"] == "111"
+        assert result["keywords"][0]["shared_criterion.keyword.text"] == "free"
+
+
+class TestGetNegativeKeywordListCampaigns:
+    def test_returns_attachments(self, config, monkeypatch):
+        fake_rows = [
+            {
+                "campaign.id": "1001",
+                "campaign.name": "Summer Sale",
+                "campaign.status": "ENABLED",
+                "shared_set.id": "111",
+                "shared_set.name": "Brand Exclusions",
+            }
+        ]
+        monkeypatch.setattr(
+            "adloop.ads.gaql.execute_query", lambda *_a, **_kw: fake_rows
+        )
+        result = read.get_negative_keyword_list_campaigns(
+            config, customer_id="123-456-7890", shared_set_id="111"
+        )
+        assert result["total_attachments"] == 1
+        assert result["attachments"][0]["campaign.name"] == "Summer Sale"
+
+    def test_no_shared_set_id_returns_all_attachments(self, config, monkeypatch):
+        monkeypatch.setattr("adloop.ads.gaql.execute_query", lambda *_a, **_kw: [])
+        result = read.get_negative_keyword_list_campaigns(config)
+        assert result["total_attachments"] == 0
 
 
 def test_extract_error_message_handles_plain_exceptions():

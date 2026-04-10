@@ -393,6 +393,61 @@ def get_negative_keywords(
     )
 
 
+@mcp.tool(annotations=_READONLY)
+@_safe
+def get_negative_keyword_lists(
+    customer_id: str = "",
+) -> dict:
+    """List all shared negative keyword lists (SharedSets) in the account.
+
+    Returns each list's ID, name, status, and keyword count. Always call
+    this before propose_negative_keyword_list to avoid creating duplicates —
+    a suitable list may already exist and just need attaching to a campaign.
+    """
+    from adloop.ads.read import get_negative_keyword_lists as _impl
+
+    return _impl(_config, customer_id=customer_id or _config.ads.customer_id)
+
+
+@mcp.tool(annotations=_READONLY)
+@_safe
+def get_negative_keyword_list_keywords(
+    shared_set_id: str,
+    customer_id: str = "",
+) -> dict:
+    """List the keywords inside a shared negative keyword list.
+
+    shared_set_id: numeric ID from get_negative_keyword_lists (shared_set.id).
+    """
+    from adloop.ads.read import get_negative_keyword_list_keywords as _impl
+
+    return _impl(
+        _config,
+        customer_id=customer_id or _config.ads.customer_id,
+        shared_set_id=shared_set_id,
+    )
+
+
+@mcp.tool(annotations=_READONLY)
+@_safe
+def get_negative_keyword_list_campaigns(
+    shared_set_id: str = "",
+    customer_id: str = "",
+) -> dict:
+    """List which campaigns a shared negative keyword list is attached to.
+
+    shared_set_id: numeric ID from get_negative_keyword_lists. Omit to see
+    all list-to-campaign attachments across the account.
+    """
+    from adloop.ads.read import get_negative_keyword_list_campaigns as _impl
+
+    return _impl(
+        _config,
+        customer_id=customer_id or _config.ads.customer_id,
+        shared_set_id=shared_set_id,
+    )
+
+
 # ---------------------------------------------------------------------------
 # Google Ads — Recommendations, Performance Max & Audience Tools
 # ---------------------------------------------------------------------------

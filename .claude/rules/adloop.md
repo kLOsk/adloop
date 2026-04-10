@@ -34,7 +34,10 @@ You have access to AdLoop MCP tools that connect Google Ads and Google Analytics
 | `get_ad_performance` | Ad copy analysis — which headlines/descriptions work | `date_range_start`, `date_range_end` |
 | `get_keyword_performance` | Keyword analysis — quality scores, competitive metrics | `date_range_start`, `date_range_end` |
 | `get_search_terms` | Find negative keyword opportunities and understand user intent | `date_range_start`, `date_range_end` |
-| `get_negative_keywords` | List existing negative keywords for a campaign or all campaigns | `campaign_id` (optional) |
+| `get_negative_keywords` | List direct campaign-level negative keywords (not inside SharedSets) | `campaign_id` (optional) |
+| `get_negative_keyword_lists` | List all shared negative keyword lists — names, IDs, status, keyword count | (none) |
+| `get_negative_keyword_list_keywords` | List the keywords inside a specific shared negative keyword list | `shared_set_id` (required) |
+| `get_negative_keyword_list_campaigns` | List which campaigns a shared negative keyword list is attached to | `shared_set_id` (optional) |
 | `get_recommendations` | Google's auto-generated recommendations with estimated impact — budget, keyword, bid strategy, ad copy suggestions | `recommendation_types` (optional filter), `campaign_id` (optional) |
 | `get_pmax_performance` | Performance Max campaign metrics with network breakdown + asset group ad strength | `date_range_start`, `date_range_end` |
 | `get_asset_performance` | Per-asset details for PMax — field type, serving status, content. Use with `get_detailed_asset_performance` for quality signals | `campaign_id` (optional) |
@@ -284,7 +287,8 @@ Most websites (especially in the EU) use a GDPR cookie consent banner. This has 
 5. Choose the right write tool:
    - **Direct campaign negatives** (`add_negative_keywords`): faster, campaign-specific, no reuse across campaigns
    - **Shared negative keyword list** (`propose_negative_keyword_list`): creates a named, reusable list that can be attached to multiple campaigns — prefer this when the user wants to reuse the list or when they explicitly mention "list"
-6. Present preview and wait for confirmation
+6. **Before calling `propose_negative_keyword_list`**, always call `get_negative_keyword_lists` first to check whether a suitable list already exists. If a matching list is found, inspect its keywords via `get_negative_keyword_list_keywords` and check which campaigns it is already on via `get_negative_keyword_list_campaigns` — it may only need attaching to a new campaign rather than being recreated. Creating duplicate lists wastes account resources and makes management harder.
+7. Present preview and wait for confirmation
 
 ### When user asks to pause or enable something
 
