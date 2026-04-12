@@ -42,7 +42,7 @@ Every tool exists because of an actual problem hit while running real Google Ads
 
 The best features come from real workflows. If you're using AdLoop and find yourself wishing it could do something it can't, **open an issue describing your situation** — not just "add feature X" but "I was trying to do Y and couldn't because Z." The context matters more than the request.
 
-## All 38 Tools
+## All 43 Tools
 
 > **Quick start:** `pip install adloop` or `git clone https://github.com/kLOsk/adloop.git && cd adloop && uv sync && uv run adloop init`
 
@@ -70,7 +70,10 @@ The best features come from real workflows. If you're using AdLoop and find your
 | `get_ad_performance` | Ad copy analysis — headlines, descriptions, CTR |
 | `get_keyword_performance` | Keywords — quality scores, competitive metrics |
 | `get_search_terms` | What users actually searched before clicking |
-| `get_negative_keywords` | List existing negative keywords for a campaign or all campaigns |
+| `get_negative_keywords` | List direct campaign-level negative keywords |
+| `get_negative_keyword_lists` | List all shared negative keyword lists (SharedSets) — names, IDs, status, keyword count |
+| `get_negative_keyword_list_keywords` | List the keywords inside a specific shared negative keyword list |
+| `get_negative_keyword_list_campaigns` | List which campaigns a shared negative keyword list is attached to |
 | `get_recommendations` | Google's auto-generated recommendations with type, estimated impact, and campaign context |
 | `get_pmax_performance` | Performance Max campaign metrics with network breakdown + asset group ad strength |
 | `get_asset_performance` | Per-asset details for PMax — field type, serving status, content |
@@ -99,6 +102,7 @@ These tools call both APIs internally and return unified results with auto-gener
 
 | Tool | What It Does |
 |------|-------------|
+| `discover_keywords` | Discover new keyword ideas from seed keywords and/or a URL using Google Ads Keyword Planner. Returns avg monthly searches, competition level, and top-of-page bid range. |
 | `estimate_budget` | Forecast clicks, impressions, and cost for a set of keywords using Google Ads Keyword Planner. Supports geo/language targeting. Essential for budget planning before launching campaigns. |
 
 ### Google Ads Write Tools
@@ -116,7 +120,8 @@ All write operations follow a **draft → preview → confirm** workflow. Nothin
 | `draft_structured_snippets` | Create campaign structured snippet assets using official header values and 3-10 snippet values. |
 | `draft_image_assets` | Create campaign image assets from local PNG, JPEG, or GIF files. |
 | `draft_keywords` | Propose keyword additions with match types. Proactively checks bidding strategy — blocks BROAD match on Manual CPC campaigns. |
-| `add_negative_keywords` | Propose negative keywords to reduce wasted spend |
+| `add_negative_keywords` | Propose negative keywords directly on a campaign |
+| `propose_negative_keyword_list` | Draft a shared negative keyword list (SharedSet) and attach it to a campaign — reusable across multiple campaigns |
 | `pause_entity` | Pause a campaign, ad group, ad, or keyword |
 | `enable_entity` | Re-enable a paused entity |
 | `remove_entity` | Permanently remove an entity (irreversible — prefers pause). Supports keywords, negative keywords, ads, ad groups, campaigns. |
@@ -130,7 +135,7 @@ AdLoop ships with orchestration rules that teach the AI *how* to combine these t
 - **Claude Code**: `.claude/rules/adloop.md` (synced from Cursor rules via `scripts/sync-rules.py`)
 
 The rules include:
-- **Orchestration patterns** for common workflows (performance review, conversion diagnosis, campaign creation, negative keyword hygiene, tracking validation, budget planning, landing page analysis)
+- **Orchestration patterns** for common workflows (performance review, conversion diagnosis, campaign creation, negative keyword hygiene, keyword discovery, tracking validation, budget planning, landing page analysis)
 - **GAQL quick reference** with syntax, common queries, and gotchas
 - **Safety rules** including Broad Match + Manual CPC prevention and pre-write validation
 - **Ad copy character limit guidance** (30-char headlines are shorter than you think)
@@ -298,6 +303,7 @@ Ask your AI assistant things like:
 - *"Draft a new responsive search ad for my main campaign."*
 - *"Which landing pages get paid traffic but don't convert?"*
 - *"Is my tracking set up correctly? Compare my codebase events against GA4."*
+- *"What keywords should I target for [product]? Find ideas and estimate the budget."*
 - *"How much budget would I need for these keywords in Germany?"*
 - *"Create a new search campaign for [product feature] with a €20/day budget."*
 
@@ -323,7 +329,7 @@ All configuration lives in `~/.adloop/config.yaml`. See [`config.yaml.example`](
 ```
 src/adloop/
 ├── __init__.py        # Entry point — routes 'adloop init' to wizard, otherwise starts MCP server
-├── server.py          # FastMCP server — 38 tool registrations with safety annotations
+├── server.py          # FastMCP server — 43 tool registrations with safety annotations
 ├── config.py          # Config loader (~/.adloop/config.yaml)
 ├── auth.py            # OAuth 2.0 flow (bundled + custom credentials, headless fallback) + service accounts
 ├── cli.py             # Interactive 'adloop init' setup wizard
@@ -334,12 +340,12 @@ src/adloop/
 │   ├── reports.py     # Account summaries, reports, realtime
 │   └── tracking.py    # Event discovery
 ├── ads/
-│   ├── client.py      # Google Ads API client (version-pinned)
+│   ├── client.py      # Google Ads API client (version-pinned) + retry/backoff for rate limits
 │   ├── gaql.py        # GAQL query execution with human-readable error parsing
-│   ├── read.py        # Campaign, ad, keyword, search term, negative keyword, recommendations, audience reads
+│   ├── read.py        # Campaign, ad, keyword, search term, negative keyword, shared sets, recommendations, audience reads
 │   ├── pmax.py        # Performance Max tools — campaign/asset group performance, asset labels, top combinations
 │   ├── write.py       # Draft campaign, RSA, keywords; pause, enable, remove, confirm
-│   └── forecast.py    # Budget estimation via Keyword Planner API
+│   └── forecast.py    # Budget estimation + keyword discovery via Keyword Planner API
 └── safety/
     ├── guards.py      # Budget caps, bid limits, blocked operations, Broad Match safety
     ├── preview.py     # Change plans and previews
@@ -354,7 +360,9 @@ What's been shipped and what's next:
 - ~~Google Ads read + write tools with safety layer~~ ✓
 - ~~Cross-reference intelligence (campaign→conversion mapping, landing page analysis, attribution comparison)~~ ✓
 - ~~Tracking utilities (validate events against GA4, generate gtag code)~~ ✓
-- ~~Budget estimation via Keyword Planner~~ ✓
+- ~~Budget estimation + keyword discovery via Keyword Planner~~ ✓
+- ~~Shared negative keyword lists (SharedSet API)~~ ✓
+- ~~Retry/backoff for API rate limits~~ ✓
 - ~~Setup wizard (`adloop init`)~~ ✓
 - ~~Claude Code support~~ ✓ — `CLAUDE.md`, `.mcp.json`, `.claude/rules/`, `.claude/commands/`, CLI wizard snippets
 - ~~PyPI package~~ ✓ — `pip install adloop`

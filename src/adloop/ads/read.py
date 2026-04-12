@@ -263,6 +263,8 @@ def get_negative_keyword_list_keywords(
 
     if not shared_set_id:
         return {"error": "shared_set_id is required"}
+    if not shared_set_id.isdigit():
+        return {"error": "shared_set_id must be a numeric ID"}
 
     query = f"""
         SELECT shared_criterion.keyword.text,
@@ -297,6 +299,8 @@ def get_negative_keyword_list_campaigns(
 
     shared_set_filter = ""
     if shared_set_id:
+        if not shared_set_id.isdigit():
+            return {"error": "shared_set_id must be a numeric ID"}
         shared_set_filter = f"AND shared_set.id = {shared_set_id}"
 
     query = f"""

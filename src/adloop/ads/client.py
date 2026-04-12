@@ -46,11 +46,24 @@ def normalize_customer_id(customer_id: str) -> str:
 
 
 def _is_rate_limit_error(exc: Exception) -> bool:
-    """Return True if the exception is a 429 / RESOURCE_EXHAUSTED rate-limit error."""
+    """Return True if the exception is a 429 / RESOURCE_EXHAUSTED rate-limit error.
+
+    Checks the gRPC status code on GoogleAdsException first (reliable),
+    then falls back to string matching for non-gRPC exceptions.
+    """
+    try:
+        from google.ads.googleads.errors import GoogleAdsException
+
+        if isinstance(exc, GoogleAdsException):
+            from grpc import StatusCode
+
+            return exc.error.code() == StatusCode.RESOURCE_EXHAUSTED
+    except ImportError:
+        pass
+
     msg = str(exc).upper()
     return (
         "RESOURCE_EXHAUSTED" in msg
-        or "429" in msg
         or "RATE_LIMIT" in msg
         or "QUOTA_EXCEEDED" in msg
     )
@@ -71,6 +84,9 @@ def call_with_retry(
     1 second of random jitter to avoid thundering-herd.
 
     All other exceptions are re-raised immediately without retrying.
+
+    Note: uses time.sleep (blocking). This is safe because FastMCP runs sync
+    tool functions in a thread executor — only the worker thread blocks.
     """
     for attempt in range(max_attempts):
         try:

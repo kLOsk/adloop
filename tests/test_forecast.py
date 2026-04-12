@@ -200,7 +200,7 @@ class TestCallWithRetry:
         assert fn.call_count == 3
 
     def test_backoff_delay_grows_exponentially(self):
-        rate_limit = Exception("429 Too Many Requests")
+        rate_limit = Exception("RATE_LIMIT: Too Many Requests")
         fn = MagicMock(side_effect=[rate_limit, rate_limit, "ok"])
         sleep_calls = []
         with patch("adloop.ads.client.time.sleep", side_effect=lambda d: sleep_calls.append(d)):
@@ -213,7 +213,6 @@ class TestCallWithRetry:
 class TestIsRateLimitError:
     @pytest.mark.parametrize("msg", [
         "RESOURCE_EXHAUSTED: quota exceeded",
-        "status 429 Too Many Requests",
         "RATE_LIMIT_EXCEEDED",
         "QUOTA_EXCEEDED for the day",
     ])
@@ -223,3 +222,6 @@ class TestIsRateLimitError:
     def test_ignores_unrelated_errors(self):
         assert not _is_rate_limit_error(ValueError("some other error"))
         assert not _is_rate_limit_error(Exception("INTERNAL: server error"))
+
+    def test_bare_429_not_matched_to_avoid_false_positives(self):
+        assert not _is_rate_limit_error(Exception("Error on entity 429"))

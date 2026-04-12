@@ -162,7 +162,7 @@ _COMPETITION_LABELS = {0: "UNSPECIFIED", 1: "LOW", 2: "MEDIUM", 3: "HIGH"}
 def discover_keywords(
     config: AdLoopConfig,
     *,
-    seed_keywords: list[str] = [],
+    seed_keywords: list[str] = [],  # noqa: B006 — mutable default required for MCP JSON schema (array, not anyOf)
     url: str = "",
     geo_target_id: str = "2276",
     language_id: str = "1000",
@@ -187,7 +187,7 @@ def discover_keywords(
     """
     from adloop.ads.client import call_with_retry, get_ads_client, normalize_customer_id
 
-    seed_keywords = seed_keywords or []
+    seed_keywords = list(seed_keywords)
     if not seed_keywords and not url:
         return {"error": "Provide at least one of: seed_keywords or url"}
 

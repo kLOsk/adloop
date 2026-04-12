@@ -36,7 +36,10 @@ You have access to AdLoop MCP tools that connect Google Ads and Google Analytics
 | `get_ad_performance` | Ad copy analysis — which headlines/descriptions work | `date_range_start`, `date_range_end` |
 | `get_keyword_performance` | Keyword analysis — quality scores, competitive metrics | `date_range_start`, `date_range_end` |
 | `get_search_terms` | Find negative keyword opportunities and understand user intent | `date_range_start`, `date_range_end` |
-| `get_negative_keywords` | List existing negative keywords for a campaign or all campaigns | `campaign_id` (optional) |
+| `get_negative_keywords` | List direct campaign-level negative keywords (not inside SharedSets) | `campaign_id` (optional) |
+| `get_negative_keyword_lists` | List all shared negative keyword lists — names, IDs, status, keyword count | (none) |
+| `get_negative_keyword_list_keywords` | List the keywords inside a specific shared negative keyword list | `shared_set_id` (required) |
+| `get_negative_keyword_list_campaigns` | List which campaigns a shared negative keyword list is attached to | `shared_set_id` (optional) |
 | `get_recommendations` | Google's auto-generated recommendations with estimated impact — budget, keyword, bid strategy, ad copy suggestions | `recommendation_types` (optional filter), `campaign_id` (optional) |
 | `get_pmax_performance` | Performance Max campaign metrics with network breakdown + asset group ad strength | `date_range_start`, `date_range_end` |
 | `get_asset_performance` | Per-asset details for PMax — field type, serving status, content. Use with `get_detailed_asset_performance` for quality signals | `campaign_id` (optional) |
@@ -78,6 +81,7 @@ These tools call both APIs internally and return unified results with computed `
 
 | Tool | When to Use | Key Parameters |
 |------|-------------|----------------|
+| `discover_keywords` | Discover new keyword ideas from seed keywords and/or a URL — returns avg monthly searches, competition, and bid range | `seed_keywords` (list, optional), `url` (optional), `geo_target_id`, `language_id`, `page_size` |
 | `estimate_budget` | Budget planning before launching a campaign — forecasts clicks, impressions, cost for a set of keywords | `keywords` (list of {text, match_type, max_cpc}), `daily_budget` (optional), `geo_target_id`, `language_id`, `forecast_days` |
 
 `estimate_budget` calls the Google Ads Keyword Planner API (read-only — creates nothing). Returns forecast metrics for the specified keywords and optional budget, including daily estimates and insights about budget sufficiency. Common geo targets: 2276=Germany, 2840=USA, 2826=UK. Common languages: 1000=English, 1001=German, 1002=French.
@@ -96,7 +100,8 @@ These tools call both APIs internally and return unified results with computed `
 | `draft_image_assets` | Create image assets for a campaign from local files (does NOT publish) | `campaign_id`, `image_paths` list of local PNG/JPEG/GIF files |
 | `draft_sitelinks` | Create sitelink extensions for a campaign (does NOT publish) | `campaign_id`, `sitelinks` list of {link_text ≤25 chars, final_url, description1 ≤35 chars, description2 ≤35 chars} |
 | `draft_keywords` | Propose keyword additions (does NOT add) | Each keyword needs `text` and `match_type` (EXACT/PHRASE/BROAD) |
-| `add_negative_keywords` | Propose negative keywords (does NOT add) | `campaign_id`, keyword list, `match_type` |
+| `add_negative_keywords` | Propose negative keywords directly on a campaign (does NOT add) | `campaign_id`, keyword list, `match_type` |
+| `propose_negative_keyword_list` | Draft a shared negative keyword list and attach it to a campaign (does NOT create) | `campaign_id`, `list_name`, keyword list, `match_type` |
 | `pause_entity` | Propose pausing campaign/ad group/ad/keyword | `entity_type`, `entity_id` |
 | `enable_entity` | Propose enabling paused entity | `entity_type`, `entity_id` |
 | `remove_entity` | Propose REMOVING an entity (irreversible) | `entity_type` (incl. "negative_keyword", "campaign_asset", "asset", "customer_asset"), `entity_id` |
@@ -282,8 +287,22 @@ Most websites (especially in the EU) use a GDPR cookie consent banner. This has 
 2. Call `get_negative_keywords` to see what's already blocked — avoid duplicates
 3. Identify irrelevant terms that waste budget — group them by theme
 4. Call `get_campaign_performance` to get the right `campaign.id`
-5. Call `add_negative_keywords` with the proposed list and the campaign ID
-6. Present preview and wait for confirmation
+5. Choose the right write tool:
+   - **Direct campaign negatives** (`add_negative_keywords`): faster, campaign-specific, no reuse across campaigns
+   - **Shared negative keyword list** (`propose_negative_keyword_list`): creates a named, reusable list that can be attached to multiple campaigns — prefer this when the user wants to reuse the list or when they explicitly mention "list"
+6. **Before calling `propose_negative_keyword_list`**, always call `get_negative_keyword_lists` first to check whether a suitable list already exists. If a matching list is found, inspect its keywords via `get_negative_keyword_list_keywords` and check which campaigns it is already on via `get_negative_keyword_list_campaigns` — it may only need attaching to a new campaign rather than being recreated. Creating duplicate lists wastes account resources and makes management harder.
+7. Present preview and wait for confirmation
+
+### When user wants to discover new keywords
+
+1. Ask whether to start with seed keywords, a URL, or both — these map directly to the two modes in Google Ads Keyword Planner UI
+2. Call `discover_keywords` with `seed_keywords`, `url`, or both, plus the target `geo_target_id` and `language_id`
+3. Review `insights[]` — highlights the highest-volume idea, high-competition terms to budget carefully for, and low-competition opportunities
+4. Present results grouped by competition level (LOW → MEDIUM → HIGH) so the user can quickly spot easy wins vs expensive battles
+5. For any ideas the user wants to act on, suggest the next step:
+   - Use `estimate_budget` with the selected keywords to forecast traffic and cost before committing
+   - Use `draft_keywords` to add them to an existing ad group
+   - Use `draft_campaign` to build a new campaign around them
 
 ### When user asks to pause or enable something
 

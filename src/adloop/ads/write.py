@@ -361,7 +361,7 @@ def propose_negative_keyword_list(
     from adloop.safety.preview import ChangePlan, store_plan
 
     try:
-        check_blocked_operation("add_negative_keywords", config.safety)
+        check_blocked_operation("create_negative_keyword_list", config.safety)
     except SafetyViolation as e:
         return {"error": str(e)}
 
@@ -2525,11 +2525,12 @@ def _apply_create_negative_keyword_list(
 ) -> dict:
     """Create a shared negative keyword list and attach it to a campaign.
 
-    Executes three sequential API calls:
-    1. SharedSetService — create the named list
-    2. SharedCriterionService — add keywords to it
-    3. CampaignSharedSetService — attach the list to the campaign
+    Executes three sequential API calls. If step 2 or 3 fails, the result
+    includes partial_failure info with the SharedSet resource name so the
+    caller can clean up or retry the remaining steps.
     """
+    shared_set_resource = None
+
     # 1. Create the SharedSet
     shared_set_service = client.get_service("SharedSetService")
     ss_op = client.get_type("SharedSetOperation")
@@ -2542,30 +2543,49 @@ def _apply_create_negative_keyword_list(
     shared_set_resource = ss_response.results[0].resource_name
 
     # 2. Add keywords to the list
-    sc_service = client.get_service("SharedCriterionService")
-    sc_ops = []
-    for kw_text in changes["keywords"]:
-        sc_op = client.get_type("SharedCriterionOperation")
-        criterion = sc_op.create
-        criterion.shared_set = shared_set_resource
-        criterion.keyword.text = kw_text
-        criterion.keyword.match_type = getattr(
-            client.enums.KeywordMatchTypeEnum, changes["match_type"]
-        )
-        sc_ops.append(sc_op)
-    sc_service.mutate_shared_criteria(customer_id=cid, operations=sc_ops)
+    try:
+        sc_service = client.get_service("SharedCriterionService")
+        sc_ops = []
+        for kw_text in changes["keywords"]:
+            sc_op = client.get_type("SharedCriterionOperation")
+            criterion = sc_op.create
+            criterion.shared_set = shared_set_resource
+            criterion.keyword.text = kw_text
+            criterion.keyword.match_type = getattr(
+                client.enums.KeywordMatchTypeEnum, changes["match_type"]
+            )
+            sc_ops.append(sc_op)
+        sc_service.mutate_shared_criteria(customer_id=cid, operations=sc_ops)
+    except Exception as exc:
+        return {
+            "partial_failure": True,
+            "shared_set_resource": shared_set_resource,
+            "completed_steps": ["create_shared_set"],
+            "failed_step": "add_keywords",
+            "error": _extract_error_message(exc),
+        }
 
     # 3. Attach the list to the campaign
-    css_service = client.get_service("CampaignSharedSetService")
-    css_op = client.get_type("CampaignSharedSetOperation")
-    campaign_shared_set = css_op.create
-    campaign_shared_set.campaign = client.get_service("CampaignService").campaign_path(
-        cid, changes["campaign_id"]
-    )
-    campaign_shared_set.shared_set = shared_set_resource
-    css_response = css_service.mutate_campaign_shared_sets(
-        customer_id=cid, operations=[css_op]
-    )
+    try:
+        css_service = client.get_service("CampaignSharedSetService")
+        css_op = client.get_type("CampaignSharedSetOperation")
+        campaign_shared_set = css_op.create
+        campaign_shared_set.campaign = client.get_service(
+            "CampaignService"
+        ).campaign_path(cid, changes["campaign_id"])
+        campaign_shared_set.shared_set = shared_set_resource
+        css_response = css_service.mutate_campaign_shared_sets(
+            customer_id=cid, operations=[css_op]
+        )
+    except Exception as exc:
+        return {
+            "partial_failure": True,
+            "shared_set_resource": shared_set_resource,
+            "keyword_count": len(changes["keywords"]),
+            "completed_steps": ["create_shared_set", "add_keywords"],
+            "failed_step": "attach_to_campaign",
+            "error": _extract_error_message(exc),
+        }
 
     return {
         "shared_set_resource": shared_set_resource,

@@ -759,6 +759,94 @@ class TestGetNegativeKeywordListCampaigns:
         assert result["total_attachments"] == 0
 
 
+class TestApplyCreateNegativeKeywordList:
+    """Tests for _apply_create_negative_keyword_list — the 3-step mutate."""
+
+    def _make_client(self, *, fail_on_step: str | None = None):
+        """Build a _FakeClient wired for SharedSet, SharedCriterion, CampaignSharedSet."""
+        shared_set_service = SimpleNamespace(
+            mutate_shared_sets=lambda customer_id, operations: SimpleNamespace(
+                results=[SimpleNamespace(resource_name=f"customers/{customer_id}/sharedSets/999")]
+            ),
+        )
+        shared_criterion_service = SimpleNamespace(
+            mutate_shared_criteria=lambda customer_id, operations: SimpleNamespace(
+                results=[SimpleNamespace(resource_name="criterion/1")]
+            ),
+        )
+        campaign_shared_set_service = SimpleNamespace(
+            mutate_campaign_shared_sets=lambda customer_id, operations: SimpleNamespace(
+                results=[SimpleNamespace(resource_name=f"customers/{customer_id}/campaignSharedSets/888")]
+            ),
+        )
+
+        if fail_on_step == "add_keywords":
+            shared_criterion_service.mutate_shared_criteria = lambda **_kw: (_ for _ in ()).throw(
+                ValueError("quota exceeded")
+            )
+        elif fail_on_step == "attach_to_campaign":
+            campaign_shared_set_service.mutate_campaign_shared_sets = lambda **_kw: (_ for _ in ()).throw(
+                ValueError("invalid campaign")
+            )
+
+        return _FakeClient({
+            "SharedSetService": shared_set_service,
+            "SharedCriterionService": shared_criterion_service,
+            "CampaignSharedSetService": campaign_shared_set_service,
+            "CampaignService": _FakePathService("campaigns"),
+        })
+
+    def _changes(self) -> dict:
+        return {
+            "campaign_id": "1001",
+            "list_name": "Brand Exclusions",
+            "keywords": ["free", "cheap"],
+            "match_type": "EXACT",
+        }
+
+    def test_success_returns_all_resources(self):
+        client = self._make_client()
+        result = write._apply_create_negative_keyword_list(client, "1234567890", self._changes())
+        assert result["shared_set_resource"] == "customers/1234567890/sharedSets/999"
+        assert result["campaign_shared_set_resource"] == "customers/1234567890/campaignSharedSets/888"
+        assert result["keyword_count"] == 2
+        assert "partial_failure" not in result
+
+    def test_step2_failure_returns_partial_with_shared_set_resource(self):
+        client = self._make_client(fail_on_step="add_keywords")
+        result = write._apply_create_negative_keyword_list(client, "1234567890", self._changes())
+        assert result["partial_failure"] is True
+        assert result["failed_step"] == "add_keywords"
+        assert result["shared_set_resource"] == "customers/1234567890/sharedSets/999"
+        assert result["completed_steps"] == ["create_shared_set"]
+
+    def test_step3_failure_returns_partial_with_keyword_count(self):
+        client = self._make_client(fail_on_step="attach_to_campaign")
+        result = write._apply_create_negative_keyword_list(client, "1234567890", self._changes())
+        assert result["partial_failure"] is True
+        assert result["failed_step"] == "attach_to_campaign"
+        assert result["keyword_count"] == 2
+        assert result["completed_steps"] == ["create_shared_set", "add_keywords"]
+
+
+class TestGetNegativeKeywordListInputValidation:
+    """Tests for shared_set_id validation in read tools."""
+
+    def test_non_numeric_shared_set_id_rejected_for_keywords(self, config):
+        result = read.get_negative_keyword_list_keywords(
+            config, shared_set_id="abc; DROP TABLE"
+        )
+        assert "error" in result
+        assert "numeric" in result["error"]
+
+    def test_non_numeric_shared_set_id_rejected_for_campaigns(self, config):
+        result = read.get_negative_keyword_list_campaigns(
+            config, shared_set_id="abc"
+        )
+        assert "error" in result
+        assert "numeric" in result["error"]
+
+
 def test_extract_error_message_handles_plain_exceptions():
     assert write._extract_error_message(ValueError("something broke")) == "something broke"
 

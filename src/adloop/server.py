@@ -1300,7 +1300,7 @@ def estimate_budget(
 @mcp.tool(annotations=_READONLY)
 @_safe
 def discover_keywords(
-    seed_keywords: list[str] = [],
+    seed_keywords: list[str] = [],  # noqa: B006 — mutable default required for MCP JSON schema
     url: str = "",
     geo_target_id: str = "2276",
     language_id: str = "1000",

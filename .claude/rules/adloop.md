@@ -262,17 +262,6 @@ Most websites (especially in the EU) use a GDPR cookie consent banner. This has 
 5. Present the preview — clearly show what's changing (old → new)
 6. Wait for explicit user approval before calling `confirm_and_apply`
 
-### When user wants to discover new keywords
-
-1. Ask whether to start with seed keywords, a URL, or both — these map directly to the two modes in Google Ads Keyword Planner UI
-2. Call `discover_keywords` with `seed_keywords`, `url`, or both, plus the target `geo_target_id` and `language_id`
-3. Review `insights[]` — highlights the highest-volume idea, high-competition terms to budget carefully for, and low-competition opportunities
-4. Present results grouped by competition level (LOW → MEDIUM → HIGH) so the user can quickly spot easy wins vs expensive battles
-5. For any ideas the user wants to act on, suggest the next step:
-   - Use `estimate_budget` with the selected keywords to forecast traffic and cost before committing
-   - Use `draft_keywords` to add them to an existing ad group
-   - Use `draft_campaign` to build a new campaign around them
-
 ### When user asks "how much should I spend" or "what budget do I need"
 
 1. Ask the user for their target keywords (or suggest some based on the business context)
@@ -301,6 +290,17 @@ Most websites (especially in the EU) use a GDPR cookie consent banner. This has 
    - **Shared negative keyword list** (`propose_negative_keyword_list`): creates a named, reusable list that can be attached to multiple campaigns — prefer this when the user wants to reuse the list or when they explicitly mention "list"
 6. **Before calling `propose_negative_keyword_list`**, always call `get_negative_keyword_lists` first to check whether a suitable list already exists. If a matching list is found, inspect its keywords via `get_negative_keyword_list_keywords` and check which campaigns it is already on via `get_negative_keyword_list_campaigns` — it may only need attaching to a new campaign rather than being recreated. Creating duplicate lists wastes account resources and makes management harder.
 7. Present preview and wait for confirmation
+
+### When user wants to discover new keywords
+
+1. Ask whether to start with seed keywords, a URL, or both — these map directly to the two modes in Google Ads Keyword Planner UI
+2. Call `discover_keywords` with `seed_keywords`, `url`, or both, plus the target `geo_target_id` and `language_id`
+3. Review `insights[]` — highlights the highest-volume idea, high-competition terms to budget carefully for, and low-competition opportunities
+4. Present results grouped by competition level (LOW → MEDIUM → HIGH) so the user can quickly spot easy wins vs expensive battles
+5. For any ideas the user wants to act on, suggest the next step:
+   - Use `estimate_budget` with the selected keywords to forecast traffic and cost before committing
+   - Use `draft_keywords` to add them to an existing ad group
+   - Use `draft_campaign` to build a new campaign around them
 
 ### When user asks to pause or enable something
 
