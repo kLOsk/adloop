@@ -9,7 +9,7 @@ import pytest
 from google.ads.googleads.client import GoogleAdsClient
 
 from adloop.ads.client import GOOGLE_ADS_API_VERSION
-from adloop.ads import write
+from adloop.ads import read, write
 from adloop.config import AdLoopConfig, AdsConfig, SafetyConfig
 from adloop.safety import preview as preview_store
 
@@ -599,6 +599,252 @@ def test_remove_entity_normalizes_commas_to_tildes(config):
     )
 
     assert result["entity_id"] == "1001~99~SITELINK"
+
+
+class TestProposeNegativeKeywordList:
+    def test_returns_preview_with_correct_operation(self, config):
+        result = write.propose_negative_keyword_list(
+            config,
+            customer_id="123-456-7890",
+            campaign_id="1001",
+            list_name="Irrelevant Terms",
+            keywords=["free", "cheap diy"],
+            match_type="EXACT",
+        )
+        assert result["operation"] == "create_negative_keyword_list"
+        assert result["entity_type"] == "negative_keyword_list"
+        assert result["entity_id"] == "1001"
+        assert result["changes"]["list_name"] == "Irrelevant Terms"
+        assert result["changes"]["keywords"] == ["free", "cheap diy"]
+        assert result["changes"]["match_type"] == "EXACT"
+        assert result["status"] == "PENDING_CONFIRMATION"
+        assert "plan_id" in result
+
+    def test_normalises_match_type_to_uppercase(self, config):
+        result = write.propose_negative_keyword_list(
+            config,
+            customer_id="123-456-7890",
+            campaign_id="1001",
+            list_name="My List",
+            keywords=["discount"],
+            match_type="phrase",
+        )
+        assert result["changes"]["match_type"] == "PHRASE"
+
+    def test_requires_campaign_id(self, config):
+        result = write.propose_negative_keyword_list(
+            config,
+            list_name="My List",
+            keywords=["free"],
+        )
+        assert result["error"] == "Validation failed"
+        assert any("campaign_id" in d for d in result["details"])
+
+    def test_requires_list_name(self, config):
+        result = write.propose_negative_keyword_list(
+            config,
+            campaign_id="1001",
+            keywords=["free"],
+        )
+        assert result["error"] == "Validation failed"
+        assert any("list_name" in d for d in result["details"])
+
+    def test_requires_at_least_one_keyword(self, config):
+        result = write.propose_negative_keyword_list(
+            config,
+            campaign_id="1001",
+            list_name="My List",
+            keywords=[],
+        )
+        assert result["error"] == "Validation failed"
+        assert any("keyword" in d for d in result["details"])
+
+    def test_rejects_invalid_match_type(self, config):
+        result = write.propose_negative_keyword_list(
+            config,
+            campaign_id="1001",
+            list_name="My List",
+            keywords=["free"],
+            match_type="INVALID",
+        )
+        assert result["error"] == "Validation failed"
+        assert any("match_type" in d for d in result["details"])
+
+    def test_plan_is_stored_and_retrievable(self, config):
+        result = write.propose_negative_keyword_list(
+            config,
+            customer_id="123-456-7890",
+            campaign_id="1001",
+            list_name="Budget Wasters",
+            keywords=["free trial"],
+        )
+        plan_id = result["plan_id"]
+        from adloop.safety import preview as preview_store
+        assert plan_id in preview_store._pending_plans
+
+
+class TestGetNegativeKeywordLists:
+    def test_returns_list_of_shared_sets(self, config, monkeypatch):
+        fake_rows = [
+            {
+                "shared_set.id": "111",
+                "shared_set.name": "Brand Exclusions",
+                "shared_set.status": "ENABLED",
+                "shared_set.member_count": 5,
+                "shared_set.resource_name": "customers/123/sharedSets/111",
+            }
+        ]
+        monkeypatch.setattr(
+            "adloop.ads.gaql.execute_query", lambda *_a, **_kw: fake_rows
+        )
+        result = read.get_negative_keyword_lists(config, customer_id="123-456-7890")
+        assert result["total_lists"] == 1
+        assert result["negative_keyword_lists"][0]["shared_set.name"] == "Brand Exclusions"
+
+    def test_empty_account_returns_zero(self, config, monkeypatch):
+        monkeypatch.setattr("adloop.ads.gaql.execute_query", lambda *_a, **_kw: [])
+        result = read.get_negative_keyword_lists(config)
+        assert result["total_lists"] == 0
+        assert result["negative_keyword_lists"] == []
+
+
+class TestGetNegativeKeywordListKeywords:
+    def test_requires_shared_set_id(self, config):
+        result = read.get_negative_keyword_list_keywords(config)
+        assert result["error"] == "shared_set_id is required"
+
+    def test_returns_keywords_for_list(self, config, monkeypatch):
+        fake_rows = [
+            {
+                "shared_criterion.keyword.text": "free",
+                "shared_criterion.keyword.match_type": "EXACT",
+                "shared_set.id": "111",
+                "shared_set.name": "Brand Exclusions",
+            }
+        ]
+        monkeypatch.setattr(
+            "adloop.ads.gaql.execute_query", lambda *_a, **_kw: fake_rows
+        )
+        result = read.get_negative_keyword_list_keywords(
+            config, customer_id="123-456-7890", shared_set_id="111"
+        )
+        assert result["total_keywords"] == 1
+        assert result["shared_set_id"] == "111"
+        assert result["keywords"][0]["shared_criterion.keyword.text"] == "free"
+
+
+class TestGetNegativeKeywordListCampaigns:
+    def test_returns_attachments(self, config, monkeypatch):
+        fake_rows = [
+            {
+                "campaign.id": "1001",
+                "campaign.name": "Summer Sale",
+                "campaign.status": "ENABLED",
+                "shared_set.id": "111",
+                "shared_set.name": "Brand Exclusions",
+            }
+        ]
+        monkeypatch.setattr(
+            "adloop.ads.gaql.execute_query", lambda *_a, **_kw: fake_rows
+        )
+        result = read.get_negative_keyword_list_campaigns(
+            config, customer_id="123-456-7890", shared_set_id="111"
+        )
+        assert result["total_attachments"] == 1
+        assert result["attachments"][0]["campaign.name"] == "Summer Sale"
+
+    def test_no_shared_set_id_returns_all_attachments(self, config, monkeypatch):
+        monkeypatch.setattr("adloop.ads.gaql.execute_query", lambda *_a, **_kw: [])
+        result = read.get_negative_keyword_list_campaigns(config)
+        assert result["total_attachments"] == 0
+
+
+class TestApplyCreateNegativeKeywordList:
+    """Tests for _apply_create_negative_keyword_list — the 3-step mutate."""
+
+    def _make_client(self, *, fail_on_step: str | None = None):
+        """Build a _FakeClient wired for SharedSet, SharedCriterion, CampaignSharedSet."""
+        shared_set_service = SimpleNamespace(
+            mutate_shared_sets=lambda customer_id, operations: SimpleNamespace(
+                results=[SimpleNamespace(resource_name=f"customers/{customer_id}/sharedSets/999")]
+            ),
+        )
+        shared_criterion_service = SimpleNamespace(
+            mutate_shared_criteria=lambda customer_id, operations: SimpleNamespace(
+                results=[SimpleNamespace(resource_name="criterion/1")]
+            ),
+        )
+        campaign_shared_set_service = SimpleNamespace(
+            mutate_campaign_shared_sets=lambda customer_id, operations: SimpleNamespace(
+                results=[SimpleNamespace(resource_name=f"customers/{customer_id}/campaignSharedSets/888")]
+            ),
+        )
+
+        if fail_on_step == "add_keywords":
+            shared_criterion_service.mutate_shared_criteria = lambda **_kw: (_ for _ in ()).throw(
+                ValueError("quota exceeded")
+            )
+        elif fail_on_step == "attach_to_campaign":
+            campaign_shared_set_service.mutate_campaign_shared_sets = lambda **_kw: (_ for _ in ()).throw(
+                ValueError("invalid campaign")
+            )
+
+        return _FakeClient({
+            "SharedSetService": shared_set_service,
+            "SharedCriterionService": shared_criterion_service,
+            "CampaignSharedSetService": campaign_shared_set_service,
+            "CampaignService": _FakePathService("campaigns"),
+        })
+
+    def _changes(self) -> dict:
+        return {
+            "campaign_id": "1001",
+            "list_name": "Brand Exclusions",
+            "keywords": ["free", "cheap"],
+            "match_type": "EXACT",
+        }
+
+    def test_success_returns_all_resources(self):
+        client = self._make_client()
+        result = write._apply_create_negative_keyword_list(client, "1234567890", self._changes())
+        assert result["shared_set_resource"] == "customers/1234567890/sharedSets/999"
+        assert result["campaign_shared_set_resource"] == "customers/1234567890/campaignSharedSets/888"
+        assert result["keyword_count"] == 2
+        assert "partial_failure" not in result
+
+    def test_step2_failure_returns_partial_with_shared_set_resource(self):
+        client = self._make_client(fail_on_step="add_keywords")
+        result = write._apply_create_negative_keyword_list(client, "1234567890", self._changes())
+        assert result["partial_failure"] is True
+        assert result["failed_step"] == "add_keywords"
+        assert result["shared_set_resource"] == "customers/1234567890/sharedSets/999"
+        assert result["completed_steps"] == ["create_shared_set"]
+
+    def test_step3_failure_returns_partial_with_keyword_count(self):
+        client = self._make_client(fail_on_step="attach_to_campaign")
+        result = write._apply_create_negative_keyword_list(client, "1234567890", self._changes())
+        assert result["partial_failure"] is True
+        assert result["failed_step"] == "attach_to_campaign"
+        assert result["keyword_count"] == 2
+        assert result["completed_steps"] == ["create_shared_set", "add_keywords"]
+
+
+class TestGetNegativeKeywordListInputValidation:
+    """Tests for shared_set_id validation in read tools."""
+
+    def test_non_numeric_shared_set_id_rejected_for_keywords(self, config):
+        result = read.get_negative_keyword_list_keywords(
+            config, shared_set_id="abc; DROP TABLE"
+        )
+        assert "error" in result
+        assert "numeric" in result["error"]
+
+    def test_non_numeric_shared_set_id_rejected_for_campaigns(self, config):
+        result = read.get_negative_keyword_list_campaigns(
+            config, shared_set_id="abc"
+        )
+        assert "error" in result
+        assert "numeric" in result["error"]
 
 
 def test_extract_error_message_handles_plain_exceptions():

@@ -341,6 +341,61 @@ def add_negative_keywords(
     return plan.to_preview()
 
 
+def propose_negative_keyword_list(
+    config: AdLoopConfig,
+    *,
+    customer_id: str = "",
+    campaign_id: str = "",
+    list_name: str = "",
+    keywords: list[str] | None = None,
+    match_type: str = "EXACT",
+) -> dict:
+    """Draft a shared negative keyword list and attach it to a campaign — returns PREVIEW.
+
+    Creates a reusable negative keyword list (SharedSet) with the given keywords
+    and links it to the campaign. Unlike add_negative_keywords, the list can later
+    be reused across multiple campaigns.
+    Call confirm_and_apply with the returned plan_id to execute.
+    """
+    from adloop.safety.guards import SafetyViolation, check_blocked_operation
+    from adloop.safety.preview import ChangePlan, store_plan
+
+    try:
+        check_blocked_operation("create_negative_keyword_list", config.safety)
+    except SafetyViolation as e:
+        return {"error": str(e)}
+
+    keywords = keywords or []
+    match_type = match_type.upper()
+
+    errors = []
+    if not campaign_id:
+        errors.append("campaign_id is required")
+    if not list_name:
+        errors.append("list_name is required")
+    if not keywords:
+        errors.append("At least one keyword is required")
+    if match_type not in _VALID_MATCH_TYPES:
+        errors.append(f"Invalid match_type '{match_type}' — use EXACT, PHRASE, or BROAD")
+    if errors:
+        return {"error": "Validation failed", "details": errors}
+
+    plan = ChangePlan(
+        operation="create_negative_keyword_list",
+        entity_type="negative_keyword_list",
+        entity_id=campaign_id,
+        customer_id=customer_id,
+        changes={
+            "campaign_id": campaign_id,
+            "list_name": list_name,
+            "keywords": keywords,
+            "match_type": match_type,
+        },
+    )
+    store_plan(plan)
+    return plan.to_preview()
+
+
 def update_ad_group(
     config: AdLoopConfig,
     *,
@@ -1670,6 +1725,7 @@ def _execute_plan(config: AdLoopConfig, plan: object) -> dict:
         "create_responsive_search_ad": _apply_create_rsa,
         "add_keywords": _apply_add_keywords,
         "add_negative_keywords": _apply_add_negative_keywords,
+        "create_negative_keyword_list": _apply_create_negative_keyword_list,
         "pause_entity": _apply_status_change,
         "enable_entity": _apply_status_change,
         "remove_entity": _apply_remove,
@@ -2462,3 +2518,77 @@ def _apply_create_sitelinks(client: object, cid: str, changes: dict) -> dict:
         client.enums.AssetFieldTypeEnum.SITELINK,
         populate,
     )
+
+
+def _apply_create_negative_keyword_list(
+    client: object, cid: str, changes: dict
+) -> dict:
+    """Create a shared negative keyword list and attach it to a campaign.
+
+    Executes three sequential API calls. If step 2 or 3 fails, the result
+    includes partial_failure info with the SharedSet resource name so the
+    caller can clean up or retry the remaining steps.
+    """
+    shared_set_resource = None
+
+    # 1. Create the SharedSet
+    shared_set_service = client.get_service("SharedSetService")
+    ss_op = client.get_type("SharedSetOperation")
+    shared_set = ss_op.create
+    shared_set.name = changes["list_name"]
+    shared_set.type_ = client.enums.SharedSetTypeEnum.NEGATIVE_KEYWORDS
+    ss_response = shared_set_service.mutate_shared_sets(
+        customer_id=cid, operations=[ss_op]
+    )
+    shared_set_resource = ss_response.results[0].resource_name
+
+    # 2. Add keywords to the list
+    try:
+        sc_service = client.get_service("SharedCriterionService")
+        sc_ops = []
+        for kw_text in changes["keywords"]:
+            sc_op = client.get_type("SharedCriterionOperation")
+            criterion = sc_op.create
+            criterion.shared_set = shared_set_resource
+            criterion.keyword.text = kw_text
+            criterion.keyword.match_type = getattr(
+                client.enums.KeywordMatchTypeEnum, changes["match_type"]
+            )
+            sc_ops.append(sc_op)
+        sc_service.mutate_shared_criteria(customer_id=cid, operations=sc_ops)
+    except Exception as exc:
+        return {
+            "partial_failure": True,
+            "shared_set_resource": shared_set_resource,
+            "completed_steps": ["create_shared_set"],
+            "failed_step": "add_keywords",
+            "error": _extract_error_message(exc),
+        }
+
+    # 3. Attach the list to the campaign
+    try:
+        css_service = client.get_service("CampaignSharedSetService")
+        css_op = client.get_type("CampaignSharedSetOperation")
+        campaign_shared_set = css_op.create
+        campaign_shared_set.campaign = client.get_service(
+            "CampaignService"
+        ).campaign_path(cid, changes["campaign_id"])
+        campaign_shared_set.shared_set = shared_set_resource
+        css_response = css_service.mutate_campaign_shared_sets(
+            customer_id=cid, operations=[css_op]
+        )
+    except Exception as exc:
+        return {
+            "partial_failure": True,
+            "shared_set_resource": shared_set_resource,
+            "keyword_count": len(changes["keywords"]),
+            "completed_steps": ["create_shared_set", "add_keywords"],
+            "failed_step": "attach_to_campaign",
+            "error": _extract_error_message(exc),
+        }
+
+    return {
+        "shared_set_resource": shared_set_resource,
+        "campaign_shared_set_resource": css_response.results[0].resource_name,
+        "keyword_count": len(changes["keywords"]),
+    }

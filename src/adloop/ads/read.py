@@ -222,6 +222,100 @@ def get_negative_keywords(
     return {"negative_keywords": rows, "total_negative_keywords": len(rows)}
 
 
+def get_negative_keyword_lists(
+    config: AdLoopConfig,
+    *,
+    customer_id: str = "",
+) -> dict:
+    """List all shared negative keyword lists (SharedSets) in the account.
+
+    Returns each list's ID, name, status, and keyword count. Use this before
+    calling propose_negative_keyword_list to check whether a suitable list
+    already exists and only needs attaching to a new campaign.
+    """
+    from adloop.ads.gaql import execute_query
+
+    query = """
+        SELECT shared_set.id, shared_set.name, shared_set.status,
+               shared_set.member_count, shared_set.resource_name
+        FROM shared_set
+        WHERE shared_set.type = 'NEGATIVE_KEYWORDS'
+          AND shared_set.status != 'REMOVED'
+        ORDER BY shared_set.name
+    """
+
+    rows = execute_query(config, customer_id, query)
+    return {"negative_keyword_lists": rows, "total_lists": len(rows)}
+
+
+def get_negative_keyword_list_keywords(
+    config: AdLoopConfig,
+    *,
+    customer_id: str = "",
+    shared_set_id: str = "",
+) -> dict:
+    """List the keywords inside a shared negative keyword list.
+
+    shared_set_id: the numeric ID from get_negative_keyword_lists
+    (shared_set.id field).
+    """
+    from adloop.ads.gaql import execute_query
+
+    if not shared_set_id:
+        return {"error": "shared_set_id is required"}
+    if not shared_set_id.isdigit():
+        return {"error": "shared_set_id must be a numeric ID"}
+
+    query = f"""
+        SELECT shared_criterion.keyword.text,
+               shared_criterion.keyword.match_type,
+               shared_criterion.type,
+               shared_set.id, shared_set.name
+        FROM shared_criterion
+        WHERE shared_set.id = {shared_set_id}
+        ORDER BY shared_criterion.keyword.text
+    """
+
+    rows = execute_query(config, customer_id, query)
+    return {
+        "keywords": rows,
+        "total_keywords": len(rows),
+        "shared_set_id": shared_set_id,
+    }
+
+
+def get_negative_keyword_list_campaigns(
+    config: AdLoopConfig,
+    *,
+    customer_id: str = "",
+    shared_set_id: str = "",
+) -> dict:
+    """List which campaigns a shared negative keyword list is attached to.
+
+    shared_set_id: the numeric ID from get_negative_keyword_lists
+    (shared_set.id field). Omit to return all list-to-campaign attachments.
+    """
+    from adloop.ads.gaql import execute_query
+
+    shared_set_filter = ""
+    if shared_set_id:
+        if not shared_set_id.isdigit():
+            return {"error": "shared_set_id must be a numeric ID"}
+        shared_set_filter = f"AND shared_set.id = {shared_set_id}"
+
+    query = f"""
+        SELECT campaign.id, campaign.name, campaign.status,
+               shared_set.id, shared_set.name
+        FROM campaign_shared_set
+        WHERE campaign_shared_set.status != 'REMOVED'
+          {shared_set_filter}
+        ORDER BY shared_set.name, campaign.name
+    """
+
+    rows = execute_query(config, customer_id, query)
+    return {"attachments": rows, "total_attachments": len(rows)}
+
+
 def get_recommendations(
     config: AdLoopConfig,
     *,
