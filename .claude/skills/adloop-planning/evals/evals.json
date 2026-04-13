@@ -1,0 +1,77 @@
+{
+  "skill_name": "adloop-planning",
+  "evals": [
+    {
+      "id": 1,
+      "prompt": "How much should I budget for Google Ads if I want to target 'CRM software' and 'customer management tool' keywords in the US market?",
+      "expected_output": "Should call estimate_budget with appropriate geo/language IDs (2840/1000), present forecast results, explain budget sufficiency (5x CPA rule).",
+      "files": [],
+      "expectations": [
+        "Calls estimate_budget with relevant keywords and geo_target_id=2840 (US) and language_id=1000 (English)",
+        "Presents the forecast results: estimated clicks, impressions, cost, avg CPC",
+        "Mentions the budget sufficiency rule (daily budget >= 5x target CPA)",
+        "Suggests a budget that captures at least 70% of available impressions or advises on budget sizing"
+      ]
+    },
+    {
+      "id": 2,
+      "prompt": "I'm launching a pet supplies store in Germany. What keywords should I target?",
+      "expected_output": "Should call discover_keywords with seed keywords targeting Germany (geo 2276), present results grouped by competition level (LOW/MEDIUM/HIGH).",
+      "files": [],
+      "expectations": [
+        "Calls discover_keywords with seed keywords related to pet supplies",
+        "Uses geo_target_id=2276 (Germany) or asks which country to target",
+        "Presents keyword ideas grouped by competition level (LOW, MEDIUM, HIGH)",
+        "Explains what each competition level means for budget and strategy"
+      ]
+    },
+    {
+      "id": 3,
+      "prompt": "What's the search volume for 'winter jackets' in the UK? I have a daily budget of 50 pounds.",
+      "expected_output": "Should call discover_keywords for volume and estimate_budget for budget fit, targeting UK (2826).",
+      "files": [],
+      "expectations": [
+        "Calls discover_keywords with seed_keywords containing 'winter jackets' targeting UK (geo_target_id=2826)",
+        "Calls estimate_budget with the keyword and daily_budget=50",
+        "Presents search volume and budget sufficiency analysis",
+        "Highlights whether the daily budget is sufficient to capture available traffic"
+      ]
+    },
+    {
+      "id": 4,
+      "prompt": "Should I use broad match or exact match keywords for my new campaign? I'm using maximize conversions bidding.",
+      "expected_output": "Should explain that Broad IS acceptable with Smart Bidding (MAXIMIZE_CONVERSIONS), but Phrase/Exact are safer starting points. NEVER use Broad with MANUAL_CPC.",
+      "files": [],
+      "expectations": [
+        "Confirms that Broad Match IS acceptable with MAXIMIZE_CONVERSIONS (Smart Bidding)",
+        "Recommends starting with PHRASE or EXACT match for better control",
+        "Explicitly warns NEVER to use Broad Match with MANUAL_CPC",
+        "Provides match type comparison: EXACT (maximum control), PHRASE (balanced), BROAD (requires Smart Bidding)"
+      ]
+    },
+    {
+      "id": 5,
+      "prompt": "I found these keyword ideas from discover_keywords. Now I want to create a campaign with them. What's next?",
+      "expected_output": "Should suggest estimate_budget first to forecast traffic, then transition to adloop-write skill for campaign creation (draft_campaign, add ads, add sitelinks, enable).",
+      "files": [],
+      "expectations": [
+        "Suggests calling estimate_budget to forecast traffic and cost before creating a campaign",
+        "Describes the workflow: forecast budget → draft campaign (PAUSED) → add ads → add sitelinks → enable",
+        "Mentions that campaigns start as PAUSED",
+        "Recommends adding at least 4 sitelinks to the campaign"
+      ]
+    },
+    {
+      "id": 6,
+      "prompt": "Analyze the keyword ideas for my competitor's website. Here's their URL: https://competitor.example.com",
+      "expected_output": "Should call discover_keywords with url parameter, present results by competition level, suggest next steps (estimate_budget then create campaign).",
+      "files": [],
+      "expectations": [
+        "Calls discover_keywords with url='https://competitor.example.com'",
+        "Uses appropriate geo and language targeting or asks the user",
+        "Presents keyword ideas organized by competition level",
+        "Suggests next steps: estimate_budget for selected keywords, then create campaign"
+      ]
+    }
+  ]
+}

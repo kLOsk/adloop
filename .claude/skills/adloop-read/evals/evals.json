@@ -1,0 +1,101 @@
+{
+  "skill_name": "adloop-read",
+  "evals": [
+    {
+      "id": 1,
+      "prompt": "My Google Ads campaigns are spending money but I'm not sure how they're performing. Can you check my campaign performance for the last 30 days and give me a summary?",
+      "expected_output": "Should call get_campaign_performance with a 30-day date range, present key metrics (spend, clicks, conversions, CPA, CTR), highlight concerns like zero conversions or high CPA.",
+      "files": [],
+      "expectations": [
+        "Calls get_campaign_performance tool with a date range",
+        "Presents key metrics: cost/spend, clicks, conversions, CPA",
+        "Highlights concerns such as zero conversions, high CPA, or low quality scores",
+        "Mentions best practices or comparison against benchmarks"
+      ]
+    },
+    {
+      "id": 2,
+      "prompt": "I'm seeing way more clicks in Google Ads than sessions in GA4 for my campaigns. My ad got 500 clicks last week but GA4 only shows 180 sessions from paid. Is my tracking broken?",
+      "expected_output": "Should explain GDPR consent gap (2:1-5:1 clicks:sessions is normal in EU), suggest calling attribution_check or analyze_campaign_conversions, and not immediately diagnose as broken tracking.",
+      "files": [],
+      "expectations": [
+        "Mentions GDPR consent or cookie consent as a possible explanation",
+        "Explains that Ads counts all clicks while GA4 only counts consenting sessions",
+        "Does NOT immediately diagnose tracking as broken",
+        "Suggests using attribution_check or analyze_campaign_conversions to investigate"
+      ]
+    },
+    {
+      "id": 3,
+      "prompt": "Show me which keywords in my account have quality score below 5 and are costing money",
+      "expected_output": "Should call get_keyword_performance, filter for quality scores < 5, present underperforming keywords sorted by cost, advise that low QS means relevance issues.",
+      "files": [],
+      "expectations": [
+        "Calls get_keyword_performance tool",
+        "Identifies keywords with quality score below 5",
+        "Advises that low quality score indicates ad relevance or landing page problems",
+        "Does NOT suggest simply adding more keywords as a fix"
+      ]
+    },
+    {
+      "id": 4,
+      "prompt": "I have a Performance Max campaign that's not performing well. Can you dig into it and tell me what's going on?",
+      "expected_output": "Should call get_pmax_performance for overall metrics and asset group ad strength, then get_asset_performance for underperforming assets, should mention MIXED transparency limitations.",
+      "files": [],
+      "expectations": [
+        "Calls get_pmax_performance for campaign-level metrics",
+        "Calls get_asset_performance or get_detailed_asset_performance for asset details",
+        "Mentions that MIXED network type is a catch-all and full channel splits are not available",
+        "Identifies asset diversity issues or weak ad strength as actionable findings"
+      ]
+    },
+    {
+      "id": 5,
+      "prompt": "What are Google's recommendations for my account? Should I apply them?",
+      "expected_output": "Should call get_recommendations, cross-reference against actual data, NOT blindly endorse, flag self-serving budget recommendations, and reject Broad Match without Smart Bidding.",
+      "files": [],
+      "expectations": [
+        "Calls get_recommendations to retrieve active recommendations",
+        "Does NOT blindly endorse all recommendations",
+        "Advises cross-referencing recommendations against actual conversion data",
+        "Warns that budget increase and Broad Match recommendations may not serve the advertiser's interests"
+      ]
+    },
+    {
+      "id": 6,
+      "prompt": "Which of my landing pages are getting paid traffic but not converting?",
+      "expected_output": "Should call landing_page_analysis which combines ad URLs with GA4 page data, identify orphaned URLs and zero-conversion pages.",
+      "files": [],
+      "expectations": [
+        "Calls landing_page_analysis tool",
+        "Identifies pages with traffic but zero or low conversions",
+        "Mentions orphaned URLs (pages with ad clicks but no GA4 sessions)",
+        "Considers GDPR consent as a possible explanation for discrepancies"
+      ]
+    },
+    {
+      "id": 7,
+      "prompt": "I want to see my top campaigns by spend last month. Can you run a custom GAQL query for that?",
+      "expected_output": "Should construct a proper GAQL query selecting campaign.name, metrics.cost_micros, etc., and call run_gaql. Should note cost_micros is in micros.",
+      "files": [],
+      "expectations": [
+        "Constructs a valid GAQL query with SELECT, FROM, WHERE, ORDER BY, and LIMIT",
+        "Includes metrics.cost_micros in the SELECT clause",
+        "Calls run_gaql with the query",
+        "Notes that cost_micros values are in micros and need to be divided by 1,000,000"
+      ]
+    },
+    {
+      "id": 8,
+      "prompt": "My conversions dropped last week. What happened?",
+      "expected_output": "Should call attribution_check first, consider GDPR consent, then potentially landing_page_analysis and get_search_terms. Should present a unified diagnosis.",
+      "files": [],
+      "expectations": [
+        "Calls attribution_check as a first step for conversion analysis",
+        "Considers GDPR consent as a possible factor before diagnosing broken tracking",
+        "Suggests follow-up investigation with landing_page_analysis or search terms if needed",
+        "Presents a unified diagnosis combining multiple data sources"
+      ]
+    }
+  ]
+}
