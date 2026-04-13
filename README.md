@@ -368,6 +368,7 @@ What's been shipped and what's next:
 - ~~PyPI package~~ ✓ — `pip install adloop`
 - ~~Bundled OAuth credentials~~ ✓ — no Google Cloud project required, auto-discovery of GA4/Ads accounts
 - ~~Headless server support~~ ✓ — manual URL copy-paste flow for servers without a browser
+- ~~Behavioral eval suites~~ ✓ — 28 prompt-and-expectation tests covering read, write, tracking, and planning workflows
 - **Community launch** — HN, Indie Hackers, r/cursor, Twitter
 - **Video walkthrough**
 

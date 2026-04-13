@@ -1,0 +1,72 @@
+{
+  "name": "adloop-tracking",
+  "description": "Behavioral evals for tracking diagnosis, consent mode, attribution gaps, and tracking code generation.",
+  "evals": [
+    {
+      "id": 1,
+      "prompt": "Is my tracking working correctly? I see conversions in Google Ads but not in GA4.",
+      "expected_output": "Should consider GDPR consent first, call attribution_check with conversion_events, not immediately diagnose as broken tracking.",
+      "expectations": [
+        "Mentions GDPR consent as a possible explanation before diagnosing broken tracking",
+        "Calls attribution_check with conversion_events parameter",
+        "Does NOT immediately conclude tracking is broken",
+        "Explains that Ads counts all conversions while GA4 only counts consenting users"
+      ]
+    },
+    {
+      "id": 2,
+      "prompt": "I added a purchase event to my website code last week. Can you check if it's firing in GA4?",
+      "expected_output": "Should call get_tracking_events or validate_tracking to check if 'purchase' event appears in GA4 data.",
+      "expectations": [
+        "Calls get_tracking_events or validate_tracking to check for the purchase event",
+        "Checks if 'purchase' appears in the GA4 event data",
+        "Interprets the result: event exists with count > 0 means it's firing, count = 0 means not firing",
+        "Suggests possible causes if the event is not firing (not deployed, conditional trigger, GDPR consent)"
+      ]
+    },
+    {
+      "id": 3,
+      "prompt": "Generate tracking code for a sign_up event that fires when someone clicks the 'Register' button",
+      "expected_output": "Should call generate_tracking_code with event_name='sign_up', trigger='button_click', include recommended parameters (method).",
+      "expectations": [
+        "Calls generate_tracking_code with event_name='sign_up'",
+        "Specifies trigger='button_click' or equivalent",
+        "Includes or mentions the recommended parameter 'method' for sign_up events",
+        "Mentions that the user needs to replace the CSS selector placeholder with the actual button selector"
+      ]
+    },
+    {
+      "id": 4,
+      "prompt": "My click-to-session ratio is 4:1. Is something wrong with my tracking?",
+      "expected_output": "Should explain that 4:1 is NORMAL with GDPR consent banners, not broken tracking. Only investigate further if anomalies exist.",
+      "expectations": [
+        "Explains that a 4:1 clicks-to-sessions ratio is normal with GDPR consent banners",
+        "Does NOT diagnose tracking as broken",
+        "Mentions that Ads counts all clicks while GA4 only records consenting sessions",
+        "Suggests further investigation only if ALL traffic sources show zero or if organic traffic also has anomalies"
+      ]
+    },
+    {
+      "id": 5,
+      "prompt": "I need to add a begin_checkout event to my ecommerce site. Can you generate the code?",
+      "expected_output": "Should call generate_tracking_code with event_name='begin_checkout', include recommended parameters (value, currency, items), mention marking as conversion in GA4 Admin.",
+      "expectations": [
+        "Calls generate_tracking_code with event_name='begin_checkout'",
+        "Includes or mentions recommended parameters: value, currency, items",
+        "Suggests an appropriate trigger (button_click for checkout button or page_load for checkout page)",
+        "Mentions how to mark the event as a conversion in GA4 Admin"
+      ]
+    },
+    {
+      "id": 6,
+      "prompt": "The events page_view, session_start, and scroll are showing up in GA4 but my custom purchase event has zero count. What's going on?",
+      "expected_output": "Should explain that page_view, session_start, scroll are auto-collected (normal), and suggest validate_tracking to compare code vs GA4. Zero custom events could be not deployed, conditional, or GDPR-blocked.",
+      "expectations": [
+        "Explains that page_view, session_start, and scroll are GA4 auto-collected events that don't need manual implementation",
+        "Suggests validate_tracking to compare expected events in code against actual GA4 data",
+        "Lists possible causes for zero count: not deployed, conditional trigger, or GDPR consent blocking",
+        "Does NOT conclude that GA4 is broken based on auto-collected events appearing"
+      ]
+    }
+  ]
+}
