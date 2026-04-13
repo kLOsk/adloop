@@ -136,7 +136,7 @@ Choosing the right match type is critical for budget efficiency:
 | 2380 | Italy | 2724 | Spain |
 | 2528 | Netherlands | 2056 | Belgium |
 | 2036 | Australia | 2124 | Canada |
-| 2616 | Poland | 1014 | — |
+| 2616 | Poland | | |
 
 For cities/regions, use `run_gaql` with `geo_target_constant` resource or look up IDs in Google Ads API Geo Target documentation.
 

@@ -216,7 +216,7 @@ WHERE segments.date BETWEEN '2026-01-01' AND '2026-01-31'
 
 - NO `SELECT *` — every field must be named explicitly
 - **Fields in ORDER BY must appear in SELECT.** This is the most common GAQL error.
-- Metrics cannot appear in WHERE with resource fields in the same query
+- Metrics can be used in WHERE clauses; the real constraint is GAQL field compatibility — certain resource attribute fields cannot be selected alongside metrics or segments in the same query. When in doubt, check field compatibility for the specific resource.
 - `cost_micros` values are in micros — divide by 1,000,000. The dedicated read tools already compute `metrics.cost` and `metrics.cpa`. Only `run_gaql` returns raw micros.
 - When selecting `segments.date`, results are broken down by day
 - Status values: `'ENABLED'`, `'PAUSED'`, `'REMOVED'`
