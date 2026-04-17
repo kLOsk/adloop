@@ -589,6 +589,51 @@ def test_apply_remove_customer_asset_preserves_tildes_in_resource_name():
     assert "," not in resource_name
 
 
+def test_apply_remove_shared_criterion_uses_shared_criterion_service():
+    """Removing a shared-list keyword must go through SharedCriterionService."""
+    captured: dict = {}
+
+    def _mutate(customer_id, operations):
+        captured["customer_id"] = customer_id
+        captured["operations"] = list(operations)
+        return SimpleNamespace(
+            results=[
+                SimpleNamespace(
+                    resource_name=f"customers/{customer_id}/sharedCriteria/555~9001"
+                )
+            ]
+        )
+
+    shared_criterion_service = SimpleNamespace(mutate_shared_criteria=_mutate)
+    client = _FakeClient({"SharedCriterionService": shared_criterion_service})
+
+    result = write._apply_remove(client, "1234567890", "shared_criterion", "555~9001")
+
+    assert captured["customer_id"] == "1234567890"
+    assert captured["operations"][0].remove == "customers/1234567890/sharedCriteria/555~9001"
+    assert result["resource_name"] == "customers/1234567890/sharedCriteria/555~9001"
+
+
+def test_apply_remove_shared_criterion_rejects_bare_id():
+    """shared_criterion entity_id without a ~ separator is a caller error."""
+    client = _FakeClient({})
+    with pytest.raises(ValueError, match="sharedSetId~criterionId"):
+        write._apply_remove(client, "1234567890", "shared_criterion", "9001")
+
+
+def test_remove_entity_accepts_shared_criterion_type(config):
+    """remove_entity should accept shared_criterion as a valid entity_type."""
+    result = write.remove_entity(
+        config,
+        customer_id="123-456-7890",
+        entity_type="shared_criterion",
+        entity_id="555~9001",
+    )
+    assert result["entity_type"] == "shared_criterion"
+    assert result["entity_id"] == "555~9001"
+    assert result["status"] == "PENDING_CONFIRMATION"
+
+
 def test_remove_entity_normalizes_commas_to_tildes(config):
     """remove_entity should accept commas and normalize to tildes in the stored plan."""
     result = write.remove_entity(
@@ -683,6 +728,163 @@ class TestProposeNegativeKeywordList:
         assert plan_id in preview_store._pending_plans
 
 
+class TestAddToNegativeKeywordList:
+    def test_returns_preview_with_correct_operation(self, config):
+        result = write.add_to_negative_keyword_list(
+            config,
+            customer_id="123-456-7890",
+            shared_set_id="555",
+            keywords=["free trial", "crack"],
+            match_type="EXACT",
+        )
+        assert result["operation"] == "add_to_negative_keyword_list"
+        assert result["entity_type"] == "negative_keyword_list"
+        assert result["entity_id"] == "555"
+        assert result["changes"]["shared_set_id"] == "555"
+        assert result["changes"]["keywords"] == ["free trial", "crack"]
+        assert result["changes"]["match_type"] == "EXACT"
+        assert result["status"] == "PENDING_CONFIRMATION"
+        assert "plan_id" in result
+
+    def test_normalises_match_type_to_uppercase(self, config):
+        result = write.add_to_negative_keyword_list(
+            config,
+            shared_set_id="555",
+            keywords=["discount"],
+            match_type="phrase",
+        )
+        assert result["changes"]["match_type"] == "PHRASE"
+
+    def test_requires_shared_set_id(self, config):
+        result = write.add_to_negative_keyword_list(
+            config,
+            keywords=["free"],
+        )
+        assert result["error"] == "Validation failed"
+        assert any("shared_set_id" in d for d in result["details"])
+
+    def test_rejects_non_numeric_shared_set_id(self, config):
+        result = write.add_to_negative_keyword_list(
+            config,
+            shared_set_id="abc; DROP TABLE",
+            keywords=["free"],
+        )
+        assert result["error"] == "Validation failed"
+        assert any("numeric" in d for d in result["details"])
+
+    def test_requires_at_least_one_keyword(self, config):
+        result = write.add_to_negative_keyword_list(
+            config,
+            shared_set_id="555",
+            keywords=[],
+        )
+        assert result["error"] == "Validation failed"
+        assert any("keyword" in d.lower() for d in result["details"])
+
+    def test_rejects_invalid_match_type(self, config):
+        result = write.add_to_negative_keyword_list(
+            config,
+            shared_set_id="555",
+            keywords=["free"],
+            match_type="INVALID",
+        )
+        assert result["error"] == "Validation failed"
+        assert any("match_type" in d for d in result["details"])
+
+    def test_collapses_duplicate_keywords_case_insensitively(self, config):
+        result = write.add_to_negative_keyword_list(
+            config,
+            shared_set_id="555",
+            keywords=["Free Trial", "free trial", "FREE TRIAL", "crack"],
+        )
+        assert result["changes"]["keywords"] == ["Free Trial", "crack"]
+
+    def test_ignores_whitespace_only_keywords(self, config):
+        result = write.add_to_negative_keyword_list(
+            config,
+            shared_set_id="555",
+            keywords=["   ", "real term", ""],
+        )
+        assert result["changes"]["keywords"] == ["real term"]
+
+    def test_all_empty_keywords_rejected(self, config):
+        result = write.add_to_negative_keyword_list(
+            config,
+            shared_set_id="555",
+            keywords=["", "   "],
+        )
+        assert result["error"] == "Validation failed"
+
+    def test_plan_is_stored_and_retrievable(self, config):
+        result = write.add_to_negative_keyword_list(
+            config,
+            shared_set_id="555",
+            keywords=["free trial"],
+        )
+        assert result["plan_id"] in preview_store._pending_plans
+
+
+class TestApplyAddToNegativeKeywordList:
+    """Tests for _apply_add_to_negative_keyword_list — the single-step append mutate."""
+
+    def _make_client(self):
+        captured: dict = {}
+
+        def _mutate(customer_id, operations):
+            captured["customer_id"] = customer_id
+            captured["operations"] = list(operations)
+            return SimpleNamespace(
+                results=[
+                    SimpleNamespace(resource_name=f"customers/{customer_id}/sharedCriteria/555~{i}")
+                    for i, _ in enumerate(operations)
+                ]
+            )
+
+        shared_set_service = SimpleNamespace(
+            shared_set_path=lambda cid, ssid: f"customers/{cid}/sharedSets/{ssid}",
+        )
+        shared_criterion_service = SimpleNamespace(
+            mutate_shared_criteria=_mutate,
+        )
+        services = {
+            "SharedSetService": shared_set_service,
+            "SharedCriterionService": shared_criterion_service,
+        }
+        return _FakeClient(services), captured
+
+    def test_returns_resource_names_and_shared_set(self):
+        client, captured = self._make_client()
+        result = write._apply_add_to_negative_keyword_list(
+            client,
+            "1234567890",
+            {
+                "shared_set_id": "555",
+                "keywords": ["free", "crack"],
+                "match_type": "EXACT",
+            },
+        )
+        assert result["shared_set_resource"] == "customers/1234567890/sharedSets/555"
+        assert result["keyword_count"] == 2
+        assert len(result["resource_names"]) == 2
+        assert captured["customer_id"] == "1234567890"
+        assert len(captured["operations"]) == 2
+
+    def test_each_operation_references_shared_set(self):
+        client, captured = self._make_client()
+        write._apply_add_to_negative_keyword_list(
+            client,
+            "1234567890",
+            {
+                "shared_set_id": "555",
+                "keywords": ["one"],
+                "match_type": "PHRASE",
+            },
+        )
+        op = captured["operations"][0]
+        assert op.create.shared_set == "customers/1234567890/sharedSets/555"
+        assert op.create.keyword.text == "one"
+
+
 class TestGetNegativeKeywordLists:
     def test_returns_list_of_shared_sets(self, config, monkeypatch):
         fake_rows = [
@@ -731,6 +933,25 @@ class TestGetNegativeKeywordListKeywords:
         assert result["total_keywords"] == 1
         assert result["shared_set_id"] == "111"
         assert result["keywords"][0]["shared_criterion.keyword.text"] == "free"
+
+    def test_emits_resource_id_for_remove_entity(self, config, monkeypatch):
+        """Each keyword should carry a resource_id for feeding into remove_entity."""
+        fake_rows = [
+            {
+                "shared_criterion.criterion_id": "9001",
+                "shared_criterion.keyword.text": "free",
+                "shared_criterion.keyword.match_type": "EXACT",
+                "shared_set.id": "111",
+                "shared_set.name": "Brand Exclusions",
+            }
+        ]
+        monkeypatch.setattr(
+            "adloop.ads.gaql.execute_query", lambda *_a, **_kw: fake_rows
+        )
+        result = read.get_negative_keyword_list_keywords(
+            config, customer_id="123-456-7890", shared_set_id="111"
+        )
+        assert result["keywords"][0]["resource_id"] == "111~9001"
 
 
 class TestGetNegativeKeywordListCampaigns:

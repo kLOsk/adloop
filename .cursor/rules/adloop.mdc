@@ -102,9 +102,10 @@ These tools call both APIs internally and return unified results with computed `
 | `draft_keywords` | Propose keyword additions (does NOT add) | Each keyword needs `text` and `match_type` (EXACT/PHRASE/BROAD) |
 | `add_negative_keywords` | Propose negative keywords directly on a campaign (does NOT add) | `campaign_id`, keyword list, `match_type` |
 | `propose_negative_keyword_list` | Draft a shared negative keyword list and attach it to a campaign (does NOT create) | `campaign_id`, `list_name`, keyword list, `match_type` |
+| `add_to_negative_keyword_list` | Append keywords to an EXISTING shared negative keyword list (does NOT add) | `shared_set_id` (from `get_negative_keyword_lists`), keyword list, `match_type` |
 | `pause_entity` | Propose pausing campaign/ad group/ad/keyword | `entity_type`, `entity_id` |
 | `enable_entity` | Propose enabling paused entity | `entity_type`, `entity_id` |
-| `remove_entity` | Propose REMOVING an entity (irreversible) | `entity_type` (incl. "negative_keyword", "campaign_asset", "asset", "customer_asset"), `entity_id` |
+| `remove_entity` | Propose REMOVING an entity (irreversible) | `entity_type` (incl. "negative_keyword", "shared_criterion", "campaign_asset", "asset", "customer_asset"), `entity_id` |
 | `confirm_and_apply` | Execute a previously previewed change | `plan_id` from a draft tool, `dry_run` (default true) |
 
 **Write tool workflow:**
@@ -122,7 +123,7 @@ These tools call both APIs internally and return unified results with computed `
 - Ad-group pause/enable is already handled by `pause_entity` / `enable_entity` with `entity_type="ad_group"`; do not invent a separate pause tool.
 - `update_campaign` replaces geo/language targets entirely (not append). Pass the full desired list.
 - `remove_entity` is IRREVERSIBLE — always prefer `pause_entity` unless the user explicitly wants permanent removal. Removal triggers double confirmation in the safety layer.
-- `remove_entity` supports `entity_type` values: "campaign", "ad_group", "ad", "keyword", "negative_keyword", "campaign_asset", "asset", "customer_asset". Use "negative_keyword" to remove campaign-level negative keywords. Use "campaign_asset" to remove sitelinks and other asset links from a campaign. Use "asset" to remove a standalone asset. Use "customer_asset" to remove a customer-level asset link.
+- `remove_entity` supports `entity_type` values: "campaign", "ad_group", "ad", "keyword", "negative_keyword", "shared_criterion", "campaign_asset", "asset", "customer_asset". Use "negative_keyword" to remove campaign-level negative keywords. Use "shared_criterion" to remove a keyword from a shared negative keyword list — the `entity_id` format is "sharedSetId~criterionId" (use the `resource_id` field from `get_negative_keyword_list_keywords`). Use "campaign_asset" to remove sitelinks and other asset links from a campaign. Use "asset" to remove a standalone asset. Use "customer_asset" to remove a customer-level asset link.
 - `require_dry_run: true` in config overrides `dry_run=false` — the user must change the config to allow real mutations.
 - All operations (including dry runs) are logged to `~/.adloop/audit.log`.
 
@@ -289,9 +290,12 @@ Most websites (especially in the EU) use a GDPR cookie consent banner. This has 
 4. Call `get_campaign_performance` to get the right `campaign.id`
 5. Choose the right write tool:
    - **Direct campaign negatives** (`add_negative_keywords`): faster, campaign-specific, no reuse across campaigns
-   - **Shared negative keyword list** (`propose_negative_keyword_list`): creates a named, reusable list that can be attached to multiple campaigns — prefer this when the user wants to reuse the list or when they explicitly mention "list"
-6. **Before calling `propose_negative_keyword_list`**, always call `get_negative_keyword_lists` first to check whether a suitable list already exists. If a matching list is found, inspect its keywords via `get_negative_keyword_list_keywords` and check which campaigns it is already on via `get_negative_keyword_list_campaigns` — it may only need attaching to a new campaign rather than being recreated. Creating duplicate lists wastes account resources and makes management harder.
-7. Present preview and wait for confirmation
+   - **Append to an existing shared list** (`add_to_negative_keyword_list`): pass `shared_set_id` from `get_negative_keyword_lists`. Use this whenever a suitable list already exists — never recreate a list just to add a few more terms.
+   - **Create a new shared list** (`propose_negative_keyword_list`): creates a named, reusable list and attaches it to a campaign. Only use this when no suitable list exists yet.
+6. **Before calling `propose_negative_keyword_list`**, always call `get_negative_keyword_lists` first to check whether a suitable list already exists. If a matching list is found, inspect its keywords via `get_negative_keyword_list_keywords` and check which campaigns it is already on via `get_negative_keyword_list_campaigns`. If the list exists and just needs more keywords, call `add_to_negative_keyword_list` instead of creating a duplicate. Creating duplicate lists wastes account resources and makes management harder.
+7. **Before calling `add_to_negative_keyword_list`**, call `get_negative_keyword_list_keywords` to see what's already in the list — avoid re-adding existing terms. Duplicate keyword additions will fail at apply time with a Google Ads error.
+8. **To remove a keyword from a shared list**, use `remove_entity` with `entity_type="shared_criterion"` and pass the `resource_id` returned by `get_negative_keyword_list_keywords` as `entity_id`. This is irreversible — always confirm with the user first.
+9. Present preview and wait for confirmation
 
 ### When user wants to discover new keywords
 

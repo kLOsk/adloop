@@ -981,6 +981,39 @@ def propose_negative_keyword_list(
 
 @mcp.tool(annotations=_WRITE)
 @_safe
+def add_to_negative_keyword_list(
+    shared_set_id: str,
+    keywords: list[str],
+    customer_id: str = "",
+    match_type: str = "EXACT",
+) -> dict:
+    """Append keywords to an EXISTING shared negative keyword list — returns a PREVIEW.
+
+    Use this when a suitable list already exists and only needs more keywords
+    (instead of propose_negative_keyword_list, which creates a new list).
+    Always call get_negative_keyword_lists first to find the right shared_set_id
+    and get_negative_keyword_list_keywords to avoid duplicating existing terms.
+
+    shared_set_id: numeric ID from get_negative_keyword_lists (shared_set.id).
+    keywords: list of keyword strings to append (duplicates in the input list
+        are collapsed).
+    match_type: "EXACT", "PHRASE", or "BROAD"
+
+    Call confirm_and_apply with the returned plan_id to execute.
+    """
+    from adloop.ads.write import add_to_negative_keyword_list as _impl
+
+    return _impl(
+        _config,
+        customer_id=customer_id or _config.ads.customer_id,
+        shared_set_id=shared_set_id,
+        keywords=keywords,
+        match_type=match_type,
+    )
+
+
+@mcp.tool(annotations=_WRITE)
+@_safe
 def update_ad_group(
     ad_group_id: str,
     customer_id: str = "",
@@ -1119,11 +1152,13 @@ def remove_entity(
     """Draft REMOVING an entity — returns a PREVIEW. This is IRREVERSIBLE.
 
     entity_type: "campaign", "ad_group", "ad", "keyword", "negative_keyword",
-                 "campaign_asset", "asset", or "customer_asset"
+                 "shared_criterion", "campaign_asset", "asset", or "customer_asset"
     entity_id: The resource ID.
                For keywords: "adGroupId~criterionId"
                For negative_keywords: "campaignId~criterionId"
                    (use the resource_id field from get_negative_keywords)
+               For shared_criterion: "sharedSetId~criterionId"
+                   (use the resource_id field from get_negative_keyword_list_keywords)
                For campaign_asset: "campaignId~assetId~fieldType"
                For asset: simple asset ID
                For customer_asset: "assetId~fieldType"

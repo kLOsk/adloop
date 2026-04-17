@@ -396,6 +396,77 @@ def propose_negative_keyword_list(
     return plan.to_preview()
 
 
+def add_to_negative_keyword_list(
+    config: AdLoopConfig,
+    *,
+    customer_id: str = "",
+    shared_set_id: str = "",
+    keywords: list[str] | None = None,
+    match_type: str = "EXACT",
+) -> dict:
+    """Draft adding keywords to an existing shared negative keyword list — returns PREVIEW.
+
+    Unlike ``propose_negative_keyword_list`` (which creates a NEW list), this
+    appends keywords to an existing SharedSet identified by ``shared_set_id``.
+    Use ``get_negative_keyword_lists`` to find the list's ID. Call
+    ``confirm_and_apply`` with the returned plan_id to execute.
+    """
+    from adloop.safety.guards import SafetyViolation, check_blocked_operation
+    from adloop.safety.preview import ChangePlan, store_plan
+
+    try:
+        check_blocked_operation("add_to_negative_keyword_list", config.safety)
+    except SafetyViolation as e:
+        return {"error": str(e)}
+
+    keywords = keywords or []
+    match_type = match_type.upper()
+
+    errors = []
+    if not shared_set_id:
+        errors.append("shared_set_id is required")
+    elif not str(shared_set_id).isdigit():
+        errors.append("shared_set_id must be a numeric ID (from get_negative_keyword_lists)")
+    if not keywords:
+        errors.append("At least one keyword is required")
+    if match_type not in _VALID_MATCH_TYPES:
+        errors.append(f"Invalid match_type '{match_type}' — use EXACT, PHRASE, or BROAD")
+    if errors:
+        return {"error": "Validation failed", "details": errors}
+
+    seen: set[str] = set()
+    deduped: list[str] = []
+    for kw in keywords:
+        text = kw.strip()
+        if not text:
+            continue
+        key = text.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(text)
+
+    if not deduped:
+        return {
+            "error": "Validation failed",
+            "details": ["At least one non-empty keyword is required"],
+        }
+
+    plan = ChangePlan(
+        operation="add_to_negative_keyword_list",
+        entity_type="negative_keyword_list",
+        entity_id=str(shared_set_id),
+        customer_id=customer_id,
+        changes={
+            "shared_set_id": str(shared_set_id),
+            "keywords": deduped,
+            "match_type": match_type,
+        },
+    )
+    store_plan(plan)
+    return plan.to_preview()
+
+
 def update_ad_group(
     config: AdLoopConfig,
     *,
@@ -1167,6 +1238,7 @@ _VALID_MATCH_TYPES = {"EXACT", "PHRASE", "BROAD"}
 _VALID_ENTITY_TYPES = {"campaign", "ad_group", "ad", "keyword"}
 _REMOVABLE_ENTITY_TYPES = _VALID_ENTITY_TYPES | {
     "negative_keyword", "campaign_asset", "asset", "customer_asset",
+    "shared_criterion",
 }
 
 _SMART_BIDDING_STRATEGIES = {
@@ -1726,6 +1798,7 @@ def _execute_plan(config: AdLoopConfig, plan: object) -> dict:
         "add_keywords": _apply_add_keywords,
         "add_negative_keywords": _apply_add_negative_keywords,
         "create_negative_keyword_list": _apply_create_negative_keyword_list,
+        "add_to_negative_keyword_list": _apply_add_to_negative_keyword_list,
         "pause_entity": _apply_status_change,
         "enable_entity": _apply_status_change,
         "remove_entity": _apply_remove,
@@ -2282,6 +2355,19 @@ def _apply_remove(
             customer_id=cid, operations=[operation]
         )
 
+    elif entity_type == "shared_criterion":
+        if "~" not in entity_id:
+            raise ValueError(
+                f"shared_criterion entity_id must be "
+                f"'sharedSetId~criterionId', got '{entity_id}'"
+            )
+        service = client.get_service("SharedCriterionService")
+        operation = client.get_type("SharedCriterionOperation")
+        operation.remove = f"customers/{cid}/sharedCriteria/{entity_id}"
+        response = service.mutate_shared_criteria(
+            customer_id=cid, operations=[operation]
+        )
+
     elif entity_type == "campaign_asset":
         parts = entity_id.split("~")
         if len(parts) != 3:
@@ -2598,4 +2684,35 @@ def _apply_create_negative_keyword_list(
         "shared_set_resource": shared_set_resource,
         "campaign_shared_set_resource": css_response.results[0].resource_name,
         "keyword_count": len(changes["keywords"]),
+    }
+
+
+def _apply_add_to_negative_keyword_list(
+    client: object, cid: str, changes: dict
+) -> dict:
+    """Append keywords to an existing shared negative keyword list."""
+    shared_set_service = client.get_service("SharedSetService")
+    shared_set_resource = shared_set_service.shared_set_path(
+        cid, changes["shared_set_id"]
+    )
+
+    sc_service = client.get_service("SharedCriterionService")
+    operations = []
+    for kw_text in changes["keywords"]:
+        op = client.get_type("SharedCriterionOperation")
+        criterion = op.create
+        criterion.shared_set = shared_set_resource
+        criterion.keyword.text = kw_text
+        criterion.keyword.match_type = getattr(
+            client.enums.KeywordMatchTypeEnum, changes["match_type"]
+        )
+        operations.append(op)
+
+    response = sc_service.mutate_shared_criteria(
+        customer_id=cid, operations=operations
+    )
+    return {
+        "shared_set_resource": shared_set_resource,
+        "resource_names": [r.resource_name for r in response.results],
+        "keyword_count": len(response.results),
     }

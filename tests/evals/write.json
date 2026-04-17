@@ -83,6 +83,30 @@
       ]
     },
     {
+      "id": 10,
+      "prompt": "Remove 'test keyword' from my 'Brand negatives' shared negative keyword list.",
+      "expected_output": "Should call get_negative_keyword_lists to find the shared_set_id, then get_negative_keyword_list_keywords to find the target criterion's resource_id, then remove_entity with entity_type='shared_criterion' and the resource_id as entity_id. Should warn that removal is irreversible and wait for confirmation.",
+      "expectations": [
+        "Calls get_negative_keyword_lists to find the shared_set_id of 'Brand negatives'",
+        "Calls get_negative_keyword_list_keywords to find the resource_id for 'test keyword'",
+        "Calls remove_entity with entity_type='shared_criterion' and the resource_id as entity_id",
+        "Warns that the removal is irreversible before proceeding",
+        "Presents the preview and waits for user confirmation"
+      ]
+    },
+    {
+      "id": 9,
+      "prompt": "I already have a shared negative keyword list called 'Brand Exclusions' in my account. Add 'free trial' and 'crack' to it.",
+      "expected_output": "Should call get_negative_keyword_lists to find the list's shared_set_id, optionally call get_negative_keyword_list_keywords to avoid duplicates, then call add_to_negative_keyword_list — NOT propose_negative_keyword_list (which would create a duplicate list).",
+      "expectations": [
+        "Calls get_negative_keyword_lists to look up the shared_set_id of the existing list",
+        "Does NOT call propose_negative_keyword_list (which would create a duplicate)",
+        "Calls add_to_negative_keyword_list with the correct shared_set_id, keywords, and match_type",
+        "Considers calling get_negative_keyword_list_keywords first to avoid re-adding existing terms",
+        "Presents the preview and waits for user confirmation before applying"
+      ]
+    },
+    {
       "id": 8,
       "prompt": "Apply the change from plan id abc123, make it live not dry run",
       "expected_output": "Should confirm the user has reviewed the preview, call confirm_and_apply with dry_run=false, remind about require_dry_run config override.",
