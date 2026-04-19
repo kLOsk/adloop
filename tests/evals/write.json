@@ -83,15 +83,14 @@
       ]
     },
     {
-      "id": 10,
-      "prompt": "Remove 'test keyword' from my 'Brand negatives' shared negative keyword list.",
-      "expected_output": "Should call get_negative_keyword_lists to find the shared_set_id, then get_negative_keyword_list_keywords to find the target criterion's resource_id, then remove_entity with entity_type='shared_criterion' and the resource_id as entity_id. Should warn that removal is irreversible and wait for confirmation.",
+      "id": 8,
+      "prompt": "Apply the change from plan id abc123, make it live not dry run",
+      "expected_output": "Should confirm the user has reviewed the preview, call confirm_and_apply with dry_run=false, remind about require_dry_run config override.",
       "expectations": [
-        "Calls get_negative_keyword_lists to find the shared_set_id of 'Brand negatives'",
-        "Calls get_negative_keyword_list_keywords to find the resource_id for 'test keyword'",
-        "Calls remove_entity with entity_type='shared_criterion' and the resource_id as entity_id",
-        "Warns that the removal is irreversible before proceeding",
-        "Presents the preview and waits for user confirmation"
+        "Confirms the user has reviewed the preview before applying",
+        "Calls confirm_and_apply with dry_run=false",
+        "Mentions or reminds about the require_dry_run config safety override",
+        "Notes that all operations are logged to audit.log"
       ]
     },
     {
@@ -107,14 +106,15 @@
       ]
     },
     {
-      "id": 8,
-      "prompt": "Apply the change from plan id abc123, make it live not dry run",
-      "expected_output": "Should confirm the user has reviewed the preview, call confirm_and_apply with dry_run=false, remind about require_dry_run config override.",
+      "id": 10,
+      "prompt": "Remove 'test keyword' from my 'Brand negatives' shared negative keyword list.",
+      "expected_output": "Should call get_negative_keyword_lists to find the shared_set_id, then get_negative_keyword_list_keywords to find the target criterion's resource_id, then remove_entity with entity_type='shared_criterion' and the resource_id as entity_id. Should warn that removal is irreversible and wait for confirmation.",
       "expectations": [
-        "Confirms the user has reviewed the preview before applying",
-        "Calls confirm_and_apply with dry_run=false",
-        "Mentions or reminds about the require_dry_run config safety override",
-        "Notes that all operations are logged to audit.log"
+        "Calls get_negative_keyword_lists to find the shared_set_id of 'Brand negatives'",
+        "Calls get_negative_keyword_list_keywords to find the resource_id for 'test keyword'",
+        "Calls remove_entity with entity_type='shared_criterion' and the resource_id as entity_id",
+        "Warns that the removal is irreversible before proceeding",
+        "Presents the preview and waits for user confirmation"
       ]
     }
   ]

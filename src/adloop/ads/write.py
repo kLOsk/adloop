@@ -555,11 +555,26 @@ def remove_entity(
     entity_type: str = "",
     entity_id: str = "",
 ) -> dict:
-    """Draft removing an entity (keyword, negative_keyword, ad, ad_group, campaign).
+    """Draft removing an entity — returns preview.
+
+    Supported ``entity_type`` values: ``campaign``, ``ad_group``, ``ad``,
+    ``keyword``, ``negative_keyword``, ``shared_criterion``, ``campaign_asset``,
+    ``asset``, ``customer_asset``.
+
+    Composite ``entity_id`` formats:
+
+    - ``keyword``: ``adGroupId~criterionId``
+    - ``negative_keyword``: ``campaignId~criterionId`` (use the ``resource_id``
+      field from ``get_negative_keywords``)
+    - ``shared_criterion``: ``sharedSetId~criterionId`` (use the ``resource_id``
+      field from ``get_negative_keyword_list_keywords``)
+    - ``campaign_asset``: ``campaignId~assetId~fieldType``
+    - ``customer_asset``: ``assetId~fieldType``
+    - ``asset``: bare asset ID
 
     This is a DESTRUCTIVE operation — removed entities cannot be re-enabled.
-    For keywords and negative keywords, this fully deletes the criterion.
-    Returns a preview; call confirm_and_apply to execute.
+    Prefer ``pause_entity`` unless the user explicitly wants permanent removal.
+    Call ``confirm_and_apply`` with the returned plan_id to execute.
     """
     from adloop.safety.guards import SafetyViolation, check_blocked_operation
     from adloop.safety.preview import ChangePlan, store_plan
