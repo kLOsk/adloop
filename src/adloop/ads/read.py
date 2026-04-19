@@ -267,7 +267,8 @@ def get_negative_keyword_list_keywords(
         return {"error": "shared_set_id must be a numeric ID"}
 
     query = f"""
-        SELECT shared_criterion.keyword.text,
+        SELECT shared_criterion.criterion_id,
+               shared_criterion.keyword.text,
                shared_criterion.keyword.match_type,
                shared_criterion.type,
                shared_set.id, shared_set.name
@@ -277,6 +278,11 @@ def get_negative_keyword_list_keywords(
     """
 
     rows = execute_query(config, customer_id, query)
+    for row in rows:
+        ssid = row.get("shared_set.id")
+        crit_id = row.get("shared_criterion.criterion_id")
+        if ssid and crit_id:
+            row["resource_id"] = f"{ssid}~{crit_id}"
     return {
         "keywords": rows,
         "total_keywords": len(rows),
