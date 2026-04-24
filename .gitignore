@@ -51,3 +51,7 @@ htmlcov/
 
 # Local-only MCP debug tools (load via ADLOOP_DEBUG_TOOLS=1)
 src/adloop/_debug_tools.py
+
+# Local stderr capture from Cowork / Claude Desktop sessions
+adloop-cowork.log
+adloop-cowork.log.*

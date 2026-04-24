@@ -8,10 +8,11 @@ from typing import Callable
 from fastmcp import FastMCP
 from mcp.types import ToolAnnotations
 
-from adloop import diagnostics
+from adloop import _mcp_patches, diagnostics
 from adloop.config import load_config
 
 diagnostics.install()
+_mcp_patches.install()
 
 _READONLY = ToolAnnotations(readOnlyHint=True, destructiveHint=False)
 _WRITE = ToolAnnotations(readOnlyHint=False, destructiveHint=False)

@@ -370,6 +370,7 @@ What's been shipped and what's next:
 - ~~Retry/backoff for API rate limits~~ ✓
 - ~~Setup wizard (`adloop init`)~~ ✓
 - ~~Claude Code support~~ ✓ — `CLAUDE.md`, `.mcp.json`, `.claude/rules/`, `.claude/commands/`, CLI wizard snippets
+- **Claude Desktop one-click install** — `adloop install claude-desktop` (and/or a `.dxt` extension bundle) that writes the AdLoop MCP entry into `claude_desktop_config.json` automatically, so Claude Desktop + Cowork users don't have to hand-edit JSON
 - ~~PyPI package~~ ✓ — `pip install adloop`
 - ~~Bundled OAuth credentials~~ ✓ — no Google Cloud project required, auto-discovery of GA4/Ads accounts (currently capped at 100 users pending Google verification — use [Advanced Setup](#advanced-setup-custom-google-cloud-project) in the meantime)
 - ~~Headless server support~~ ✓ — manual URL copy-paste flow for servers without a browser
