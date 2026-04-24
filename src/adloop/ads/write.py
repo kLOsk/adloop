@@ -1183,6 +1183,7 @@ def confirm_and_apply(
             "Plans expire when the MCP server restarts.",
         }
 
+    forced_by_config = bool(config.safety.require_dry_run) and not dry_run
     if config.safety.require_dry_run:
         dry_run = True
 
@@ -1197,16 +1198,40 @@ def confirm_and_apply(
             dry_run=True,
             result="dry_run_success",
         )
-        return {
+        response = {
             "status": "DRY_RUN_SUCCESS",
             "plan_id": plan.plan_id,
             "operation": plan.operation,
             "changes": plan.changes,
-            "message": (
+        }
+        if forced_by_config:
+            # The caller passed dry_run=false but safety.require_dry_run
+            # forced it back on. Tell them exactly why and how to unlock
+            # real writes — without this, agents (e.g. Claude Code) retry
+            # in an infinite loop because the old message said to "call
+            # again with dry_run=false", which they already did.
+            config_path = config.source_path or "~/.adloop/config.yaml"
+            response["dry_run_forced_by"] = "config.safety.require_dry_run"
+            response["config_path"] = config_path
+            response["remediation"] = (
+                f"Edit {config_path}, set 'require_dry_run: false' under "
+                "'safety:', then restart the AdLoop MCP server. Passing "
+                "dry_run=false on this tool will keep being overridden "
+                "until that flag is flipped."
+            )
+            response["message"] = (
+                f"dry_run=false was IGNORED because 'safety.require_dry_run: true' "
+                f"is set in {config_path}. No changes were made. To apply real "
+                f"changes, flip that flag to false and restart the AdLoop MCP "
+                f"server — retrying this tool with dry_run=false alone will "
+                f"never succeed while the flag is on."
+            )
+        else:
+            response["message"] = (
                 "Dry run completed — no changes were made to your Google Ads account. "
                 "To apply for real, call confirm_and_apply again with dry_run=false."
-            ),
-        }
+            )
+        return response
 
     try:
         result = _execute_plan(config, plan)

@@ -1092,3 +1092,98 @@ def test_extract_error_message_handles_empty_str_exceptions():
     e = SilentException()
     result = write._extract_error_message(e)
     assert result != ""
+
+
+class TestConfirmAndApplyDryRunOverride:
+    """Regression tests for GitHub issue #19.
+
+    When safety.require_dry_run is true, calling confirm_and_apply with
+    dry_run=false must tell the caller EXACTLY why the override happened
+    and how to unlock real writes, so agents (Claude Code, Cursor, etc.)
+    do not get stuck in retry loops.
+    """
+
+    def _stage_plan(self) -> str:
+        plan = preview_store.ChangePlan(
+            operation="add_keywords",
+            entity_type="keyword",
+            customer_id="123-456-7890",
+            changes={"ad_group_id": "2002", "keywords": []},
+        )
+        preview_store.store_plan(plan)
+        return plan.plan_id
+
+    def test_forced_dry_run_includes_remediation_fields(self, tmp_path):
+        config = AdLoopConfig(
+            ads=AdsConfig(customer_id="123-456-7890"),
+            safety=SafetyConfig(
+                require_dry_run=True,
+                log_file=str(tmp_path / "audit.log"),
+            ),
+            source_path=str(tmp_path / "config.yaml"),
+        )
+        plan_id = self._stage_plan()
+
+        result = write.confirm_and_apply(config, plan_id=plan_id, dry_run=False)
+
+        assert result["status"] == "DRY_RUN_SUCCESS"
+        assert result["dry_run_forced_by"] == "config.safety.require_dry_run"
+        assert result["config_path"] == str(tmp_path / "config.yaml")
+        assert "require_dry_run: false" in result["remediation"]
+        assert "restart" in result["remediation"].lower()
+        assert "IGNORED" in result["message"]
+        assert "restart" in result["message"].lower()
+
+    def test_requested_dry_run_does_not_mention_config_override(self, tmp_path):
+        """When the caller intentionally asked for a dry run, the response
+        should NOT mislead them by claiming a config override happened."""
+        config = AdLoopConfig(
+            ads=AdsConfig(customer_id="123-456-7890"),
+            safety=SafetyConfig(
+                require_dry_run=False,
+                log_file=str(tmp_path / "audit.log"),
+            ),
+            source_path=str(tmp_path / "config.yaml"),
+        )
+        plan_id = self._stage_plan()
+
+        result = write.confirm_and_apply(config, plan_id=plan_id, dry_run=True)
+
+        assert result["status"] == "DRY_RUN_SUCCESS"
+        assert "dry_run_forced_by" not in result
+        assert "config_path" not in result
+        assert "remediation" not in result
+
+    def test_forced_dry_run_falls_back_when_source_path_missing(self, tmp_path):
+        """Defensive default: if load_config didn't capture a path (legacy
+        callers constructing AdLoopConfig directly), we still surface a
+        path-shaped hint rather than an empty string."""
+        config = AdLoopConfig(
+            ads=AdsConfig(customer_id="123-456-7890"),
+            safety=SafetyConfig(
+                require_dry_run=True,
+                log_file=str(tmp_path / "audit.log"),
+            ),
+            source_path="",
+        )
+        plan_id = self._stage_plan()
+
+        result = write.confirm_and_apply(config, plan_id=plan_id, dry_run=False)
+
+        assert result["config_path"] == "~/.adloop/config.yaml"
+        assert "~/.adloop/config.yaml" in result["remediation"]
+
+    def test_forced_dry_run_is_audit_logged(self, tmp_path):
+        """The audit log must still reflect that a dry run happened."""
+        log_path = tmp_path / "audit.log"
+        config = AdLoopConfig(
+            ads=AdsConfig(customer_id="123-456-7890"),
+            safety=SafetyConfig(require_dry_run=True, log_file=str(log_path)),
+            source_path=str(tmp_path / "config.yaml"),
+        )
+        plan_id = self._stage_plan()
+
+        write.confirm_and_apply(config, plan_id=plan_id, dry_run=False)
+
+        contents = log_path.read_text()
+        assert "dry_run_success" in contents

@@ -1243,6 +1243,15 @@ def confirm_and_apply(
     IMPORTANT: Defaults to dry_run=True. You MUST explicitly pass dry_run=false
     to make real changes to the Google Ads account.
 
+    Config override: if 'safety.require_dry_run: true' is set in the user's
+    config file (default ~/.adloop/config.yaml), dry_run=false is IGNORED
+    and this tool will keep returning DRY_RUN_SUCCESS. When that happens the
+    response includes 'dry_run_forced_by', 'config_path', and 'remediation'
+    fields — surface those to the user verbatim and STOP retrying. Calling
+    this tool again with dry_run=false will not change anything until the
+    user edits the config file, sets 'require_dry_run: false', and restarts
+    the AdLoop MCP server.
+
     The plan_id comes from a prior draft_* or pause/enable tool call.
     """
     from adloop.ads.write import confirm_and_apply as _impl

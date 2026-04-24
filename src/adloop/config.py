@@ -47,6 +47,10 @@ class AdLoopConfig:
     ga4: GA4Config = field(default_factory=GA4Config)
     ads: AdsConfig = field(default_factory=AdsConfig)
     safety: SafetyConfig = field(default_factory=SafetyConfig)
+    # Absolute path the config was resolved from (even if it did not exist
+    # on disk when loaded). Used by the runtime to tell callers exactly
+    # which file to edit when a safety flag overrides their request.
+    source_path: str = ""
 
 
 def _resolve_path(path_str: str) -> Path:
@@ -66,9 +70,10 @@ def load_config(config_path: str | None = None) -> AdLoopConfig:
         config_path = os.environ.get("ADLOOP_CONFIG", "~/.adloop/config.yaml")
 
     path = _resolve_path(config_path)
+    resolved = str(path)
 
     if not path.exists():
-        return AdLoopConfig()
+        return AdLoopConfig(source_path=resolved)
 
     with open(path) as f:
         raw = yaml.safe_load(f) or {}
@@ -99,4 +104,5 @@ def load_config(config_path: str | None = None) -> AdLoopConfig:
             log_file=safety_raw.get("log_file", "~/.adloop/audit.log"),
             blocked_operations=safety_raw.get("blocked_operations", []),
         ),
+        source_path=resolved,
     )
