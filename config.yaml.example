@@ -37,6 +37,14 @@ ads:
   # Required for API access — even if you only manage one account.
   login_customer_id: ""
 
+gsc:
+  # Your Google Search Console site URL.
+  # Use the exact URL shown in the GSC property selector, e.g.:
+  #   "https://example.com/"         (URL-prefix property)
+  #   "sc-domain:example.com"        (Domain property)
+  # Leave empty to pass site_url as a parameter in each tool call instead.
+  site_url: ""
+
 safety:
   # Maximum daily budget allowed per campaign (in your account's currency).
   # AdLoop will reject any campaign creation or budget change above this.
