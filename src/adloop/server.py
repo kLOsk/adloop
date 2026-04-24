@@ -8,7 +8,10 @@ from typing import Callable
 from fastmcp import FastMCP
 from mcp.types import ToolAnnotations
 
+from adloop import diagnostics
 from adloop.config import load_config
+
+diagnostics.install()
 
 _READONLY = ToolAnnotations(readOnlyHint=True, destructiveHint=False)
 _WRITE = ToolAnnotations(readOnlyHint=False, destructiveHint=False)
@@ -82,7 +85,12 @@ def _structured_error(fn_name: str, exc: Exception) -> dict:
 
 
 def _safe(fn: Callable) -> Callable:
-    """Wrap a tool function so exceptions return structured error dicts."""
+    """Wrap a tool function so exceptions return structured error dicts.
+
+    When ``ADLOOP_DEBUG`` is set, the resulting callable is additionally
+    instrumented via :mod:`adloop.diagnostics` to emit tool_start/tool_end
+    events and update the last-activity timestamp.
+    """
 
     @functools.wraps(fn)
     def wrapper(*args, **kwargs):
@@ -93,7 +101,7 @@ def _safe(fn: Callable) -> Callable:
         except Exception as e:
             return _structured_error(fn.__name__, e)
 
-    return wrapper
+    return diagnostics.wrap_tool(wrapper)
 
 # ---------------------------------------------------------------------------
 # Health Check
@@ -1379,3 +1387,19 @@ def discover_keywords(
         page_size=page_size,
         customer_id=customer_id or _config.ads.customer_id,
     )
+
+
+# ---------------------------------------------------------------------------
+# Optional local-only debug tools (not shipped in git).
+# ---------------------------------------------------------------------------
+# Activated by ``ADLOOP_DEBUG_TOOLS=1``. The module file is .gitignored and
+# only present on developer machines doing MCP-host stress testing.
+
+import os as _os  # noqa: E402
+
+if _os.getenv("ADLOOP_DEBUG_TOOLS", "").lower() in ("1", "true", "yes", "on"):
+    try:
+        from adloop import _debug_tools  # noqa: F401
+    except ImportError:
+        # _debug_tools.py is intentionally absent in released builds.
+        pass
