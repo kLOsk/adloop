@@ -35,14 +35,38 @@ When the user asks to release, or after significant changes are merged:
 3. **Commit and tag**:
    ```bash
    git add pyproject.toml src/adloop/__init__.py
-   git commit -m "Release vX.Y.Z"
+   git commit -m "Release vX.Y.Z: <one-line headline>"
    git tag vX.Y.Z
    git push && git push --tags
    ```
 
-4. **GitHub Actions handles the rest**: tests run, package builds, publishes to PyPI, creates a GitHub Release with auto-generated notes.
+4. **GitHub Actions handles the build and publish**: tests run, package builds, publishes to PyPI, creates a GitHub Release. The auto-created release body is just a compare link — the human-written notes go on next (step 5).
 
-5. **Verify**: check the Actions tab on GitHub and confirm the package appears on https://pypi.org/project/adloop/
+5. **Write the GitHub Release notes** — this is the canonical changelog. We do **not** maintain a `CHANGELOG.md`; every version's notes live on its GitHub Release page (e.g. https://github.com/kLOsk/adloop/releases/tag/v0.6.0). Draft the notes locally, then attach them once the release workflow has finished creating the release:
+
+   ```bash
+   gh release edit vX.Y.Z --notes-file /tmp/adloop-vX.Y.Z-notes.md
+   ```
+
+   Format matches recent releases (v0.6.0 is the reference):
+
+   - **H2 title** — `## vX.Y.Z — <headline>`.
+   - **Lede paragraph** — what the release does and who's affected, in plain language.
+   - **H3 sections**, chosen based on the kind of release. Pick what applies:
+     - *The bug / the fix* (bug-fix releases) — explain the root cause end-to-end and the fix, with links to any upstream issues.
+     - *New tools* — one bullet per tool with signature, behaviour, and what it's for.
+     - *Updated orchestration rules* — when `.cursor/rules/adloop.mdc` or `.claude/rules/adloop.md` changed.
+     - *Safety* — how the change flows through the preview / dry-run / confirm pipeline, or any new guardrails.
+     - *Verification* — test counts (unit + behavioural), live API verification, anything else run to validate.
+     - *Also in this release* — smaller, related items bundled with the headline change.
+     - *Action for maintainers* — if the release introduces a temporary workaround, deprecation, or follow-up task, spell out the exact condition under which to remove it.
+   - **Install / upgrade** — `pipx upgrade adloop`, `pip install --upgrade adloop`, or `uvx adloop@X.Y.Z`. Mention restarting the MCP host when relevant.
+   - **Credits** — named contributors (GitHub handles) and what they contributed. Link the PR.
+   - **Full Changelog compare link** at the bottom: `**Full Changelog**: https://github.com/kLOsk/adloop/compare/vPREV...vX.Y.Z`.
+
+   Keep the notes narrative and useful — explain *why* the release matters, not just what changed. Match the tone of https://github.com/kLOsk/adloop/releases/tag/v0.6.0 and https://github.com/kLOsk/adloop/releases/tag/v0.6.3.
+
+6. **Verify**: check the Actions tab on GitHub, confirm the package appears on https://pypi.org/project/adloop/, and eyeball the rendered release page to make sure the markdown looks right.
 
 ## Troubleshooting
 
