@@ -1187,3 +1187,154 @@ class TestConfirmAndApplyDryRunOverride:
 
         contents = log_path.read_text()
         assert "dry_run_success" in contents
+
+
+# ---------------------------------------------------------------------------
+# RSA pinning — _normalize_rsa_assets + _validate_rsa
+# ---------------------------------------------------------------------------
+
+
+class TestNormalizeRsaAssets:
+    def test_accepts_plain_strings(self):
+        out = write._normalize_rsa_assets(["a", "b", "c"])
+        assert out == [
+            {"text": "a", "pinned_field": None},
+            {"text": "b", "pinned_field": None},
+            {"text": "c", "pinned_field": None},
+        ]
+
+    def test_accepts_dicts(self):
+        out = write._normalize_rsa_assets(
+            [
+                {"text": "Brand", "pinned_field": "HEADLINE_1"},
+                {"text": "Phone", "pinned_field": "HEADLINE_2"},
+            ]
+        )
+        assert out[0] == {"text": "Brand", "pinned_field": "HEADLINE_1"}
+        assert out[1] == {"text": "Phone", "pinned_field": "HEADLINE_2"}
+
+    def test_accepts_mixed(self):
+        out = write._normalize_rsa_assets(
+            [
+                {"text": "Brand", "pinned_field": "HEADLINE_1"},
+                "Free shipping",
+                "Same-day quotes",
+            ]
+        )
+        assert out[0]["pinned_field"] == "HEADLINE_1"
+        assert out[1] == {"text": "Free shipping", "pinned_field": None}
+        assert out[2] == {"text": "Same-day quotes", "pinned_field": None}
+
+    def test_dict_without_pin_defaults_to_none(self):
+        out = write._normalize_rsa_assets([{"text": "Hello"}])
+        assert out == [{"text": "Hello", "pinned_field": None}]
+
+    def test_rejects_non_str_non_dict(self):
+        with pytest.raises(ValueError, match="must be str or dict"):
+            write._normalize_rsa_assets([123])
+
+
+class TestValidateRsaPinning:
+    @staticmethod
+    def _hs(*items):
+        return write._normalize_rsa_assets(list(items))
+
+    @staticmethod
+    def _ds(*items):
+        return write._normalize_rsa_assets(list(items))
+
+    def test_canonical_3_pin_pattern_passes(self):
+        errs = write._validate_rsa(
+            "123",
+            self._hs(
+                {"text": "SandBagsToGo", "pinned_field": "HEADLINE_1"},
+                {"text": "866-550-2247", "pinned_field": "HEADLINE_2"},
+                "Free shipping",
+                "Same-day quotes",
+            ),
+            self._ds(
+                {"text": "Trusted by FEMA & Caltrans", "pinned_field": "DESCRIPTION_1"},
+                "Quick quotes, same-day shipping, USA-wide.",
+            ),
+            "https://sandbagstogo.com/",
+        )
+        assert errs == []
+
+    def test_rejects_invalid_headline_pin(self):
+        errs = write._validate_rsa(
+            "123",
+            self._hs({"text": "Brand", "pinned_field": "HEADLINE_99"}, "x", "y"),
+            self._ds("desc one", "desc two"),
+            "https://example.com/",
+        )
+        assert any("HEADLINE_99" in e for e in errs)
+
+    def test_rejects_invalid_description_pin(self):
+        errs = write._validate_rsa(
+            "123",
+            self._hs("a", "b", "c"),
+            self._ds(
+                {"text": "d1", "pinned_field": "DESCRIPTION_5"}, "d2"
+            ),
+            "https://example.com/",
+        )
+        assert any("DESCRIPTION_5" in e for e in errs)
+
+    def test_rejects_three_headlines_pinned_to_same_slot(self):
+        errs = write._validate_rsa(
+            "123",
+            self._hs(
+                {"text": "Brand A", "pinned_field": "HEADLINE_1"},
+                {"text": "Brand B", "pinned_field": "HEADLINE_1"},
+                {"text": "Brand C", "pinned_field": "HEADLINE_1"},
+            ),
+            self._ds("d1", "d2"),
+            "https://example.com/",
+        )
+        assert any("At most 2 headlines may pin to HEADLINE_1" in e for e in errs)
+
+    def test_rejects_two_descriptions_pinned_to_same_slot(self):
+        errs = write._validate_rsa(
+            "123",
+            self._hs("a", "b", "c"),
+            self._ds(
+                {"text": "d1", "pinned_field": "DESCRIPTION_1"},
+                {"text": "d2", "pinned_field": "DESCRIPTION_1"},
+            ),
+            "https://example.com/",
+        )
+        assert any(
+            "At most 1 description may pin to DESCRIPTION_1" in e for e in errs
+        )
+
+    def test_two_headlines_pinned_to_same_slot_is_allowed(self):
+        # Google permits up to 2 per pin slot
+        errs = write._validate_rsa(
+            "123",
+            self._hs(
+                {"text": "Brand A", "pinned_field": "HEADLINE_1"},
+                {"text": "Brand B", "pinned_field": "HEADLINE_1"},
+                "x",
+            ),
+            self._ds("d1", "d2"),
+            "https://example.com/",
+        )
+        assert errs == []
+
+    def test_length_check_still_enforced_on_dict_entries(self):
+        errs = write._validate_rsa(
+            "123",
+            self._hs({"text": "a" * 31, "pinned_field": "HEADLINE_1"}, "b", "c"),
+            self._ds("d1", "d2"),
+            "https://example.com/",
+        )
+        assert any("exceeds 30 chars" in e for e in errs)
+
+    def test_description_length_check_still_enforced_on_dict_entries(self):
+        errs = write._validate_rsa(
+            "123",
+            self._hs("a", "b", "c"),
+            self._ds({"text": "d" * 91, "pinned_field": "DESCRIPTION_1"}, "d2"),
+            "https://example.com/",
+        )
+        assert any("exceeds 90 chars" in e for e in errs)
