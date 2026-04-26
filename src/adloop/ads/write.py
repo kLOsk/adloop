@@ -515,6 +515,140 @@ def add_to_negative_keyword_list(
     return plan.to_preview()
 
 
+def _normalize_shared_set_attachment_args(
+    shared_set_id: str,
+    campaign_ids: list[str] | None,
+) -> tuple[list[str], list[str]]:
+    """Validate inputs for attach/detach. Returns (errors, deduped_campaign_ids)."""
+    errors: list[str] = []
+    if not shared_set_id:
+        errors.append("shared_set_id is required")
+    elif not str(shared_set_id).isdigit():
+        errors.append(
+            "shared_set_id must be a numeric ID (from get_negative_keyword_lists)"
+        )
+
+    campaign_ids = campaign_ids or []
+    if not campaign_ids:
+        errors.append("At least one campaign_id is required")
+
+    seen: set[str] = set()
+    deduped: list[str] = []
+    for cid in campaign_ids:
+        cid_str = str(cid).strip()
+        if not cid_str:
+            continue
+        if not cid_str.isdigit():
+            errors.append(f"campaign_id '{cid_str}' must be numeric")
+            continue
+        if cid_str in seen:
+            continue
+        seen.add(cid_str)
+        deduped.append(cid_str)
+
+    return errors, deduped
+
+
+def attach_shared_set_to_campaigns(
+    config: AdLoopConfig,
+    *,
+    customer_id: str = "",
+    shared_set_id: str = "",
+    campaign_ids: list[str] | None = None,
+) -> dict:
+    """Draft attaching an existing shared set to one or more campaigns — returns PREVIEW.
+
+    Creates ``CampaignSharedSet`` linkages so the campaigns inherit the shared
+    set's criteria (e.g. negative keywords). Most commonly used to attach a
+    shared negative keyword list to newly-built campaigns. Use
+    ``get_negative_keyword_lists`` to find the ``shared_set_id`` and
+    ``get_negative_keyword_list_campaigns`` to see existing attachments.
+
+    shared_set_id: numeric ID of the shared set to attach.
+    campaign_ids: list of numeric campaign IDs to attach the set to. Duplicates
+        in the input list are collapsed.
+
+    Call ``confirm_and_apply`` with the returned plan_id to execute.
+    """
+    from adloop.safety.guards import SafetyViolation, check_blocked_operation
+    from adloop.safety.preview import ChangePlan, store_plan
+
+    try:
+        check_blocked_operation("attach_shared_set_to_campaigns", config.safety)
+    except SafetyViolation as e:
+        return {"error": str(e)}
+
+    errors, deduped = _normalize_shared_set_attachment_args(
+        shared_set_id, campaign_ids
+    )
+    if errors:
+        return {"error": "Validation failed", "details": errors}
+
+    plan = ChangePlan(
+        operation="attach_shared_set_to_campaigns",
+        entity_type="campaign_shared_set",
+        entity_id=str(shared_set_id),
+        customer_id=customer_id,
+        changes={
+            "shared_set_id": str(shared_set_id),
+            "campaign_ids": deduped,
+        },
+    )
+    store_plan(plan)
+    return plan.to_preview()
+
+
+def detach_shared_set_from_campaigns(
+    config: AdLoopConfig,
+    *,
+    customer_id: str = "",
+    shared_set_id: str = "",
+    campaign_ids: list[str] | None = None,
+) -> dict:
+    """Draft detaching a shared set from one or more campaigns — returns PREVIEW.
+
+    Removes ``CampaignSharedSet`` linkages so the campaigns no longer inherit
+    the shared set's criteria. The shared set itself is unchanged; only the
+    per-campaign attachment record is removed. Use
+    ``get_negative_keyword_list_campaigns`` to inspect existing attachments
+    before detaching.
+
+    shared_set_id: numeric ID of the shared set.
+    campaign_ids: list of numeric campaign IDs to detach the set from.
+        Detaching a set that isn't currently attached to a campaign is a no-op
+        at the API level (the request will fail for that specific operation
+        but does not affect the others; surfaced in the apply response).
+
+    Call ``confirm_and_apply`` with the returned plan_id to execute.
+    """
+    from adloop.safety.guards import SafetyViolation, check_blocked_operation
+    from adloop.safety.preview import ChangePlan, store_plan
+
+    try:
+        check_blocked_operation("detach_shared_set_from_campaigns", config.safety)
+    except SafetyViolation as e:
+        return {"error": str(e)}
+
+    errors, deduped = _normalize_shared_set_attachment_args(
+        shared_set_id, campaign_ids
+    )
+    if errors:
+        return {"error": "Validation failed", "details": errors}
+
+    plan = ChangePlan(
+        operation="detach_shared_set_from_campaigns",
+        entity_type="campaign_shared_set",
+        entity_id=str(shared_set_id),
+        customer_id=customer_id,
+        changes={
+            "shared_set_id": str(shared_set_id),
+            "campaign_ids": deduped,
+        },
+    )
+    store_plan(plan)
+    return plan.to_preview()
+
+
 def update_ad_group(
     config: AdLoopConfig,
     *,
@@ -1922,6 +2056,8 @@ def _execute_plan(config: AdLoopConfig, plan: object) -> dict:
         "add_negative_keywords": _apply_add_negative_keywords,
         "create_negative_keyword_list": _apply_create_negative_keyword_list,
         "add_to_negative_keyword_list": _apply_add_to_negative_keyword_list,
+        "attach_shared_set_to_campaigns": _apply_attach_shared_set_to_campaigns,
+        "detach_shared_set_from_campaigns": _apply_detach_shared_set_from_campaigns,
         "pause_entity": _apply_status_change,
         "enable_entity": _apply_status_change,
         "remove_entity": _apply_remove,
@@ -2847,3 +2983,172 @@ def _apply_add_to_negative_keyword_list(
         "resource_names": [r.resource_name for r in response.results],
         "keyword_count": len(response.results),
     }
+
+
+def _parse_partial_failure_per_op(
+    client: object, partial_failure_error: object
+) -> dict:
+    """Parse a Google Ads partial_failure_error proto into {op_index: message}.
+
+    Returns an empty dict when there are no failures, when ``details`` is
+    missing, or when proto deserialization fails for any reason — callers
+    can still detect failed operations via empty ``result.resource_name``
+    entries and surface ``partial_failure_error.message`` as a fallback.
+    """
+    if partial_failure_error is None:
+        return {}
+    if not getattr(partial_failure_error, "code", 0):
+        return {}
+
+    details = getattr(partial_failure_error, "details", None) or []
+    out: dict = {}
+    try:
+        failure_msg = client.get_type("GoogleAdsFailure")
+        failure_pb_cls = type(failure_msg).pb(failure_msg).__class__
+        for detail in details:
+            value = getattr(detail, "value", None)
+            if value is None:
+                continue
+            failure = failure_pb_cls.FromString(value)
+            for err in failure.errors:
+                fpe = getattr(err.location, "field_path_elements", None)
+                if fpe:
+                    out[fpe[0].index] = err.message
+    except Exception:
+        pass
+    return out
+
+
+def _apply_attach_shared_set_to_campaigns(
+    client: object, cid: str, changes: dict
+) -> dict:
+    """Create CampaignSharedSet linkages for one shared set across campaigns.
+
+    Uses ``partial_failure=True`` so per-operation errors (e.g. attempting
+    to attach a list to a campaign that already has it) don't fail the
+    whole batch. Successful linkages are returned in ``resource_names``;
+    failed linkages are surfaced under ``failed_campaigns`` with the
+    originating campaign_id and per-op error message when parseable.
+    """
+    css_service = client.get_service("CampaignSharedSetService")
+    campaign_service = client.get_service("CampaignService")
+    shared_set_service = client.get_service("SharedSetService")
+
+    shared_set_resource = shared_set_service.shared_set_path(
+        cid, changes["shared_set_id"]
+    )
+
+    campaign_ids = list(changes["campaign_ids"])
+    operations = []
+    for campaign_id in campaign_ids:
+        op = client.get_type("CampaignSharedSetOperation")
+        css = op.create
+        css.campaign = campaign_service.campaign_path(cid, campaign_id)
+        css.shared_set = shared_set_resource
+        operations.append(op)
+
+    response = css_service.mutate_campaign_shared_sets(
+        customer_id=cid,
+        operations=operations,
+        partial_failure=True,
+    )
+
+    pf_error = getattr(response, "partial_failure_error", None)
+    per_op_errors = _parse_partial_failure_per_op(client, pf_error)
+
+    succeeded: list = []
+    failed: list = []
+    for idx, result in enumerate(response.results):
+        if result.resource_name:
+            succeeded.append(result.resource_name)
+        else:
+            failed.append(
+                {
+                    "campaign_id": str(campaign_ids[idx]),
+                    "operation_index": idx,
+                    "error": per_op_errors.get(
+                        idx, "Unknown error (see partial_failure_message)"
+                    ),
+                }
+            )
+
+    out = {
+        "shared_set_resource": shared_set_resource,
+        "resource_names": succeeded,
+        "campaign_count": len(succeeded),
+    }
+    if failed:
+        out["partial_failure"] = True
+        out["failed_campaigns"] = failed
+        if pf_error is not None:
+            msg = getattr(pf_error, "message", "")
+            if msg:
+                out["partial_failure_message"] = msg
+    return out
+
+
+def _apply_detach_shared_set_from_campaigns(
+    client: object, cid: str, changes: dict
+) -> dict:
+    """Remove CampaignSharedSet linkages for one shared set across campaigns.
+
+    The CampaignSharedSet resource name has a composite ID of the form
+    ``{campaign_id}~{shared_set_id}`` so we can construct the resource path
+    directly without needing to look up the linkage first.
+
+    Uses ``partial_failure=True`` so per-operation errors (e.g. detaching
+    a non-existent linkage) don't fail the whole batch. Successful removals
+    are returned in ``removed_resource_names``; failed operations are
+    surfaced under ``failed_campaigns`` with the originating campaign_id
+    and per-op error message when parseable.
+    """
+    css_service = client.get_service("CampaignSharedSetService")
+
+    shared_set_id = changes["shared_set_id"]
+    campaign_ids = list(changes["campaign_ids"])
+    operations = []
+    for campaign_id in campaign_ids:
+        op = client.get_type("CampaignSharedSetOperation")
+        op.remove = (
+            f"customers/{cid}/campaignSharedSets/{campaign_id}~{shared_set_id}"
+        )
+        operations.append(op)
+
+    response = css_service.mutate_campaign_shared_sets(
+        customer_id=cid,
+        operations=operations,
+        partial_failure=True,
+    )
+
+    pf_error = getattr(response, "partial_failure_error", None)
+    per_op_errors = _parse_partial_failure_per_op(client, pf_error)
+
+    succeeded: list = []
+    failed: list = []
+    for idx, result in enumerate(response.results):
+        if result.resource_name:
+            succeeded.append(result.resource_name)
+        else:
+            failed.append(
+                {
+                    "campaign_id": str(campaign_ids[idx]),
+                    "operation_index": idx,
+                    "error": per_op_errors.get(
+                        idx, "Unknown error (see partial_failure_message)"
+                    ),
+                }
+            )
+
+    out = {
+        "shared_set_id": shared_set_id,
+        "removed_resource_names": succeeded,
+        "campaign_count": len(succeeded),
+    }
+    if failed:
+        out["partial_failure"] = True
+        out["failed_campaigns"] = failed
+        if pf_error is not None:
+            msg = getattr(pf_error, "message", "")
+            if msg:
+                out["partial_failure_message"] = msg
+    return out
