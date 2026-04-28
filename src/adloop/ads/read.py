@@ -10,15 +10,16 @@ if TYPE_CHECKING:
     from adloop.config import AdLoopConfig
 
 
-def list_accounts(config: AdLoopConfig, *, limit: int = 50) -> dict:
+def list_accounts(config: AdLoopConfig, *, limit: int = 200) -> dict:
     """List accessible Google Ads accounts, up to *limit* entries.
 
-    The default of 50 is intentionally conservative: on large agency MCCs
-    (100+ accounts) returning the full list as a single MCP tool response
-    can trip per-response timeouts or size caps on some MCP hosts. Raise
-    *limit* when you explicitly want more, or use the customer_id parameter
-    on individual tools (get_campaign_performance, run_gaql, etc.) to query
-    a specific account directly without enumerating all of them.
+    The default of 200 covers the vast majority of agency MCCs in a single
+    response. Larger MCCs (300+ accounts) can still hit per-response size
+    caps or per-tool-call timeouts on some MCP hosts, so the cap is kept —
+    when the user genuinely wants the full list, raise *limit* explicitly
+    (e.g. ``list_accounts(limit=1000)``) or pass ``customer_id`` directly
+    to other tools (``get_campaign_performance``, ``run_gaql``, etc.) to
+    query a specific account without enumerating the whole MCC.
     """
     from adloop.ads.gaql import execute_query
 
@@ -48,9 +49,12 @@ def list_accounts(config: AdLoopConfig, *, limit: int = 50) -> dict:
     if truncated:
         result["truncated"] = True
         result["note"] = (
-            f"Returned the first {limit} accounts. Call list_accounts with a higher "
-            f"limit to see more, or pass customer_id directly to other tools to "
-            f"query a specific account without enumerating all of them."
+            f"Returned the first {limit} accounts but more exist on this MCC. "
+            f"If the user asked to see all of their accounts, call this tool "
+            f"again with a much higher limit (e.g. list_accounts(limit=1000)). "
+            f"If you only need one specific account, skip listing entirely "
+            f"and pass customer_id directly to get_campaign_performance, "
+            f"run_gaql, or whichever tool you actually need."
         )
     return result
 

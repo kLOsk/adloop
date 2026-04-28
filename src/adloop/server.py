@@ -292,13 +292,17 @@ def get_tracking_events(
 
 @mcp.tool(annotations=_READONLY)
 @_safe
-def list_accounts(limit: int = 50) -> dict:
+def list_accounts(limit: int = 200) -> dict:
     """List accessible Google Ads accounts.
 
-    Returns account names, IDs, and status. The default cap of 50 keeps the
-    response small on large agency MCCs — raise *limit* if you actually need
-    more. For most workflows you don't need to list accounts at all: pass
-    customer_id directly to get_campaign_performance, run_gaql, etc.
+    Returns account names, IDs, and status. The default cap of 200 covers
+    the vast majority of agency MCCs in one call. If the user explicitly
+    asked to see ALL of their accounts and the response comes back with
+    'truncated: true', call this tool again with a much higher limit (e.g.
+    list_accounts(limit=1000)) — do not stop at the truncated list. For
+    workflows that target a specific account you don't need to enumerate
+    at all: pass customer_id directly to get_campaign_performance,
+    run_gaql, etc.
     """
     from adloop.ads.read import list_accounts as _impl
 

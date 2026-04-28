@@ -1094,6 +1094,83 @@ def test_extract_error_message_handles_empty_str_exceptions():
     assert result != ""
 
 
+class TestListAccounts:
+    """Regression tests for the list_accounts limit / truncation behaviour.
+
+    The default cap was raised from 50 (v0.6.3) to 200 in v0.6.5 because
+    the original 50 was triggering "I can't see all my accounts" on
+    perfectly normal agency MCCs (50-150 clients). The cap is kept to
+    protect very large MCCs from per-response size caps on MCP hosts —
+    for those, the caller raises the limit explicitly.
+    """
+
+    @staticmethod
+    def _make_config(login_customer_id: str = "999-999-9999") -> AdLoopConfig:
+        return AdLoopConfig(
+            ads=AdsConfig(
+                customer_id="123-456-7890",
+                login_customer_id=login_customer_id,
+            ),
+            safety=SafetyConfig(require_dry_run=True),
+        )
+
+    @staticmethod
+    def _fake_accounts(n: int) -> list[dict]:
+        return [
+            {
+                "customer_client.id": str(1000 + i),
+                "customer_client.descriptive_name": f"Account {i}",
+                "customer_client.status": "ENABLED",
+                "customer_client.manager": False,
+            }
+            for i in range(n)
+        ]
+
+    def test_returns_full_list_when_under_default(self, monkeypatch):
+        rows = self._fake_accounts(120)
+        monkeypatch.setattr(
+            "adloop.ads.gaql.execute_query", lambda *_a, **_kw: rows
+        )
+
+        result = read.list_accounts(self._make_config())
+
+        assert result["total_accounts"] == 120
+        assert "truncated" not in result
+        assert "note" not in result
+
+    def test_truncates_above_default_with_actionable_note(self, monkeypatch):
+        # 201 rows mimics what the LIMIT {limit + 1} probe would return
+        # when the underlying MCC actually has more than 200 accounts.
+        rows = self._fake_accounts(201)
+        monkeypatch.setattr(
+            "adloop.ads.gaql.execute_query", lambda *_a, **_kw: rows
+        )
+
+        result = read.list_accounts(self._make_config())
+
+        assert result["total_accounts"] == 200
+        assert result["truncated"] is True
+        assert "list_accounts(limit=1000)" in result["note"]
+        assert "all of their accounts" in result["note"]
+
+    def test_explicit_limit_overrides_default(self, monkeypatch):
+        captured: dict = {}
+
+        def fake_execute(_config, _customer_id, query, *_a, **_kw):
+            captured["query"] = query
+            return self._fake_accounts(500)
+
+        monkeypatch.setattr("adloop.ads.gaql.execute_query", fake_execute)
+
+        result = read.list_accounts(self._make_config(), limit=1000)
+
+        # When caller asks for 1000 and we got back 500, no truncation.
+        assert result["total_accounts"] == 500
+        assert "truncated" not in result
+        # The probe should request limit + 1 to detect truncation cleanly.
+        assert "LIMIT 1001" in captured["query"]
+
+
 class TestConfirmAndApplyDryRunOverride:
     """Regression tests for GitHub issue #19.
 
