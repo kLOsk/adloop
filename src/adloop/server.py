@@ -18,13 +18,71 @@ _READONLY = ToolAnnotations(readOnlyHint=True, destructiveHint=False)
 _WRITE = ToolAnnotations(readOnlyHint=False, destructiveHint=False)
 _DESTRUCTIVE = ToolAnnotations(readOnlyHint=False, destructiveHint=True)
 
+def _build_orchestration_instructions() -> str:
+    """Compact orchestration hint sent via MCP ``InitializeResult.instructions``.
+
+    Per the MCP spec, ``instructions`` is described as "a hint to the model" —
+    not a place to dump a 50KB manual. So we send a curated, ~500-token subset
+    covering the rules that matter most when used **without** the full
+    orchestration rules loaded (e.g. in MCP clients that don't pick up project
+    rules). The full ruleset stays canonical at:
+
+      - ``.cursor/rules/adloop.mdc`` (Cursor — auto-loaded as a workspace rule)
+      - ``.claude/rules/adloop.md`` (Claude Code in this repo)
+      - ``~/.claude/CLAUDE.md`` (after the user runs ``adloop install-rules``)
+
+    Clients that honor ``instructions`` (Claude Code, VSCode Copilot, Goose,
+    Cursor v1.6+) will inject this hint into the LLM's system prompt
+    automatically — so even users running AdLoop without any per-project
+    rules file get the absolute must-knows around safety, dry-run defaults,
+    and the most common cost-burning mistakes.
+    """
+    return (
+        "AdLoop connects Google Ads + Google Analytics (GA4) + your codebase. "
+        "These are the *minimum* orchestration rules — the full ruleset lives "
+        "in `.cursor/rules/adloop.mdc` or `~/.claude/CLAUDE.md` (run "
+        "`adloop install-rules` to install globally). Read these before using "
+        "any write tool.\n\n"
+        "SAFETY (always):\n"
+        "- Every write tool returns a PREVIEW with a `plan_id`. Show the "
+        "preview to the user and wait for explicit approval before calling "
+        "`confirm_and_apply`.\n"
+        "- Default to `dry_run=true` on `confirm_and_apply`. Only set "
+        "`dry_run=false` after the user explicitly approves the preview. "
+        "`require_dry_run` in config can override this.\n"
+        "- Respect the config's `max_daily_budget` cap.\n"
+        "- New campaigns and RSAs are created PAUSED. The user must enable "
+        "them after review.\n"
+        "- One change at a time — don't batch unrelated writes.\n\n"
+        "PRE-WRITE CHECKS (before any `draft_*`):\n"
+        "- BROAD match keywords require Smart Bidding (MAXIMIZE_CONVERSIONS, "
+        "tCPA, tROAS). Refuse BROAD on MANUAL_CPC. This is the #1 cause of "
+        "wasted ad spend.\n"
+        "- Verify `final_url` exists before creating ads or sitelinks. URLs "
+        "to 404 pages destroy quality score.\n"
+        "- If a campaign has zero conversions and high spend, fix tracking "
+        "before adding more ads/keywords. Don't just throw budget at it.\n"
+        "- If keyword quality scores are <5, fix ad relevance and landing "
+        "pages before adding more keywords.\n\n"
+        "DATA LITERACY:\n"
+        "- Ads clicks > GA4 sessions is normal in EU markets due to GDPR "
+        "consent rejection (typically 30-70% of users opt out). It's not a "
+        "tracking bug. Use `analyze_campaign_conversions` and "
+        "`attribution_check` — they factor this in.\n"
+        "- `cost_micros / 1,000,000` = actual currency. Read tools "
+        "auto-compute `metrics.cost`; only `run_gaql` returns raw micros.\n"
+        "- New campaigns MUST have `geo_target_ids` and `language_ids` set. "
+        "Untargeted campaigns waste budget.\n\n"
+        "For full orchestration patterns (when to call which tools, GAQL "
+        "reference, language-specific copy guidance, PMax handling, "
+        "shared-set lifecycle, RSA pinning trade-offs), see the canonical "
+        "rules file."
+    )
+
+
 mcp = FastMCP(
     "AdLoop",
-    instructions=(
-        "AdLoop connects Google Ads and Google Analytics (GA4) data to your "
-        "codebase. Use the read tools to analyze performance, and the write "
-        "tools (with safety confirmation) to manage campaigns."
-    ),
+    instructions=_build_orchestration_instructions(),
 )
 
 _config = load_config()
