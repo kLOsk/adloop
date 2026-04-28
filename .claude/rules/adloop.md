@@ -92,7 +92,7 @@ These tools call both APIs internally and return unified results with computed `
 | `draft_ad_group` | Create a new ad group within an existing campaign (does NOT publish) | `campaign_id` (REQUIRED), `ad_group_name` (REQUIRED), `keywords` (optional list of {text, match_type}), `cpc_bid_micros` (optional) |
 | `update_campaign` | Modify existing campaign settings — bid strategy, budget, geo targets, language targets, Search partners, display expansion | `campaign_id` (REQUIRED), plus any of: `bidding_strategy`, `daily_budget`, `geo_target_ids`, `language_ids`, `search_partners_enabled`, `display_network_enabled`, TARGET_SPEND `max_cpc` |
 | `update_ad_group` | Update ad group name and/or MANUAL_CPC `max_cpc` | `ad_group_id`, optional `ad_group_name`, optional `max_cpc` |
-| `draft_responsive_search_ad` | Create RSA preview (does NOT publish) | 3-15 headlines (≤30 chars), 2-4 descriptions (≤90 chars), final_url required, path1/path2 (≤15 chars each) |
+| `draft_responsive_search_ad` | Create RSA preview (does NOT publish) | 3-15 headlines (≤30 chars), 2-4 descriptions (≤90 chars), final_url required, path1/path2 (≤15 chars each). Each headline/description may be a plain string (unpinned) or `{"text": "...", "pinned_field": "HEADLINE_1"}` (pinned). Valid pin slots: `HEADLINE_1/2/3`, `DESCRIPTION_1/2`. Google permits ≤2 headlines per slot, ≤1 description per slot. |
 | `draft_callouts` | Create callout assets for a campaign (does NOT publish) | `campaign_id`, `callouts` list with 1-25 chars each |
 | `draft_structured_snippets` | Create structured snippet assets for a campaign (does NOT publish) | `campaign_id`, `snippets` list of `{header, values}` with official header values and 3-10 values |
 | `draft_image_assets` | Create image assets for a campaign from local files (does NOT publish) | `campaign_id`, `image_paths` list of local PNG/JPEG/GIF files |
@@ -198,10 +198,15 @@ Most websites (especially in the EU) use a GDPR cookie consent banner. This has 
 4. Call `get_tracking_events` to verify conversion tracking exists
 5. If codebase is accessible, read the landing page code to extract value propositions and determine the language. **Verify the final_url page actually exists** — check route definitions or confirm the URL is live. NEVER use a URL you haven't verified.
 6. Call `draft_responsive_search_ad` with at least 8-10 diverse headlines and 3-4 descriptions. Write copy in the correct language — if the landing page is multilingual or the language is unclear, ask the user before writing. Follow the "Ad Copy Character Limits" section — count characters for every headline before generating
-7. **Always set display paths** (`path1`, `path2`, max 15 chars each). These appear in the display URL (e.g. `example.com/Products/Pricing`) and significantly improve ad relevance. Derive them from the landing page URL structure or the ad's value proposition.
-8. Present the complete preview to the user — include any warnings from the pre-write checks
-9. After the ad is created, **suggest sitelinks** if the campaign doesn't have any. Use `draft_sitelinks` with at least 4 relevant links (key pages like pricing, features, signup, etc.). Sitelinks increase ad real estate and CTR.
-10. Wait for explicit user approval before calling `confirm_and_apply`
+7. **Pinning (use sparingly).** By default, pass headlines and descriptions as plain strings — Google rotates them for you and ad strength benefits from the diversity. Only switch to the dict shape `{"text": "...", "pinned_field": "HEADLINE_1"}` when the user has a concrete brand-safety, compliance, or messaging requirement (e.g. "the brand name must always appear", "the disclaimer must always show"). Trade-offs to flag before pinning:
+   - Each pin reduces Google's ability to optimize headline order, which usually drops ad strength one notch.
+   - Phone numbers should generally use a **call asset at the campaign level** (separate tool/manual setup) rather than a pinned headline — call assets are clickable on mobile and don't burn a headline slot. If the user asks to pin a phone number, suggest the call-asset path first.
+   - Valid pin slots: `HEADLINE_1`, `HEADLINE_2`, `HEADLINE_3` for headlines; `DESCRIPTION_1`, `DESCRIPTION_2` for descriptions. Google permits at most 2 headlines per slot and 1 description per slot — the draft tool enforces these caps.
+   - You can mix pinned dict entries with plain-string entries in a single call (e.g. brand pinned to `HEADLINE_1`, the rest unpinned).
+8. **Always set display paths** (`path1`, `path2`, max 15 chars each). These appear in the display URL (e.g. `example.com/Products/Pricing`) and significantly improve ad relevance. Derive them from the landing page URL structure or the ad's value proposition.
+9. Present the complete preview to the user — include any warnings from the pre-write checks, and explicitly call out which assets (if any) are pinned and the trade-off.
+10. After the ad is created, **suggest sitelinks** if the campaign doesn't have any. Use `draft_sitelinks` with at least 4 relevant links (key pages like pricing, features, signup, etc.). Sitelinks increase ad real estate and CTR.
+11. Wait for explicit user approval before calling `confirm_and_apply`
 
 ### When user wants to add keywords
 
@@ -563,7 +568,7 @@ When advising on Google Ads:
 - **Budget sufficiency**: A campaign's daily budget should be at least 5x its target CPA to generate enough data for the algorithm.
 - **Learning phase**: Don't edit campaigns that are in an active learning phase (Google Ads shows "Learning" or "Learning (limited)" status). Wait until the learning phase completes before making changes.
 - **Negative keyword hygiene**: After reviewing search terms, always suggest adding irrelevant terms as negatives. Group them by theme.
-- **RSA best practices**: Provide at least 8-10 unique headlines (out of max 15) and 3-4 descriptions (out of max 4). Make headlines diverse — don't repeat the same message. Pin only when necessary. See "Ad Copy Character Limits" section below for language-specific guidance.
+- **RSA best practices**: Provide at least 8-10 unique headlines (out of max 15) and 3-4 descriptions (out of max 4). Make headlines diverse — don't repeat the same message. **Pin only when necessary** — pinning reduces Google's ability to rotate assets and typically lowers ad strength. Reach for the dict shape `{"text": "...", "pinned_field": "HEADLINE_1"}` only for concrete brand-safety/compliance reasons. For phone numbers, prefer a campaign-level call asset over a pinned headline. See "Ad Copy Character Limits" section below for language-specific guidance.
 - **Quality Score**: If keywords have quality score < 5, prioritize improving ad relevance and landing page experience over bid increases.
 - **Zero conversions**: When a campaign has spent significant budget with zero conversions, investigate (1) is GDPR consent reducing visible conversions? (2) is conversion tracking set up correctly in GA4? (3) is the landing page converting organic traffic? (4) are search terms relevant? Don't just increase budget.
 - **Manual CPC + Broad Match**: This combination is the #1 cause of wasted budget. Broad Match without Smart Bidding matches any vaguely related query — a niche industry keyword on BROAD will match generic, irrelevant, and competitor terms. NEVER create this combination. If it already exists, recommend switching to PHRASE/EXACT match or moving the campaign to Smart Bidding BEFORE any other changes.
