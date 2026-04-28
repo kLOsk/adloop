@@ -1,3 +1,5 @@
+[![MseeP.ai Security Assessment Badge](https://mseep.net/pr/klosk-adloop-badge.png)](https://mseep.ai/app/klosk-adloop)
+
 <div align="center">
 
 # AdLoop
