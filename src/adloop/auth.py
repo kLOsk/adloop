@@ -18,11 +18,13 @@ _ALL_SCOPES = [
     "https://www.googleapis.com/auth/analytics.readonly",
     "https://www.googleapis.com/auth/analytics.edit",
     "https://www.googleapis.com/auth/adwords",
+    "https://www.googleapis.com/auth/webmasters.readonly",
 ]
 
 _GA4_SCOPES = [
     "https://www.googleapis.com/auth/analytics.readonly",
     "https://www.googleapis.com/auth/analytics.edit",
+    "https://www.googleapis.com/auth/webmasters.readonly",
 ]
 
 _ADS_SCOPES = [

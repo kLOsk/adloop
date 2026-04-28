@@ -33,6 +33,11 @@ class AdsConfig:
 
 
 @dataclass
+class GscConfig:
+    site_url: str = ""  # e.g. "https://example.com/" or "sc-domain:example.com"
+
+
+@dataclass
 class SafetyConfig:
     max_daily_budget: float = 50.0
     max_bid_increase_pct: int = 100
@@ -46,6 +51,7 @@ class AdLoopConfig:
     google: GoogleConfig = field(default_factory=GoogleConfig)
     ga4: GA4Config = field(default_factory=GA4Config)
     ads: AdsConfig = field(default_factory=AdsConfig)
+    gsc: GscConfig = field(default_factory=GscConfig)
     safety: SafetyConfig = field(default_factory=SafetyConfig)
     # Absolute path the config was resolved from (even if it did not exist
     # on disk when loaded). Used by the runtime to tell callers exactly
@@ -81,6 +87,7 @@ def load_config(config_path: str | None = None) -> AdLoopConfig:
     google_raw = raw.get("google", {})
     ga4_raw = raw.get("ga4", {})
     ads_raw = raw.get("ads", {})
+    gsc_raw = raw.get("gsc", {})
     safety_raw = raw.get("safety", {})
 
     return AdLoopConfig(
@@ -96,6 +103,9 @@ def load_config(config_path: str | None = None) -> AdLoopConfig:
             developer_token=ads_raw.get("developer_token", ""),
             customer_id=ads_raw.get("customer_id", ""),
             login_customer_id=ads_raw.get("login_customer_id", ""),
+        ),
+        gsc=GscConfig(
+            site_url=gsc_raw.get("site_url", ""),
         ),
         safety=SafetyConfig(
             max_daily_budget=safety_raw.get("max_daily_budget", 50.0),

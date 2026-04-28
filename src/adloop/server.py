@@ -286,6 +286,70 @@ def get_tracking_events(
 
 
 # ---------------------------------------------------------------------------
+# Google Search Console Read Tools
+# ---------------------------------------------------------------------------
+
+
+@mcp.tool(annotations=_READONLY)
+@_safe
+def list_gsc_sites() -> dict:
+    """List all Google Search Console properties the authenticated user can access.
+
+    Use this first to discover which site URLs are available before running
+    search analytics reports. Returns the site URL and permission level for
+    each property.
+    """
+    from adloop.gsc.reports import list_gsc_sites as _impl
+
+    return _impl(_config)
+
+
+@mcp.tool(annotations=_READONLY)
+@_safe
+def run_gsc_report(
+    site_url: str = "",
+    dimensions: list[str] | None = None,
+    date_range_start: str = "7daysAgo",
+    date_range_end: str = "today",
+    limit: int = 100,
+    search_type: str = "web",
+    dimension_filter_groups: list[dict] | None = None,
+) -> dict:
+    """Run a Google Search Console search analytics report.
+
+    Returns clicks, impressions, CTR, and average position broken down by
+    the requested dimensions. Useful for diagnosing organic traffic drops,
+    finding keyword opportunities, and cross-referencing with GA4 and Ads data.
+
+    site_url: the GSC property URL (e.g. "https://example.com/" or
+        "sc-domain:example.com"). Defaults to gsc.site_url in config.yaml.
+    dimensions: one or more of ["query", "page", "country", "device", "date"].
+        Defaults to ["query"].
+    date_range_start / date_range_end: ISO dates (YYYY-MM-DD) or relative
+        values like "7daysAgo", "30daysAgo", "today".
+    search_type: "web" (default), "image", "video", "news", "discover",
+        or "googleNews".
+    dimension_filter_groups: optional GSC DimensionFilterGroup list to filter
+        by query, page, country, or device. Example:
+        [{"filters": [{"dimension": "query", "operator": "contains",
+                       "expression": "analytics"}]}]
+    limit: maximum rows to return (default 100, max 25000).
+    """
+    from adloop.gsc.reports import run_gsc_report as _impl
+
+    return _impl(
+        _config,
+        site_url=site_url,
+        dimensions=dimensions,
+        date_range_start=date_range_start,
+        date_range_end=date_range_end,
+        limit=limit,
+        search_type=search_type,
+        dimension_filter_groups=dimension_filter_groups,
+    )
+
+
+# ---------------------------------------------------------------------------
 # Google Ads Read Tools
 # ---------------------------------------------------------------------------
 
