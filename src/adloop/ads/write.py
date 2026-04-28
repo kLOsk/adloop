@@ -37,6 +37,34 @@ _VALID_IMAGE_MIME_TYPES = {
     "image/png": "IMAGE_PNG",
 }
 
+_VALID_HEADLINE_PINS = {"HEADLINE_1", "HEADLINE_2", "HEADLINE_3"}
+_VALID_DESCRIPTION_PINS = {"DESCRIPTION_1", "DESCRIPTION_2"}
+
+
+def _normalize_rsa_assets(items: list) -> list[dict]:
+    """Accept str or {text, pinned_field?} dict entries; return list of dicts.
+
+    Plain strings are treated as unpinned. Dict entries may include an optional
+    ``pinned_field`` key whose value must be a valid pin slot for the asset
+    role (validated by ``_validate_rsa``).
+    """
+    out: list[dict] = []
+    for item in items:
+        if isinstance(item, str):
+            out.append({"text": item, "pinned_field": None})
+        elif isinstance(item, dict):
+            out.append(
+                {
+                    "text": item.get("text", ""),
+                    "pinned_field": item.get("pinned_field"),
+                }
+            )
+        else:
+            raise ValueError(
+                f"RSA asset entry must be str or dict, got {type(item).__name__}"
+            )
+    return out
+
 
 # ---------------------------------------------------------------------------
 # URL validation — verify URLs exist before creating ads/sitelinks
@@ -192,13 +220,27 @@ def draft_responsive_search_ad(
     *,
     customer_id: str = "",
     ad_group_id: str = "",
-    headlines: list[str] | None = None,
-    descriptions: list[str] | None = None,
+    headlines: list[str | dict] | None = None,
+    descriptions: list[str | dict] | None = None,
     final_url: str = "",
     path1: str = "",
     path2: str = "",
 ) -> dict:
-    """Draft a Responsive Search Ad — returns preview, does NOT execute."""
+    """Draft a Responsive Search Ad — returns preview, does NOT execute.
+
+    Each headline/description entry may be either:
+
+    - a plain string (unpinned), or
+    - a dict ``{"text": "...", "pinned_field": "HEADLINE_1"}`` (pinned).
+
+    Valid pin values:
+        headlines:    HEADLINE_1, HEADLINE_2, HEADLINE_3
+        descriptions: DESCRIPTION_1, DESCRIPTION_2
+
+    Google caps: at most 2 headlines per pin slot, at most 1 description per
+    pin slot. Mixed plain-string and dict entries are allowed within a single
+    call (e.g. brand pinned to HEADLINE_1, the rest unpinned).
+    """
     from adloop.safety.guards import SafetyViolation, check_blocked_operation
     from adloop.safety.preview import ChangePlan, store_plan
 
@@ -209,6 +251,12 @@ def draft_responsive_search_ad(
 
     headlines = headlines or []
     descriptions = descriptions or []
+
+    try:
+        headlines = _normalize_rsa_assets(headlines)
+        descriptions = _normalize_rsa_assets(descriptions)
+    except ValueError as e:
+        return {"error": "Validation failed", "details": [str(e)]}
 
     errors = _validate_rsa(ad_group_id, headlines, descriptions, final_url)
     if errors:
@@ -1465,8 +1513,8 @@ def _check_broad_match_safety(
 
 def _validate_rsa(
     ad_group_id: str,
-    headlines: list[str],
-    descriptions: list[str],
+    headlines: list[dict],
+    descriptions: list[dict],
     final_url: str,
 ) -> list[str]:
     errors = []
@@ -1482,12 +1530,47 @@ def _validate_rsa(
         errors.append(f"Need at least 2 descriptions, got {len(descriptions)}")
     if len(descriptions) > 4:
         errors.append(f"Maximum 4 descriptions, got {len(descriptions)}")
+
+    headline_pin_counts: dict[str, int] = {}
     for i, h in enumerate(headlines):
-        if len(h) > 30:
-            errors.append(f"Headline {i + 1} exceeds 30 chars ({len(h)}): '{h}'")
+        text = h["text"]
+        pin = h["pinned_field"]
+        if len(text) > 30:
+            errors.append(
+                f"Headline {i + 1} exceeds 30 chars ({len(text)}): '{text}'"
+            )
+        if pin is not None:
+            if pin not in _VALID_HEADLINE_PINS:
+                errors.append(
+                    f"Headline {i + 1} pinned_field '{pin}' invalid; "
+                    f"must be one of {sorted(_VALID_HEADLINE_PINS)} or null"
+                )
+            else:
+                headline_pin_counts[pin] = headline_pin_counts.get(pin, 0) + 1
+    for pin, count in headline_pin_counts.items():
+        if count > 2:
+            errors.append(f"At most 2 headlines may pin to {pin}; got {count}")
+
+    description_pin_counts: dict[str, int] = {}
     for i, d in enumerate(descriptions):
-        if len(d) > 90:
-            errors.append(f"Description {i + 1} exceeds 90 chars ({len(d)}): '{d}'")
+        text = d["text"]
+        pin = d["pinned_field"]
+        if len(text) > 90:
+            errors.append(
+                f"Description {i + 1} exceeds 90 chars ({len(text)}): '{text}'"
+            )
+        if pin is not None:
+            if pin not in _VALID_DESCRIPTION_PINS:
+                errors.append(
+                    f"Description {i + 1} pinned_field '{pin}' invalid; "
+                    f"must be one of {sorted(_VALID_DESCRIPTION_PINS)} or null"
+                )
+            else:
+                description_pin_counts[pin] = description_pin_counts.get(pin, 0) + 1
+    for pin, count in description_pin_counts.items():
+        if count > 1:
+            errors.append(f"At most 1 description may pin to {pin}; got {count}")
+
     return errors
 
 
@@ -2253,14 +2336,22 @@ def _apply_create_rsa(client: object, cid: str, changes: dict) -> dict:
     ad = ad_group_ad.ad
     ad.final_urls.append(changes["final_url"])
 
-    for text in changes["headlines"]:
+    for entry in changes["headlines"]:
         asset = client.get_type("AdTextAsset")
-        asset.text = text
+        asset.text = entry["text"]
+        if entry.get("pinned_field"):
+            asset.pinned_field = client.enums.ServedAssetFieldTypeEnum[
+                entry["pinned_field"]
+            ]
         ad.responsive_search_ad.headlines.append(asset)
 
-    for text in changes["descriptions"]:
+    for entry in changes["descriptions"]:
         asset = client.get_type("AdTextAsset")
-        asset.text = text
+        asset.text = entry["text"]
+        if entry.get("pinned_field"):
+            asset.pinned_field = client.enums.ServedAssetFieldTypeEnum[
+                entry["pinned_field"]
+            ]
         ad.responsive_search_ad.descriptions.append(asset)
 
     if changes.get("path1"):

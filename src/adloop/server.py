@@ -903,8 +903,8 @@ def update_campaign(
 @_safe
 def draft_responsive_search_ad(
     ad_group_id: str,
-    headlines: list[str],
-    descriptions: list[str],
+    headlines: list[str | dict],
+    descriptions: list[str | dict],
     final_url: str,
     customer_id: str = "",
     path1: str = "",
@@ -914,6 +914,19 @@ def draft_responsive_search_ad(
 
     Provide 3-15 headlines (max 30 chars each) and 2-4 descriptions (max 90 chars each).
     The preview shows exactly what will be created. Call confirm_and_apply to execute.
+
+    Each headline/description entry may be either:
+
+    - a plain string (unpinned), or
+    - a dict ``{"text": "...", "pinned_field": "HEADLINE_1"}`` (pinned).
+
+    Valid pin values:
+        headlines:    HEADLINE_1, HEADLINE_2, HEADLINE_3
+        descriptions: DESCRIPTION_1, DESCRIPTION_2
+
+    Google caps: at most 2 headlines per pin slot, at most 1 description per pin
+    slot. Mixed plain-string and dict entries are allowed within a single call
+    (e.g. brand pinned to HEADLINE_1, the rest unpinned).
     """
     from adloop.ads.write import draft_responsive_search_ad as _impl
 
