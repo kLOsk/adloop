@@ -294,7 +294,22 @@ Or add to your project's `.mcp.json`:
 }
 ```
 
-Then copy `.claude/rules/adloop.md` and `.claude/commands/` from this repo into your project for orchestration rules and slash commands.
+Then install the orchestration rules + slash commands globally so every Claude Code session inherits them:
+
+```bash
+adloop install-rules
+```
+
+This writes a managed block to `~/.claude/CLAUDE.md` and copies the slash commands (prefixed `adloop-*`) into `~/.claude/commands/`. The block is delimited by sentinel comments so it's safe to run multiple times — re-running just refreshes the content. Two install modes:
+
+- **inline** (default) — full rules embedded in `~/.claude/CLAUDE.md`. Reliable but adds ~10K tokens to every Claude Code session.
+- **lazy** (`adloop install-rules --lazy`) — small directive in `CLAUDE.md` pointing at `~/.claude/rules/adloop.md`. Cheaper baseline cost; the LLM reads the rules file only when AdLoop tools are in scope.
+
+To refresh after upgrading AdLoop: `adloop update-rules`. To remove cleanly: `adloop uninstall-rules` — only the managed block and `adloop-*` commands are touched, never your own content.
+
+If you'd rather manage things by hand instead, copy `.claude/rules/adloop.md` and `.claude/commands/` from this repo into your project's `.claude/` directory.
+
+**Claude Desktop / claude.ai** has no programmatic rules location. Run `adloop install-rules` and it will print the rules content for you to paste into Project settings → Custom instructions on claude.ai.
 
 </details>
 

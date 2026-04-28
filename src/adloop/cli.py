@@ -580,10 +580,123 @@ def _run_wizard_post_config(
     for line in claude_snippet.splitlines():
         _print(f"    {line}")
     _print()
-    _print("  Then copy .claude/rules/adloop.md and .claude/commands/ into your project.")
+    _print("  (Or run `adloop install-rules` after this wizard to install")
+    _print("   rules + slash commands automatically into ~/.claude/.)")
+
+    # Offer to install Claude rules globally now if a Claude installation
+    # is detected. Cursor is intentionally skipped — Cursor handles workspace
+    # rules natively via .cursor/rules/.
+    _maybe_offer_global_rules_install()
 
     _print()
     _print("  Restart your editor to pick up the MCP server.")
     _print()
     _print("  ✓ Setup complete!")
     _print()
+
+
+def _maybe_offer_global_rules_install() -> None:
+    """If Claude is detected, offer to install rules globally during init."""
+    from adloop.rules_install import detect_clients, install_rules
+
+    clients = detect_clients()
+    if not clients:
+        return
+
+    _print()
+    _print("  ── Claude Orchestration Rules ──")
+    _print()
+    _print("  Detected Claude installations:")
+    for c in clients:
+        _print(f"    • {c.display_name}")
+    _print()
+    _print("  AdLoop ships orchestration rules that teach Claude how to use")
+    _print("  these tools safely (43 tools, safety patterns, GAQL reference).")
+    _print("  Without them, you get raw tool access but no orchestration.")
+    _print()
+
+    if not _prompt_bool("Install rules globally now?", default=True):
+        _print("  Skipping. Run `adloop install-rules` later if you change your mind.")
+        return
+
+    _print()
+    _print("  Install mode:")
+    _print("    1. inline (default) — full rules in ~/.claude/CLAUDE.md")
+    _print("       Reliable; loaded every Claude Code session (~10K tokens).")
+    _print("    2. lazy — small directive in CLAUDE.md, full rules in")
+    _print("       ~/.claude/rules/adloop.md, loaded only when AdLoop is active.")
+    _print("       Cheaper baseline cost; slightly less reliable.")
+    _print()
+    raw = input("  Choose [1/2, default 1]: ").strip()
+    mode = "lazy" if raw == "2" else "inline"
+
+    _print()
+    results = install_rules(mode=mode)
+    _print_install_results(results)
+
+
+def _print_install_results(results: list) -> None:
+    """Pretty-print install/update/uninstall results."""
+    if not results:
+        _print("  No Claude installations detected — nothing to do.")
+        return
+    for r in results:
+        if r.action == "manual":
+            _print(f"  ⚠  {r.client}: manual step required")
+            _print()
+            for line in r.instructions.splitlines():
+                _print(f"    {line}")
+            _print()
+            continue
+        target = r.rules_target if r.rules_target else "(none)"
+        _print(f"  ✓ {r.client}: {r.action} → {target}")
+        if r.commands_installed:
+            _print(
+                f"    {len(r.commands_installed)} slash command(s) installed"
+                f" (prefixed adloop-*)"
+            )
+        if r.commands_removed:
+            _print(
+                f"    {len(r.commands_removed)} slash command(s) removed"
+            )
+
+
+def run_rules_command(subcommand: str, argv: list[str]) -> int:
+    """Entry point for `adloop install-rules / update-rules / uninstall-rules`.
+
+    Returns the process exit code (0 = success).
+    """
+    from adloop.rules_install import (
+        install_rules,
+        uninstall_rules,
+        update_rules,
+    )
+
+    mode = "inline"
+    install_commands = True
+    if "--lazy" in argv:
+        mode = "lazy"
+    if "--no-commands" in argv:
+        install_commands = False
+
+    _print()
+    if subcommand == "install-rules":
+        _print("  Installing AdLoop rules...")
+        results = install_rules(mode=mode, install_commands=install_commands)
+    elif subcommand == "update-rules":
+        _print("  Updating AdLoop rules...")
+        # update-rules preserves the existing mode when no flag is passed.
+        explicit_mode = mode if "--lazy" in argv or "--inline" in argv else None
+        results = update_rules(
+            mode=explicit_mode, install_commands=install_commands  # type: ignore[arg-type]
+        )
+    elif subcommand == "uninstall-rules":
+        _print("  Uninstalling AdLoop rules...")
+        results = uninstall_rules(remove_commands=install_commands)
+    else:
+        _print(f"  Unknown subcommand: {subcommand}")
+        return 1
+
+    _print_install_results(results)
+    _print()
+    return 0
