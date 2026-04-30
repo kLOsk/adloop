@@ -634,7 +634,7 @@ def audit_event_coverage(
         ga4_fires = ga4_count > 0
         is_auto = event in _GA4_AUTO_EVENTS
 
-        if in_gtm and any_active_tag and ga4_fires:
+        if in_codebase and in_gtm and any_active_tag and ga4_fires:
             status = "ok"
         elif in_codebase and not in_gtm and ga4_fires and is_auto:
             status = "ok_auto_collected"
