@@ -34,6 +34,8 @@ AdLoop exists because managing Google Ads alongside your code is a mess. These a
 
 - **"My landing page gets paid traffic but nobody converts."** AdLoop joins your ad final URLs with GA4 page-level data. See which pages get clicks but no conversions, which have high bounce rates, and which ones are orphaned from any ad campaign.
 
+- **"Are conversions even being tagged on every page?"** AdLoop reads your live Google Tag Manager container, joins it against the events in your codebase and the events firing in GA4, and tells you exactly which conversions are being captured, which tags are paused, which page-scope filters are too narrow, and which codebase events have no tag at all — the kind of three-way audit GTM Preview can't give you in a single view.
+
 - **"I don't know if my EU consent setup is causing data gaps."** In Europe, 30-70% of users reject analytics cookies. AdLoop accounts for this automatically — it won't diagnose a normal GDPR consent gap as broken tracking.
 
 ## Built From Real Usage
@@ -42,7 +44,7 @@ Every tool exists because of an actual problem hit while running real Google Ads
 
 The best features come from real workflows. If you're using AdLoop and find yourself wishing it could do something it can't, **open an issue describing your situation** — not just "add feature X" but "I was trying to do Y and couldn't because Z." The context matters more than the request.
 
-## All 43 Tools
+## All 55 Tools
 
 > **Quick start:** `pip install adloop` or `git clone https://github.com/kLOsk/adloop.git && cd adloop && uv sync && uv run adloop init`
 
@@ -97,6 +99,27 @@ These tools call both APIs internally and return unified results with auto-gener
 |------|-------------|
 | `validate_tracking` | Compare event names found in your codebase against what GA4 actually records. Returns matched, missing, and unexpected events with diagnostics. |
 | `generate_tracking_code` | Generate ready-to-paste GA4 gtag JavaScript for any event, with recommended parameters for well-known events (sign_up, purchase, etc.) and optional trigger wrappers. |
+
+### Google Tag Manager Tools
+
+These tools read the live GTM container and join it with the codebase + GA4 to find tracking gaps that pure GA4 inspection can't catch — page-scoped triggers, paused tags, dynamic event names, brittle CSS selectors, and codebase events with no tag wired up at all.
+
+| Tool | What It Does |
+|------|-------------|
+| `audit_event_coverage` | **The flagship.** Three-way join: codebase events ↔ GTM tags ↔ GA4 actual fires. For each event name in `expected_events`, returns one of 10 statuses (`ok`, `no_tag_no_fire`, `tag_paused`, `tag_active_but_not_firing`, `gtm_only_firing`, `ga4_only`, etc.) plus auto-generated insights for the gaps. |
+| `list_gtm_accounts` | Discover accessible GTM accounts |
+| `list_gtm_containers` | List containers under an account — returns numeric `container_id` (needed by other tools), public `GTM-XXXXXXX` ID, and usage context (web/iOS/Android/server) |
+| `list_gtm_tags` | Every tag in the live container with parsed event names and resolved firing/blocking trigger names |
+| `get_gtm_tag` | Full raw config for a single tag — every parameter, firing/blocking triggers with filter conditions, priority, pause status, sampling |
+| `list_gtm_triggers` | Every trigger with filter conditions parsed to readable text (e.g. `{{Page Path}} contains service-promotions`, `{{Form ID}} NOT contains wf-form-...`). Renders the `negate` flag explicitly. |
+| `get_gtm_trigger` | Full trigger config + reverse lookup of every tag that uses it. Includes parsed `element_visibility` block (selector, on-screen ratio, firing frequency) for elementVisibility triggers and `group_member_trigger_ids` for triggerGroup types |
+| `list_gtm_variables` | Custom variables (data layer, constants, JS) plus enabled built-in variables |
+| `list_gtm_workspaces` | List drafts (workspaces) under a container — workspace IDs are needed by `get_gtm_workspace_diff` |
+| `get_gtm_workspace_diff` | Drafted-but-not-published changes — common cause of "I edited a tag but nothing happened". Returns `is_clean: true` when nothing is pending. |
+| `list_gtm_versions` | Publish history with version IDs and entity counts. Use to correlate a metric drop with a recent publish. |
+| `get_gtm_version` | Full metadata + tag/trigger names for a single historical container version |
+
+> **Setup for GTM tools** — Enable the **Tag Manager API v2** in your GCP project, then add your AdLoop credentials' email (the OAuth user, or the service account email if using a service account) as a **Read** user on the GTM container under Admin → User Management. AdLoop will pick up access on the next call — no token refresh needed for service accounts.
 
 ### Planning Tools
 
@@ -323,6 +346,7 @@ Ask your AI assistant things like:
 - *"Draft a new responsive search ad for my main campaign."*
 - *"Which landing pages get paid traffic but don't convert?"*
 - *"Is my tracking set up correctly? Compare my codebase events against GA4."*
+- *"Audit my Google Tag Manager container — which conversions are being captured and where are the gaps?"*
 - *"What keywords should I target for [product]? Find ideas and estimate the budget."*
 - *"How much budget would I need for these keywords in Germany?"*
 - *"Create a new search campaign for [product feature] with a €20/day budget."*
@@ -349,11 +373,11 @@ All configuration lives in `~/.adloop/config.yaml`. See [`config.yaml.example`](
 ```
 src/adloop/
 ├── __init__.py        # Entry point — routes 'adloop init' to wizard, otherwise starts MCP server
-├── server.py          # FastMCP server — 43 tool registrations with safety annotations
+├── server.py          # FastMCP server — 55 tool registrations with safety annotations
 ├── config.py          # Config loader (~/.adloop/config.yaml)
-├── auth.py            # OAuth 2.0 flow (bundled + custom credentials, headless fallback) + service accounts
+├── auth.py            # OAuth 2.0 flow (bundled + custom credentials, headless fallback) + service accounts; GA4 / Ads / GTM scope handling
 ├── cli.py             # Interactive 'adloop init' setup wizard
-├── crossref.py        # Cross-reference tools (GA4 + Ads combined analysis)
+├── crossref.py        # Cross-reference tools (GA4 + Ads + GTM combined analysis)
 ├── tracking.py        # Tracking validation + code generation tools
 ├── ga4/
 │   ├── client.py      # GA4 Data + Admin API clients
@@ -366,6 +390,9 @@ src/adloop/
 │   ├── pmax.py        # Performance Max tools — campaign/asset group performance, asset labels, top combinations
 │   ├── write.py       # Draft campaign, RSA, keywords; pause, enable, remove, confirm
 │   └── forecast.py    # Budget estimation + keyword discovery via Keyword Planner API
+├── gtm/
+│   ├── client.py      # Google Tag Manager API v2 client
+│   └── read.py        # Live container fetching, tag/trigger/variable parsing, workspace diff, version history
 └── safety/
     ├── guards.py      # Budget caps, bid limits, blocked operations, Broad Match safety
     ├── preview.py     # Change plans and previews
@@ -390,6 +417,7 @@ What's been shipped and what's next:
 - ~~Bundled OAuth credentials~~ ✓ — no Google Cloud project required, auto-discovery of GA4/Ads accounts (currently capped at 100 users pending Google verification — use [Advanced Setup](#advanced-setup-custom-google-cloud-project) in the meantime)
 - ~~Headless server support~~ ✓ — manual URL copy-paste flow for servers without a browser
 - ~~Behavioral eval suites~~ ✓ — 28 prompt-and-expectation tests covering read, write, tracking, and planning workflows
+- ~~Google Tag Manager integration~~ ✓ — read tools for tags, triggers, variables, workspaces, and version history, plus the `audit_event_coverage` three-way join across codebase events, GTM tags, and GA4 actual fires
 - **Community launch** — HN, Indie Hackers, r/cursor, Twitter
 - **Video walkthrough**
 

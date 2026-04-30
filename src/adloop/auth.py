@@ -18,6 +18,7 @@ _ALL_SCOPES = [
     "https://www.googleapis.com/auth/analytics.readonly",
     "https://www.googleapis.com/auth/analytics.edit",
     "https://www.googleapis.com/auth/adwords",
+    "https://www.googleapis.com/auth/tagmanager.readonly",
 ]
 
 _GA4_SCOPES = [
@@ -27,6 +28,10 @@ _GA4_SCOPES = [
 
 _ADS_SCOPES = [
     "https://www.googleapis.com/auth/adwords",
+]
+
+_GTM_SCOPES = [
+    "https://www.googleapis.com/auth/tagmanager.readonly",
 ]
 
 
@@ -107,6 +112,32 @@ def get_ads_credentials(config: AdLoopConfig) -> Credentials:
     import google.auth
 
     credentials, _ = google.auth.default(scopes=_ADS_SCOPES)
+    return credentials
+
+
+def get_gtm_credentials(config: AdLoopConfig) -> Credentials:
+    """Return authenticated credentials for Google Tag Manager API."""
+    creds_path = _get_credentials_path(config)
+
+    if creds_path is not None:
+        import json
+
+        with open(creds_path) as f:
+            creds_info = json.load(f)
+
+        if creds_info.get("type") == "service_account":
+            from google.oauth2 import service_account
+
+            return service_account.Credentials.from_service_account_file(
+                str(creds_path),
+                scopes=_GTM_SCOPES,
+            )
+
+        return _oauth_flow(config, creds_path)
+
+    import google.auth
+
+    credentials, _ = google.auth.default(scopes=_GTM_SCOPES)
     return credentials
 
 

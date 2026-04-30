@@ -715,6 +715,256 @@ def attribution_check(
 
 @mcp.tool(annotations=_READONLY)
 @_safe
+def audit_event_coverage(
+    expected_events: list[str],
+    gtm_account_id: str,
+    gtm_container_id: str,
+    property_id: str = "",
+    date_range_start: str = "",
+    date_range_end: str = "",
+) -> dict:
+    """Three-way audit: codebase events ↔ GTM tags ↔ GA4 actual fires.
+
+    First, search the user's codebase for gtag('event', ...) and
+    dataLayer.push({event: ...}) calls and extract every distinct event name.
+    Pass that list as `expected_events`. The tool fetches the LIVE GTM
+    container, joins it against GA4 event counts for the date range, and
+    returns a per-event matrix with one of these statuses:
+      ok                          — tag active and event firing
+      ok_auto_collected           — GA4 Enhanced Measurement event, no tag needed
+      no_tag_no_fire              — codebase event, no GTM tag, never fires
+      tag_paused                  — GTM tag exists but is paused
+      tag_active_but_not_firing   — tag is active but no GA4 hits
+      gtm_only_firing             — GA4 event from a tag, not in codebase
+      gtm_only_not_firing         — tag exists, not in codebase, no fires
+      ga4_only                    — fires in GA4, no tag, no codebase ref
+      ga4_fires_no_tag            — codebase event firing without a GTM tag
+      auto_event_only             — Enhanced Measurement event with no codebase ref
+
+    Also surfaces dynamic-event tags ({{Event}} variables) and Custom HTML
+    tags that the audit cannot interpret automatically.
+
+    GTM IDs come from Tag Manager UI → Admin → Container Settings.
+    Date format: "YYYY-MM-DD". Empty = last 30 days.
+    """
+    from adloop.crossref import audit_event_coverage as _impl
+
+    return _impl(
+        _config,
+        expected_events=expected_events,
+        gtm_account_id=gtm_account_id,
+        gtm_container_id=gtm_container_id,
+        property_id=property_id or _config.ga4.property_id,
+        date_range_start=date_range_start,
+        date_range_end=date_range_end,
+    )
+
+
+@mcp.tool(annotations=_READONLY)
+@_safe
+def list_gtm_accounts() -> dict:
+    """List all GTM accounts the AdLoop service account / OAuth user can read.
+
+    Use this for first-time discovery before calling audit_event_coverage —
+    you need the account_id from here. If this returns an empty list, the
+    service account hasn't been added to any GTM container with at least
+    Read permission.
+    """
+    from adloop.gtm.read import list_accounts as _impl
+
+    return _impl(_config)
+
+
+@mcp.tool(annotations=_READONLY)
+@_safe
+def list_gtm_containers(gtm_account_id: str) -> dict:
+    """List all containers under a GTM account.
+
+    Returns container_id (the numeric ID needed by audit_event_coverage),
+    public_id (the GTM-XXXXXXX string shown in the UI), name, and usage
+    context (web / iOS / Android / amp / server).
+    """
+    from adloop.gtm.read import list_containers as _impl
+
+    return _impl(_config, account_id=gtm_account_id)
+
+
+@mcp.tool(annotations=_READONLY)
+@_safe
+def list_gtm_tags(gtm_account_id: str, gtm_container_id: str) -> dict:
+    """List every tag in the LIVE GTM container.
+
+    Each tag includes type, status, parsed parameters, the GA4 event name
+    (for GA4 event tags), and resolved firing/blocking trigger names.
+    Use after audit_event_coverage to inspect specific tags.
+    """
+    from adloop.gtm.read import list_tags as _impl
+
+    return _impl(
+        _config, account_id=gtm_account_id, container_id=gtm_container_id
+    )
+
+
+@mcp.tool(annotations=_READONLY)
+@_safe
+def get_gtm_tag(
+    gtm_account_id: str, gtm_container_id: str, tag_id: str
+) -> dict:
+    """Get the full RAW configuration for a single GTM tag.
+
+    Includes every parameter, firing/blocking triggers (with their filter
+    conditions resolved to text), priority, pause status, sampling, and
+    monitoring metadata. Use to inspect a tag flagged by audit_event_coverage.
+    """
+    from adloop.gtm.read import get_tag as _impl
+
+    return _impl(
+        _config,
+        account_id=gtm_account_id,
+        container_id=gtm_container_id,
+        tag_id=tag_id,
+    )
+
+
+@mcp.tool(annotations=_READONLY)
+@_safe
+def list_gtm_triggers(gtm_account_id: str, gtm_container_id: str) -> dict:
+    """List every trigger in the LIVE GTM container.
+
+    Each trigger has its filter conditions parsed to readable text
+    (e.g. "{{Page Path}} matches RegExp ^/service-promotions/"). Use to
+    diagnose why a tag fires or doesn't fire on specific pages.
+    """
+    from adloop.gtm.read import list_triggers as _impl
+
+    return _impl(
+        _config, account_id=gtm_account_id, container_id=gtm_container_id
+    )
+
+
+@mcp.tool(annotations=_READONLY)
+@_safe
+def get_gtm_trigger(
+    gtm_account_id: str, gtm_container_id: str, trigger_id: str
+) -> dict:
+    """Get the full RAW configuration for a single GTM trigger.
+
+    Includes filters, auto-event filters, custom-event filters, validation
+    settings, and a list of every tag that uses this trigger. Use to
+    diagnose why a tag with a specific trigger ID does or doesn't fire.
+    """
+    from adloop.gtm.read import get_trigger as _impl
+
+    return _impl(
+        _config,
+        account_id=gtm_account_id,
+        container_id=gtm_container_id,
+        trigger_id=trigger_id,
+    )
+
+
+@mcp.tool(annotations=_READONLY)
+@_safe
+def list_gtm_variables(gtm_account_id: str, gtm_container_id: str) -> dict:
+    """List GTM variables — both custom and enabled built-in.
+
+    Custom variables come from the live container. Built-in variables
+    (Page URL, Click Element, Form ID, etc.) come from the workspace's
+    enabled-built-ins list. Variables matter because triggers reference
+    them — if a trigger uses {{Form ID}} but Form ID isn't enabled, the
+    trigger never matches.
+    """
+    from adloop.gtm.read import list_variables as _impl
+
+    return _impl(
+        _config, account_id=gtm_account_id, container_id=gtm_container_id
+    )
+
+
+@mcp.tool(annotations=_READONLY)
+@_safe
+def list_gtm_workspaces(gtm_account_id: str, gtm_container_id: str) -> dict:
+    """List workspaces (drafts) under a GTM container.
+
+    Workspace IDs are needed for `get_gtm_workspace_diff`. Most containers
+    have a single Default Workspace; multiple workspaces appear when the
+    team uses parallel drafts.
+    """
+    from adloop.gtm.read import list_workspaces as _impl
+
+    return _impl(
+        _config, account_id=gtm_account_id, container_id=gtm_container_id
+    )
+
+
+@mcp.tool(annotations=_READONLY)
+@_safe
+def get_gtm_workspace_diff(
+    gtm_account_id: str, gtm_container_id: str, workspace_id: str
+) -> dict:
+    """Show drafted-but-not-published changes in a GTM workspace.
+
+    Returns the list of entities (tags, triggers, variables) added,
+    modified, or deleted relative to the live published version, plus
+    any merge conflicts. Common cause of "I edited a tag but nothing
+    happened" — the workspace was never published. is_clean=true means
+    no pending changes and no conflicts.
+    """
+    from adloop.gtm.read import get_workspace_diff as _impl
+
+    return _impl(
+        _config,
+        account_id=gtm_account_id,
+        container_id=gtm_container_id,
+        workspace_id=workspace_id,
+    )
+
+
+@mcp.tool(annotations=_READONLY)
+@_safe
+def list_gtm_versions(
+    gtm_account_id: str, gtm_container_id: str, page_size: int = 50
+) -> dict:
+    """List published GTM version history (newest first).
+
+    Version headers include version_id, name, and entity counts. Use to
+    correlate a metric drop with a recent publish: fetch versions, find
+    one with timestamps near the drop date, then call get_gtm_version
+    for full content + author info.
+    """
+    from adloop.gtm.read import list_versions as _impl
+
+    return _impl(
+        _config,
+        account_id=gtm_account_id,
+        container_id=gtm_container_id,
+        page_size=page_size,
+    )
+
+
+@mcp.tool(annotations=_READONLY)
+@_safe
+def get_gtm_version(
+    gtm_account_id: str, gtm_container_id: str, container_version_id: str
+) -> dict:
+    """Get full metadata + entity counts for a single GTM container version.
+
+    Returns name, description, fingerprint, and lists of tag/trigger/
+    variable names at that point in time. Use after list_gtm_versions
+    when correlating a metric drop with a specific publish.
+    """
+    from adloop.gtm.read import get_version as _impl
+
+    return _impl(
+        _config,
+        account_id=gtm_account_id,
+        container_id=gtm_container_id,
+        container_version_id=container_version_id,
+    )
+
+
+@mcp.tool(annotations=_READONLY)
+@_safe
 def run_gaql(
     query: str,
     customer_id: str = "",
