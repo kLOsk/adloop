@@ -160,7 +160,12 @@ def _generate_config_yaml(
     if project_id:
         lines.append(f'  project_id: "{project_id}"')
     if credentials_path:
-        lines.append(f'  credentials_path: "{credentials_path}"')
+        # YAML treats `\` inside double-quoted strings as escape sequences (e.g.
+        # `\U` begins a Unicode escape, breaking Windows paths like `c:\Users\...`).
+        # Single-quoted strings are literal — backslashes are safe. Embedded
+        # single quotes (rare in paths) are escaped per YAML spec by doubling them.
+        escaped = credentials_path.replace("'", "''")
+        lines.append(f"  credentials_path: '{escaped}'")
     else:
         lines.append("  # Using built-in credentials (no credentials_path needed)")
     lines.append('  token_path: "~/.adloop/token.json"')
