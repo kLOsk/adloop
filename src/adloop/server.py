@@ -1052,6 +1052,68 @@ def add_to_negative_keyword_list(
 
 @mcp.tool(annotations=_WRITE)
 @_safe
+def attach_shared_set_to_campaigns(
+    shared_set_id: str,
+    campaign_ids: list[str],
+    customer_id: str = "",
+) -> dict:
+    """Attach an existing shared set to one or more campaigns — returns a PREVIEW.
+
+    Creates CampaignSharedSet linkages so the campaigns inherit the shared
+    set's criteria (e.g. negative keywords). Most commonly used to attach a
+    shared negative keyword list to newly-built campaigns.
+
+    Use ``get_negative_keyword_lists`` to find the shared_set_id, and
+    ``get_negative_keyword_list_campaigns`` to inspect existing attachments.
+
+    shared_set_id: numeric ID from get_negative_keyword_lists.
+    campaign_ids: list of numeric campaign IDs to attach the set to.
+
+    Call confirm_and_apply with the returned plan_id to execute.
+    """
+    from adloop.ads.write import attach_shared_set_to_campaigns as _impl
+
+    return _impl(
+        _config,
+        customer_id=customer_id or _config.ads.customer_id,
+        shared_set_id=shared_set_id,
+        campaign_ids=campaign_ids,
+    )
+
+
+@mcp.tool(annotations=_WRITE)
+@_safe
+def detach_shared_set_from_campaigns(
+    shared_set_id: str,
+    campaign_ids: list[str],
+    customer_id: str = "",
+) -> dict:
+    """Detach a shared set from one or more campaigns — returns a PREVIEW.
+
+    Removes CampaignSharedSet linkages so the campaigns no longer inherit the
+    shared set's criteria. The shared set itself is unchanged; only the
+    per-campaign attachment is removed.
+
+    Use ``get_negative_keyword_list_campaigns`` to inspect existing attachments
+    before detaching.
+
+    shared_set_id: numeric ID from get_negative_keyword_lists.
+    campaign_ids: list of numeric campaign IDs to detach the set from.
+
+    Call confirm_and_apply with the returned plan_id to execute.
+    """
+    from adloop.ads.write import detach_shared_set_from_campaigns as _impl
+
+    return _impl(
+        _config,
+        customer_id=customer_id or _config.ads.customer_id,
+        shared_set_id=shared_set_id,
+        campaign_ids=campaign_ids,
+    )
+
+
+@mcp.tool(annotations=_WRITE)
+@_safe
 def update_ad_group(
     ad_group_id: str,
     customer_id: str = "",

@@ -1415,3 +1415,270 @@ class TestValidateRsaPinning:
             "https://example.com/",
         )
         assert any("exceeds 90 chars" in e for e in errs)
+
+
+# ---------------------------------------------------------------------------
+# attach_shared_set_to_campaigns / detach_shared_set_from_campaigns
+# ---------------------------------------------------------------------------
+
+
+class TestAttachSharedSetValidation:
+    def test_rejects_missing_shared_set_id(self, config):
+        result = write.attach_shared_set_to_campaigns(
+            config, customer_id="123-456-7890", campaign_ids=["1001"]
+        )
+        assert result["error"] == "Validation failed"
+        assert "shared_set_id is required" in result["details"]
+
+    def test_rejects_non_numeric_shared_set_id(self, config):
+        result = write.attach_shared_set_to_campaigns(
+            config,
+            customer_id="123-456-7890",
+            shared_set_id="abc",
+            campaign_ids=["1001"],
+        )
+        assert result["error"] == "Validation failed"
+        assert any("shared_set_id" in d and "numeric" in d for d in result["details"])
+
+    def test_rejects_empty_campaign_ids(self, config):
+        result = write.attach_shared_set_to_campaigns(
+            config,
+            customer_id="123-456-7890",
+            shared_set_id="9001",
+            campaign_ids=[],
+        )
+        assert result["error"] == "Validation failed"
+        assert "At least one campaign_id is required" in result["details"]
+
+    def test_rejects_non_numeric_campaign_id(self, config):
+        result = write.attach_shared_set_to_campaigns(
+            config,
+            customer_id="123-456-7890",
+            shared_set_id="9001",
+            campaign_ids=["1001", "abc"],
+        )
+        assert result["error"] == "Validation failed"
+        assert any("'abc'" in d and "numeric" in d for d in result["details"])
+
+    def test_dedups_campaign_ids(self, config):
+        result = write.attach_shared_set_to_campaigns(
+            config,
+            customer_id="123-456-7890",
+            shared_set_id="9001",
+            campaign_ids=["1001", "1002", "1001", " 1003 "],
+        )
+        assert result["operation"] == "attach_shared_set_to_campaigns"
+        assert result["changes"]["campaign_ids"] == ["1001", "1002", "1003"]
+
+    def test_returns_preview_with_plan_id(self, config):
+        result = write.attach_shared_set_to_campaigns(
+            config,
+            customer_id="123-456-7890",
+            shared_set_id="9001",
+            campaign_ids=["1001"],
+        )
+        assert "plan_id" in result
+        assert result["entity_type"] == "campaign_shared_set"
+        assert result["entity_id"] == "9001"
+        assert result["changes"]["shared_set_id"] == "9001"
+
+
+class TestDetachSharedSetValidation:
+    def test_rejects_missing_shared_set_id(self, config):
+        result = write.detach_shared_set_from_campaigns(
+            config, customer_id="123-456-7890", campaign_ids=["1001"]
+        )
+        assert result["error"] == "Validation failed"
+        assert "shared_set_id is required" in result["details"]
+
+    def test_returns_preview_with_plan_id(self, config):
+        result = write.detach_shared_set_from_campaigns(
+            config,
+            customer_id="123-456-7890",
+            shared_set_id="9001",
+            campaign_ids=["1001", "1002"],
+        )
+        assert "plan_id" in result
+        assert result["operation"] == "detach_shared_set_from_campaigns"
+        assert result["entity_type"] == "campaign_shared_set"
+        assert result["changes"]["campaign_ids"] == ["1001", "1002"]
+
+
+def test_apply_attach_shared_set_to_campaigns_creates_one_op_per_campaign():
+    captured: dict = {}
+
+    def _mutate(customer_id, operations, partial_failure=False):
+        captured["customer_id"] = customer_id
+        captured["operations"] = list(operations)
+        captured["partial_failure"] = partial_failure
+        return SimpleNamespace(
+            results=[
+                SimpleNamespace(
+                    resource_name=f"customers/{customer_id}/campaignSharedSets/{i}~9001"
+                )
+                for i, _ in enumerate(operations, start=1001)
+            ],
+            partial_failure_error=SimpleNamespace(code=0, message="", details=[]),
+        )
+
+    css_service = SimpleNamespace(mutate_campaign_shared_sets=_mutate)
+    campaign_service = _FakePathService("campaigns")
+    shared_set_service = SimpleNamespace(
+        shared_set_path=lambda cid, ssid: f"customers/{cid}/sharedSets/{ssid}"
+    )
+
+    client = _FakeClient(
+        {
+            "CampaignSharedSetService": css_service,
+            "CampaignService": campaign_service,
+            "SharedSetService": shared_set_service,
+        }
+    )
+
+    result = write._apply_attach_shared_set_to_campaigns(
+        client,
+        "1234567890",
+        {"shared_set_id": "9001", "campaign_ids": ["1001", "1002", "1003"]},
+    )
+
+    assert captured["customer_id"] == "1234567890"
+    assert captured["partial_failure"] is True
+    assert len(captured["operations"]) == 3
+    op0 = captured["operations"][0]
+    assert op0.create.campaign == "customers/1234567890/campaigns/1001"
+    assert op0.create.shared_set == "customers/1234567890/sharedSets/9001"
+    assert result["campaign_count"] == 3
+    assert len(result["resource_names"]) == 3
+    assert "partial_failure" not in result
+    assert "failed_campaigns" not in result
+
+
+def test_apply_attach_shared_set_to_campaigns_surfaces_partial_failure():
+    """When a subset of attach ops fail, succeeded ones return resource_names
+    and failed ones surface in failed_campaigns with their campaign_id."""
+
+    def _mutate(customer_id, operations, partial_failure=False):
+        # Op #1 (index 1, campaign_id "1002") fails — empty resource_name.
+        return SimpleNamespace(
+            results=[
+                SimpleNamespace(
+                    resource_name=f"customers/{customer_id}/campaignSharedSets/1001~9001"
+                ),
+                SimpleNamespace(resource_name=""),
+                SimpleNamespace(
+                    resource_name=f"customers/{customer_id}/campaignSharedSets/1003~9001"
+                ),
+            ],
+            partial_failure_error=SimpleNamespace(
+                code=3,
+                message="Some operations failed",
+                details=[],
+            ),
+        )
+
+    css_service = SimpleNamespace(mutate_campaign_shared_sets=_mutate)
+    campaign_service = _FakePathService("campaigns")
+    shared_set_service = SimpleNamespace(
+        shared_set_path=lambda cid, ssid: f"customers/{cid}/sharedSets/{ssid}"
+    )
+
+    client = _FakeClient(
+        {
+            "CampaignSharedSetService": css_service,
+            "CampaignService": campaign_service,
+            "SharedSetService": shared_set_service,
+        }
+    )
+
+    result = write._apply_attach_shared_set_to_campaigns(
+        client,
+        "1234567890",
+        {"shared_set_id": "9001", "campaign_ids": ["1001", "1002", "1003"]},
+    )
+
+    assert result["campaign_count"] == 2
+    assert result["resource_names"] == [
+        "customers/1234567890/campaignSharedSets/1001~9001",
+        "customers/1234567890/campaignSharedSets/1003~9001",
+    ]
+    assert result["partial_failure"] is True
+    assert result["partial_failure_message"] == "Some operations failed"
+    assert len(result["failed_campaigns"]) == 1
+    failed = result["failed_campaigns"][0]
+    assert failed["campaign_id"] == "1002"
+    assert failed["operation_index"] == 1
+    assert "error" in failed
+
+
+def test_apply_detach_shared_set_from_campaigns_uses_composite_resource_name():
+    captured: dict = {}
+
+    def _mutate(customer_id, operations, partial_failure=False):
+        captured["customer_id"] = customer_id
+        captured["operations"] = list(operations)
+        captured["partial_failure"] = partial_failure
+        return SimpleNamespace(
+            results=[
+                SimpleNamespace(resource_name=op.remove) for op in operations
+            ],
+            partial_failure_error=SimpleNamespace(code=0, message="", details=[]),
+        )
+
+    css_service = SimpleNamespace(mutate_campaign_shared_sets=_mutate)
+    client = _FakeClient({"CampaignSharedSetService": css_service})
+
+    result = write._apply_detach_shared_set_from_campaigns(
+        client,
+        "1234567890",
+        {"shared_set_id": "9001", "campaign_ids": ["1001", "1002"]},
+    )
+
+    assert captured["customer_id"] == "1234567890"
+    assert captured["partial_failure"] is True
+    ops = captured["operations"]
+    assert len(ops) == 2
+    assert ops[0].remove == "customers/1234567890/campaignSharedSets/1001~9001"
+    assert ops[1].remove == "customers/1234567890/campaignSharedSets/1002~9001"
+    assert result["shared_set_id"] == "9001"
+    assert result["campaign_count"] == 2
+    assert "partial_failure" not in result
+    assert "failed_campaigns" not in result
+
+
+def test_apply_detach_shared_set_from_campaigns_surfaces_partial_failure():
+    """When a detach op targets a non-existent linkage, that op fails but
+    the others succeed and the result surfaces both."""
+
+    def _mutate(customer_id, operations, partial_failure=False):
+        # Op #0 (campaign_id "1001") fails — empty resource_name.
+        return SimpleNamespace(
+            results=[
+                SimpleNamespace(resource_name=""),
+                SimpleNamespace(resource_name=operations[1].remove),
+            ],
+            partial_failure_error=SimpleNamespace(
+                code=3,
+                message="Some operations failed",
+                details=[],
+            ),
+        )
+
+    css_service = SimpleNamespace(mutate_campaign_shared_sets=_mutate)
+    client = _FakeClient({"CampaignSharedSetService": css_service})
+
+    result = write._apply_detach_shared_set_from_campaigns(
+        client,
+        "1234567890",
+        {"shared_set_id": "9001", "campaign_ids": ["1001", "1002"]},
+    )
+
+    assert result["campaign_count"] == 1
+    assert result["removed_resource_names"] == [
+        "customers/1234567890/campaignSharedSets/1002~9001",
+    ]
+    assert result["partial_failure"] is True
+    assert result["partial_failure_message"] == "Some operations failed"
+    assert len(result["failed_campaigns"]) == 1
+    failed = result["failed_campaigns"][0]
+    assert failed["campaign_id"] == "1001"
+    assert failed["operation_index"] == 0
