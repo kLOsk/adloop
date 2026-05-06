@@ -715,6 +715,260 @@ def attribution_check(
 
 @mcp.tool(annotations=_READONLY)
 @_safe
+def audit_event_coverage(
+    expected_events: list[str],
+    gtm_account_id: str,
+    gtm_container_id: str,
+    property_id: str = "",
+    date_range_start: str = "",
+    date_range_end: str = "",
+) -> dict:
+    """Three-way audit: codebase events ↔ GTM tags ↔ GA4 actual fires.
+
+    First, search the user's codebase for gtag('event', ...) and
+    dataLayer.push({event: ...}) calls and extract every distinct event name.
+    Pass that list as `expected_events`. The tool fetches the LIVE GTM
+    container, joins it against GA4 event counts for the date range, and
+    returns a per-event matrix with one of these statuses:
+      ok                          — tag active and event firing
+      ok_auto_collected           — GA4 Enhanced Measurement event, no tag needed
+      no_tag_no_fire              — codebase event, no GTM tag, never fires
+      tag_paused                  — GTM tag exists but is paused
+      tag_active_but_not_firing   — tag is active but no GA4 hits
+      gtm_only_firing             — GA4 event from a tag, not in codebase
+      gtm_only_not_firing         — tag exists, not in codebase, no fires
+      ga4_only                    — fires in GA4, no tag, no codebase ref
+      ga4_fires_no_tag            — codebase event firing without a GTM tag
+      auto_event_only             — Enhanced Measurement event with no codebase ref
+
+    Also surfaces dynamic-event tags ({{Event}} variables) and Custom HTML
+    tags that the audit cannot interpret automatically.
+
+    GTM IDs come from Tag Manager UI → Admin → Container Settings.
+    Date format: "YYYY-MM-DD". Empty = last 30 days.
+    """
+    from adloop.crossref import audit_event_coverage as _impl
+
+    return _impl(
+        _config,
+        expected_events=expected_events,
+        gtm_account_id=gtm_account_id,
+        gtm_container_id=gtm_container_id,
+        property_id=property_id or _config.ga4.property_id,
+        date_range_start=date_range_start,
+        date_range_end=date_range_end,
+    )
+
+
+@mcp.tool(annotations=_READONLY)
+@_safe
+def list_gtm_accounts() -> dict:
+    """List all GTM accounts the AdLoop service account / OAuth user can read.
+
+    Use this for first-time discovery before calling audit_event_coverage —
+    you need the account_id from here. If this returns an empty list, the
+    service account hasn't been added to any GTM container with at least
+    Read permission.
+    """
+    from adloop.gtm.read import list_accounts as _impl
+
+    return _impl(_config)
+
+
+@mcp.tool(annotations=_READONLY)
+@_safe
+def list_gtm_containers(gtm_account_id: str) -> dict:
+    """List all containers under a GTM account.
+
+    Returns container_id (the numeric ID needed by audit_event_coverage),
+    public_id (the GTM-XXXXXXX string shown in the UI), name, and usage
+    context (web / iOS / Android / amp / server).
+    """
+    from adloop.gtm.read import list_containers as _impl
+
+    return _impl(_config, account_id=gtm_account_id)
+
+
+@mcp.tool(annotations=_READONLY)
+@_safe
+def list_gtm_tags(gtm_account_id: str, gtm_container_id: str) -> dict:
+    """List every tag in the LIVE GTM container.
+
+    Each tag includes type, status, parsed parameters, the GA4 event name
+    (for GA4 event tags), and resolved firing/blocking trigger names.
+    Use after audit_event_coverage to inspect specific tags.
+    """
+    from adloop.gtm.read import list_tags as _impl
+
+    return _impl(
+        _config, account_id=gtm_account_id, container_id=gtm_container_id
+    )
+
+
+@mcp.tool(annotations=_READONLY)
+@_safe
+def get_gtm_tag(
+    gtm_account_id: str, gtm_container_id: str, tag_id: str
+) -> dict:
+    """Get the full RAW configuration for a single GTM tag.
+
+    Includes every parameter, firing/blocking triggers (with their filter
+    conditions resolved to text), priority, pause status, sampling, and
+    monitoring metadata. Use to inspect a tag flagged by audit_event_coverage.
+    """
+    from adloop.gtm.read import get_tag as _impl
+
+    return _impl(
+        _config,
+        account_id=gtm_account_id,
+        container_id=gtm_container_id,
+        tag_id=tag_id,
+    )
+
+
+@mcp.tool(annotations=_READONLY)
+@_safe
+def list_gtm_triggers(gtm_account_id: str, gtm_container_id: str) -> dict:
+    """List every trigger in the LIVE GTM container.
+
+    Each trigger has its filter conditions parsed to readable text
+    (e.g. "{{Page Path}} matches RegExp ^/service-promotions/"). Use to
+    diagnose why a tag fires or doesn't fire on specific pages.
+    """
+    from adloop.gtm.read import list_triggers as _impl
+
+    return _impl(
+        _config, account_id=gtm_account_id, container_id=gtm_container_id
+    )
+
+
+@mcp.tool(annotations=_READONLY)
+@_safe
+def get_gtm_trigger(
+    gtm_account_id: str, gtm_container_id: str, trigger_id: str
+) -> dict:
+    """Get the full RAW configuration for a single GTM trigger.
+
+    Includes filters, auto-event filters, custom-event filters, validation
+    settings, and a list of every tag that uses this trigger. Use to
+    diagnose why a tag with a specific trigger ID does or doesn't fire.
+    """
+    from adloop.gtm.read import get_trigger as _impl
+
+    return _impl(
+        _config,
+        account_id=gtm_account_id,
+        container_id=gtm_container_id,
+        trigger_id=trigger_id,
+    )
+
+
+@mcp.tool(annotations=_READONLY)
+@_safe
+def list_gtm_variables(gtm_account_id: str, gtm_container_id: str) -> dict:
+    """List GTM variables — both custom and enabled built-in.
+
+    Custom variables come from the live container. Built-in variables
+    (Page URL, Click Element, Form ID, etc.) come from the workspace's
+    enabled-built-ins list. Variables matter because triggers reference
+    them — if a trigger uses {{Form ID}} but Form ID isn't enabled, the
+    trigger never matches.
+    """
+    from adloop.gtm.read import list_variables as _impl
+
+    return _impl(
+        _config, account_id=gtm_account_id, container_id=gtm_container_id
+    )
+
+
+@mcp.tool(annotations=_READONLY)
+@_safe
+def list_gtm_workspaces(gtm_account_id: str, gtm_container_id: str) -> dict:
+    """List workspaces (drafts) under a GTM container.
+
+    Workspace IDs are needed for `get_gtm_workspace_diff`. Most containers
+    have a single Default Workspace; multiple workspaces appear when the
+    team uses parallel drafts.
+    """
+    from adloop.gtm.read import list_workspaces as _impl
+
+    return _impl(
+        _config, account_id=gtm_account_id, container_id=gtm_container_id
+    )
+
+
+@mcp.tool(annotations=_READONLY)
+@_safe
+def get_gtm_workspace_diff(
+    gtm_account_id: str, gtm_container_id: str, workspace_id: str
+) -> dict:
+    """Show drafted-but-not-published changes in a GTM workspace.
+
+    Returns the list of entities (tags, triggers, variables) added,
+    modified, or deleted relative to the live published version, plus
+    any merge conflicts. Common cause of "I edited a tag but nothing
+    happened" — the workspace was never published. is_clean=true means
+    no pending changes and no conflicts.
+    """
+    from adloop.gtm.read import get_workspace_diff as _impl
+
+    return _impl(
+        _config,
+        account_id=gtm_account_id,
+        container_id=gtm_container_id,
+        workspace_id=workspace_id,
+    )
+
+
+@mcp.tool(annotations=_READONLY)
+@_safe
+def list_gtm_versions(
+    gtm_account_id: str, gtm_container_id: str, page_size: int = 50
+) -> dict:
+    """List published GTM version history (newest first).
+
+    Version headers include version_id, name, and entity counts. Use to
+    correlate a metric drop with a recent publish: fetch versions, find
+    one with timestamps near the drop date, then call get_gtm_version
+    for full content + author info.
+    """
+    from adloop.gtm.read import list_versions as _impl
+
+    return _impl(
+        _config,
+        account_id=gtm_account_id,
+        container_id=gtm_container_id,
+        page_size=page_size,
+    )
+
+
+@mcp.tool(annotations=_READONLY)
+@_safe
+def get_gtm_version(
+    gtm_account_id: str, gtm_container_id: str, container_version_id: str
+) -> dict:
+    """Get full metadata + entity counts for a single GTM container version.
+
+    Returns name, description, fingerprint, and lists of tag/trigger/
+    variable names at that point in time. Use after list_gtm_versions
+    when correlating a metric drop with a specific publish.
+    """
+    from adloop.gtm.read import get_version as _impl
+
+    return _impl(
+        _config,
+        account_id=gtm_account_id,
+        container_id=gtm_container_id,
+        container_version_id=container_version_id,
+    )
+
+
+# ---------------------------------------------------------------------------
+# GTM Write Tools
+# ---------------------------------------------------------------------------
+
+@mcp.tool(annotations=_READONLY)
+@_safe
 def run_gaql(
     query: str,
     customer_id: str = "",
@@ -734,6 +988,613 @@ def run_gaql(
         customer_id=customer_id or _config.ads.customer_id,
         query=query,
         format=format,
+    )
+
+
+# ---------------------------------------------------------------------------
+# ServiceTitan Read Tools
+# ---------------------------------------------------------------------------
+
+
+@mcp.tool(annotations=_READONLY)
+@_safe
+def health_check_servicetitan() -> dict:
+    """Verify ServiceTitan auth + tenant access.
+
+    Tests OAuth client_credentials flow against auth.servicetitan.io and a
+    tenant-scoped read against the configured tenant_id. Returns auth_ok,
+    tenant_ok, and a count of business units the app can see.
+
+    Run this first if any ServiceTitan tool is failing.
+    """
+    from adloop.servicetitan.read import health_check as _impl
+
+    return _impl(_config)
+
+
+@mcp.tool(annotations=_READONLY)
+@_safe
+def list_st_business_units() -> dict:
+    """List business units in the ServiceTitan tenant.
+
+    Most ST endpoints accept a businessUnitId filter — use this to discover
+    the IDs you'll need (e.g. separate residential vs commercial BUs).
+    """
+    from adloop.servicetitan.read import list_business_units as _impl
+
+    return _impl(_config)
+
+
+@mcp.tool(annotations=_READONLY)
+@_safe
+def list_st_campaigns(active_only: bool = False) -> dict:
+    """List ServiceTitan marketing campaigns (channel-level).
+
+    These are the channels ST uses to attribute leads/jobs (e.g. "Google PPC",
+    "Direct Mail", "Yelp"). Campaign IDs returned here are the values to pass
+    to get_st_calls / get_st_leads / get_st_jobs as `campaign_id`.
+
+    Set active_only=True to filter to currently-active campaigns.
+    """
+    from adloop.servicetitan.read import list_campaigns as _impl
+
+    return _impl(_config, active_only=active_only)
+
+
+@mcp.tool(annotations=_READONLY)
+@_safe
+def list_st_campaign_categories() -> dict:
+    """List ServiceTitan marketing campaign categories (parent groupings)."""
+    from adloop.servicetitan.read import list_campaign_categories as _impl
+
+    return _impl(_config)
+
+
+@mcp.tool(annotations=_READONLY)
+@_safe
+def get_st_calls(
+    date_range_start: str = "",
+    date_range_end: str = "",
+    campaign_id: int | None = None,
+    business_unit_id: int | None = None,
+    direction: str = "",
+    has_recording: bool | None = None,
+    max_results: int = 500,
+) -> dict:
+    """Pull ServiceTitan calls — duration, customer, campaign, recording flag.
+
+    date_range_start / date_range_end accept ISO-8601 (e.g. "2026-04-01T00:00:00Z").
+    Defaults to last 30 days when omitted.
+
+    Filters: campaign_id (from list_st_campaigns), business_unit_id, direction
+    ("Inbound" or "Outbound"), has_recording (True/False/None).
+
+    Returns calls with `recording_id` populated when audio is available — feed
+    that ID to get_st_call_recording_url to fetch the audio for transcription.
+    """
+    from adloop.servicetitan.read import get_calls as _impl
+
+    return _impl(
+        _config,
+        date_range_start=date_range_start or None,
+        date_range_end=date_range_end or None,
+        campaign_id=campaign_id,
+        business_unit_id=business_unit_id,
+        direction=direction or None,
+        has_recording=has_recording,
+        max_results=max_results,
+    )
+
+
+@mcp.tool(annotations=_READONLY)
+@_safe
+def get_st_call_recording_url(call_id: int) -> dict:
+    """Get a downloadable URL for a ServiceTitan call recording.
+
+    Returns the recording payload (URL or signed redirect) for the given call.
+    Pass call_id from get_st_calls (where has_recording=true).
+
+    Note: requires the Call Recording API add-on on your ST tenant.
+    """
+    from adloop.servicetitan.read import get_call_recording_url as _impl
+
+    return _impl(_config, call_id=call_id)
+
+
+@mcp.tool(annotations=_READONLY)
+@_safe
+def get_st_leads(
+    date_range_start: str = "",
+    date_range_end: str = "",
+    status: str = "",
+    campaign_id: int | None = None,
+    max_results: int = 500,
+) -> dict:
+    """Pull ServiceTitan leads — status, campaign, and GCLID extraction from notes.
+
+    Each lead is scanned for GCLID-shaped strings in the `summary` field
+    (since ST has no native GCLID field, web form integrations sometimes
+    push it into Notes). The response includes `leads_with_gclid_in_notes`
+    and per-lead `gclids_in_notes` arrays.
+
+    Defaults to last 30 days. Filter by status or campaign_id as needed.
+    """
+    from adloop.servicetitan.read import get_leads as _impl
+
+    return _impl(
+        _config,
+        date_range_start=date_range_start or None,
+        date_range_end=date_range_end or None,
+        status=status or None,
+        campaign_id=campaign_id,
+        max_results=max_results,
+    )
+
+
+@mcp.tool(annotations=_READONLY)
+@_safe
+def get_st_jobs(
+    date_range_start: str = "",
+    date_range_end: str = "",
+    job_status: str = "",
+    campaign_id: int | None = None,
+    business_unit_id: int | None = None,
+    max_results: int = 500,
+) -> dict:
+    """Pull ServiceTitan jobs — status, campaign, BU, originating lead, total revenue.
+
+    Defaults to last 30 days. Use `total` to compute average job value for
+    static conversion-value calibration in Google Ads.
+    """
+    from adloop.servicetitan.read import get_jobs as _impl
+
+    return _impl(
+        _config,
+        date_range_start=date_range_start or None,
+        date_range_end=date_range_end or None,
+        job_status=job_status or None,
+        campaign_id=campaign_id,
+        business_unit_id=business_unit_id,
+        max_results=max_results,
+    )
+
+
+@mcp.tool(annotations=_READONLY)
+@_safe
+def find_gclid_in_st(
+    date_range_start: str = "",
+    date_range_end: str = "",
+    max_results: int = 500,
+) -> dict:
+    """Scan recent ServiceTitan leads + jobs for GCLID-shaped strings in notes.
+
+    ServiceTitan has no native GCLID field. This tool checks if your form
+    integration pushes the GCLID into Notes/Summary so it can be uploaded
+    to Google Ads as an offline conversion.
+
+    Returns counts and per-entity matches plus an actionable insight if
+    nothing was found (i.e. the form integration needs to be updated).
+    """
+    from adloop.servicetitan.read import find_gclid_in_st as _impl
+
+    return _impl(
+        _config,
+        date_range_start=date_range_start or None,
+        date_range_end=date_range_end or None,
+        max_results=max_results,
+    )
+
+
+# ---------------------------------------------------------------------------
+# ServiceTitan Analytics — value calibration + funnel + cross-system
+# ---------------------------------------------------------------------------
+
+
+@mcp.tool(annotations=_READONLY)
+@_safe
+def st_compute_avg_job_value_by_campaign(
+    date_range_start: str = "",
+    date_range_end: str = "",
+    business_unit_id: int | None = None,
+    min_jobs: int = 5,
+) -> dict:
+    """Average job revenue per ST campaign over a window (default last 90d).
+
+    Returns per-campaign avg + overall avg. Use the per-campaign averages to
+    set differentiated Google Ads conversion values — PPC may have a different
+    avg ticket than Direct Mail or Yelp. Combine with st_compute_close_rate
+    to compute: conversion_value = avg_job_value × close_rate.
+
+    Insights flag campaigns whose avg deviates ≥40% from overall — those
+    deserve their own conversion value rather than the global default.
+    """
+    from adloop.servicetitan.analytics import compute_avg_job_value_by_campaign as _impl
+
+    return _impl(
+        _config,
+        date_range_start=date_range_start or None,
+        date_range_end=date_range_end or None,
+        business_unit_id=business_unit_id,
+        min_jobs=min_jobs,
+    )
+
+
+@mcp.tool(annotations=_READONLY)
+@_safe
+def st_compute_close_rate_by_campaign(
+    date_range_start: str = "",
+    date_range_end: str = "",
+    min_leads: int = 10,
+) -> dict:
+    """Lead → paying-job close rate per ST campaign (default last 90d).
+
+    Highlights best/worst close-rate campaigns. Low close rate at high lead
+    volume usually indicates a dispatch/sales process problem rather than a
+    Google Ads keyword problem — investigate before scaling spend.
+    """
+    from adloop.servicetitan.analytics import compute_close_rate_by_campaign as _impl
+
+    return _impl(
+        _config,
+        date_range_start=date_range_start or None,
+        date_range_end=date_range_end or None,
+        min_leads=min_leads,
+    )
+
+
+@mcp.tool(annotations=_READONLY)
+@_safe
+def st_compute_lead_to_revenue_funnel(
+    date_range_start: str = "",
+    date_range_end: str = "",
+    campaign_id: int | None = None,
+) -> dict:
+    """Funnel: leads → bookings → jobs → completed → paying, per campaign.
+
+    Reveals at which stage leads die. If a Google Ads campaign produces leads
+    that never book, the campaign is fine — the dispatch process is broken.
+    """
+    from adloop.servicetitan.analytics import compute_lead_to_revenue_funnel as _impl
+
+    return _impl(
+        _config,
+        date_range_start=date_range_start or None,
+        date_range_end=date_range_end or None,
+        campaign_id=campaign_id,
+    )
+
+
+@mcp.tool(annotations=_READONLY)
+@_safe
+def st_correlate_ads_to_revenue(
+    date_range_start: str = "",
+    date_range_end: str = "",
+    name_overrides: dict | None = None,
+) -> dict:
+    """Join Google Ads campaigns to ServiceTitan revenue by name match.
+
+    Computes true_cpa (ads_cost / st_jobs_paid) and true_roas (st_revenue /
+    ads_cost) — the actual numbers that should drive bidding decisions. Pass
+    `name_overrides={ads_name: st_name}` for campaigns whose names don't
+    fuzzy-match.
+    """
+    from adloop.servicetitan.analytics import correlate_ads_to_st_revenue as _impl
+
+    return _impl(
+        _config,
+        date_range_start=date_range_start or None,
+        date_range_end=date_range_end or None,
+        name_overrides=name_overrides,
+    )
+
+
+# ---------------------------------------------------------------------------
+# ServiceTitan Exports — Google Ads-ready CSVs
+# ---------------------------------------------------------------------------
+
+
+@mcp.tool(annotations=_READONLY)
+@_safe
+def st_export_offline_conversions(
+    conversion_action_name: str,
+    date_range_start: str = "",
+    date_range_end: str = "",
+    use_avg_value: float | None = None,
+    currency: str = "USD",
+) -> dict:
+    """GCLID-based offline conversion CSV for upload to Google Ads.
+
+    Scans completed jobs whose originating lead has a GCLID in its notes.
+    Writes a Google Ads-ready CSV under ~/.adloop/exports/. Returns the
+    rows-written count and absolute path.
+
+    `conversion_action_name` MUST exactly match an existing conversion
+    action in Google Ads. Pass `use_avg_value` to override per-job revenue
+    with a static value (e.g. for early-stage value calibration).
+    """
+    from adloop.servicetitan.exports import export_offline_conversions_for_ads_upload as _impl
+
+    return _impl(
+        _config,
+        conversion_action_name=conversion_action_name,
+        date_range_start=date_range_start or None,
+        date_range_end=date_range_end or None,
+        use_avg_value=use_avg_value,
+        currency=currency,
+    )
+
+
+@mcp.tool(annotations=_READONLY)
+@_safe
+def st_export_phone_conversions(
+    conversion_action_name: str,
+    date_range_start: str = "",
+    date_range_end: str = "",
+    use_avg_value: float | None = None,
+    currency: str = "USD",
+    business_unit_id: int | None = None,
+) -> dict:
+    """Phone-based call-conversion CSV for upload to Google Ads.
+
+    Works WITHOUT GCLID — this is the right tool for accounts that don't
+    yet capture GCLID through the web form. Matches inbound calls (lead-call)
+    to Google Ads call extensions via Caller ID + Call Start Time.
+
+    `conversion_action_name` MUST exactly match a call-conversion action
+    in Google Ads.
+    """
+    from adloop.servicetitan.exports import export_phone_conversions_for_ads_upload as _impl
+
+    return _impl(
+        _config,
+        conversion_action_name=conversion_action_name,
+        date_range_start=date_range_start or None,
+        date_range_end=date_range_end or None,
+        use_avg_value=use_avg_value,
+        currency=currency,
+        business_unit_id=business_unit_id,
+    )
+
+
+@mcp.tool(annotations=_READONLY)
+@_safe
+def st_export_enhanced_conversions_for_leads(
+    conversion_action_name: str,
+    date_range_start: str = "",
+    date_range_end: str = "",
+    use_avg_value: float | None = None,
+    currency: str = "USD",
+) -> dict:
+    """Enhanced Conversions for Leads — hashed PII upload CSV.
+
+    Recovers attribution for users who blocked GCLID (consent rejection,
+    iOS, etc) by matching SHA-256 hashed email/phone/name to logged-in
+    Google users. Pairs with the EC for Leads tag (awud) you set up in GTM.
+    """
+    from adloop.servicetitan.exports import export_enhanced_conversions_for_leads as _impl
+
+    return _impl(
+        _config,
+        conversion_action_name=conversion_action_name,
+        date_range_start=date_range_start or None,
+        date_range_end=date_range_end or None,
+        use_avg_value=use_avg_value,
+        currency=currency,
+    )
+
+
+# ---------------------------------------------------------------------------
+# ServiceTitan Transcription + Classification
+# ---------------------------------------------------------------------------
+
+
+@mcp.tool(annotations=_READONLY)
+@_safe
+def st_transcribe_call(call_id: int, force_refresh: bool = False) -> dict:
+    """Transcribe a ServiceTitan call recording with speaker diarization.
+
+    Uses Google Cloud Speech-to-Text (reuses the GA4/Ads service account).
+    Cached at ~/.adloop/st_transcripts/{call_id}.json — pass force_refresh=True
+    to re-transcribe.
+
+    Requires Speech-to-Text API enabled on the GCP project and the service
+    account to have `roles/speech.editor` (or "Cloud Speech-to-Text User").
+    """
+    from adloop.servicetitan.transcribe import transcribe_st_call as _impl
+
+    return _impl(_config, call_id=call_id, force_refresh=force_refresh)
+
+
+@mcp.tool(annotations=_READONLY)
+@_safe
+def st_classify_call_outcome(call_id: int) -> dict:
+    """Classify a call as booked/quoted/no_show/wrong_number/sales_call/spam/info_only.
+
+    Auto-transcribes if needed. Rule-based — predictable + free. Returns the
+    matched rule + a snippet for verification.
+    """
+    from adloop.servicetitan.classify import classify_call_outcome as _impl
+
+    return _impl(_config, call_id=call_id)
+
+
+@mcp.tool(annotations=_READONLY)
+@_safe
+def st_extract_call_intent(call_id: int) -> dict:
+    """Extract service intents from a call (drain, water heater, leak, emergency...).
+
+    Multiple intents per call are possible. Use to map call patterns to ad
+    groups: if 70% of "Plumbing PPC" calls ask for water heaters but you bid
+    on drain cleaning, the budget allocation is wrong.
+    """
+    from adloop.servicetitan.classify import extract_call_intent as _impl
+
+    return _impl(_config, call_id=call_id)
+
+
+@mcp.tool(annotations=_READONLY)
+@_safe
+def st_extract_negative_keywords_from_calls(
+    date_range_start: str = "",
+    date_range_end: str = "",
+    campaign_id: int | None = None,
+    min_calls_for_review: int = 5,
+    max_calls: int = 100,
+    only_with_recording: bool = True,
+) -> dict:
+    """Mine call transcripts for negative-keyword candidates.
+
+    Walks recent calls, transcribes each (cached), and aggregates "do you
+    also do X" / "I'm looking for X" phrases. Returns ranked candidates with
+    occurrence counts and example snippets.
+
+    NOTE: transcribing 100 calls can take several minutes and cost ~$1 in
+    Google STT charges. Lower max_calls for a faster sample.
+    """
+    from adloop.servicetitan.classify import extract_negative_keywords_from_calls as _impl
+
+    return _impl(
+        _config,
+        date_range_start=date_range_start or None,
+        date_range_end=date_range_end or None,
+        campaign_id=campaign_id,
+        min_calls_for_review=min_calls_for_review,
+        max_calls=max_calls,
+        only_with_recording=only_with_recording,
+    )
+
+
+# ---------------------------------------------------------------------------
+# ServiceTitan Customer Match exports
+# ---------------------------------------------------------------------------
+
+
+@mcp.tool(annotations=_READONLY)
+@_safe
+def st_export_customer_match_list(max_results: int = 5000) -> dict:
+    """Full ST customer base as a hashed Google Ads Customer Match CSV.
+
+    Output written to ~/.adloop/exports/. Email/Phone/First/Last hashed
+    SHA-256 lowercase per Google spec. Upload in Google Ads → Audience
+    manager → Your data segments.
+    """
+    from adloop.servicetitan.audiences import export_customer_match_list as _impl
+
+    return _impl(_config, max_results=max_results)
+
+
+@mcp.tool(annotations=_READONLY)
+@_safe
+def st_export_lapsed_customer_audience(
+    months_inactive: int = 12, max_results: int = 5000
+) -> dict:
+    """Customers with no completed job in the last N months — reactivation audience.
+
+    Use for low-CPM Display reactivation campaigns. Repeat-customer revenue
+    is much cheaper than net-new acquisition.
+    """
+    from adloop.servicetitan.audiences import export_lapsed_customer_audience as _impl
+
+    return _impl(_config, months_inactive=months_inactive, max_results=max_results)
+
+
+@mcp.tool(annotations=_READONLY)
+@_safe
+def st_export_high_value_seed_audience(
+    top_pct: float = 0.05, lookback_months: int = 24, max_results: int = 5000
+) -> dict:
+    """Top X% of customers by lifetime revenue — Customer Match + PMax seed.
+
+    Exports a hashed Customer Match CSV. Use as the seed for Similar-Audience
+    targeting and as a PMax audience signal (PMax signals are hints — these
+    are your strongest hints).
+    """
+    from adloop.servicetitan.audiences import export_high_value_seed_audience as _impl
+
+    return _impl(
+        _config,
+        top_pct=top_pct,
+        lookback_months=lookback_months,
+        max_results=max_results,
+    )
+
+
+# ---------------------------------------------------------------------------
+# ServiceTitan Demand + Attribution Decay
+# ---------------------------------------------------------------------------
+
+
+@mcp.tool(annotations=_READONLY)
+@_safe
+def st_geo_demand_analysis(
+    date_range_start: str = "",
+    date_range_end: str = "",
+    business_unit_id: int | None = None,
+    group_by: str = "zip",
+    min_jobs: int = 5,
+) -> dict:
+    """Job revenue + count grouped by ZIP / city / state (default last 365d).
+
+    Drives geo bid adjustments. Areas with above-average ticket size deserve
+    positive bid adjustments; areas below average deserve negative or
+    exclusion. Insights flag both ends with concrete adjustment recommendations.
+    """
+    from adloop.servicetitan.demand import geo_demand_analysis as _impl
+
+    return _impl(
+        _config,
+        date_range_start=date_range_start or None,
+        date_range_end=date_range_end or None,
+        business_unit_id=business_unit_id,
+        group_by=group_by,
+        min_jobs=min_jobs,
+    )
+
+
+@mcp.tool(annotations=_READONLY)
+@_safe
+def st_seasonal_demand_curve(
+    date_range_start: str = "",
+    date_range_end: str = "",
+    business_unit_id: int | None = None,
+    group_by: str = "week",
+) -> dict:
+    """Jobs by week-of-year (or month) — drives ad scheduling + budget pacing.
+
+    Identifies peak and trough periods. Ramp Google Ads budget the period
+    BEFORE peak demand, not when leads are already pouring in.
+    """
+    from adloop.servicetitan.demand import seasonal_demand_curve as _impl
+
+    return _impl(
+        _config,
+        date_range_start=date_range_start or None,
+        date_range_end=date_range_end or None,
+        business_unit_id=business_unit_id,
+        group_by=group_by,
+    )
+
+
+@mcp.tool(annotations=_READONLY)
+@_safe
+def st_attribution_decay_report(
+    date_range_start: str = "",
+    date_range_end: str = "",
+    campaign_id: int | None = None,
+) -> dict:
+    """P50/P90/P95 days from job creation to completion + histogram.
+
+    Use to set the conversion window in Google Ads. If P90 is 45 days, the
+    default 30-day window will MISS 10%+ of true conversions and break Smart
+    Bidding's optimization signal.
+    """
+    from adloop.servicetitan.demand import attribution_decay_report as _impl
+
+    return _impl(
+        _config,
+        date_range_start=date_range_start or None,
+        date_range_end=date_range_end or None,
+        campaign_id=campaign_id,
     )
 
 
@@ -760,6 +1621,8 @@ def draft_campaign(
     display_network_enabled: bool | None = None,
     display_expansion_enabled: bool | None = None,
     max_cpc: float = 0,
+    geo_exclude_ids: list[str] | None = None,
+    ad_schedule: list[dict] | None = None,
 ) -> dict:
     """Draft a full campaign structure — returns a PREVIEW, does NOT create anything.
 
@@ -781,9 +1644,15 @@ def draft_campaign(
     geo_target_ids: REQUIRED list of geo target constant IDs
         Common: "2276" Germany, "2040" Austria, "2756" Switzerland, "2840" USA,
         "2826" UK, "2250" France. Full list: Google Ads API geo target constants.
+    geo_exclude_ids: optional list of geo target constant IDs to EXCLUDE
+        (negative location criteria). Useful when targeting a broad
+        region while suppressing specific sub-geos.
     language_ids: REQUIRED list of language constant IDs
         Common: "1001" German, "1000" English, "1002" French, "1004" Spanish,
         "1014" Portuguese. Full list: Google Ads API language constants.
+    ad_schedule: optional list of {day_of_week, start_hour, end_hour,
+        start_minute, end_minute} entries restricting when the campaign
+        serves. day_of_week: MONDAY..SUNDAY. minutes: 0/15/30/45.
 
     Call confirm_and_apply with the returned plan_id to execute.
     """
@@ -801,11 +1670,13 @@ def draft_campaign(
         ad_group_name=ad_group_name,
         keywords=keywords,
         geo_target_ids=geo_target_ids,
+        geo_exclude_ids=geo_exclude_ids,
         language_ids=language_ids,
         search_partners_enabled=search_partners_enabled,
         display_network_enabled=display_network_enabled,
         display_expansion_enabled=display_expansion_enabled,
         max_cpc=max_cpc,
+        ad_schedule=ad_schedule,
     )
 
 
@@ -852,15 +1723,21 @@ def update_campaign(
     target_roas: float = 0,
     daily_budget: float = 0,
     geo_target_ids: list[str] | None = None,
+    geo_exclude_ids: list[str] | None = None,
     language_ids: list[str] | None = None,
     search_partners_enabled: bool | None = None,
     display_network_enabled: bool | None = None,
     display_expansion_enabled: bool | None = None,
     max_cpc: float = 0,
+    ad_schedule: list[dict] | None = None,
 ) -> dict:
     """Draft an update to an existing campaign — returns a PREVIEW, does NOT apply.
 
-    Only include the parameters you want to change. Omit the rest.
+    Only include the parameters you want to change. Omit the rest. List-typed
+    fields (geo_target_ids, geo_exclude_ids, language_ids, ad_schedule) follow
+    REPLACE semantics: when provided, all existing entries of that type are
+    removed and the new list is added. Pass an empty list (e.g.
+    ``geo_exclude_ids=[]``) to clear that field.
 
     campaign_id: the numeric ID of the campaign to update (required)
     bidding_strategy: MAXIMIZE_CONVERSIONS | TARGET_CPA | TARGET_ROAS |
@@ -868,15 +1745,15 @@ def update_campaign(
     target_cpa: required if bidding_strategy is TARGET_CPA (in account currency)
     target_roas: required if bidding_strategy is TARGET_ROAS
     daily_budget: new daily budget in account currency
-    geo_target_ids: REPLACES all geo targets. Common IDs: "2276" Germany,
-        "2040" Austria, "2756" Switzerland, "2840" USA, "2826" UK
-    language_ids: REPLACES all language targets. Common IDs: "1001" German,
-        "1000" English, "1002" French, "1004" Spanish
+    geo_target_ids: REPLACES all geo targets.
+    geo_exclude_ids: REPLACES all negative-location geo criteria.
+    language_ids: REPLACES all language targets.
     search_partners_enabled: include ads on Search partners
     display_network_enabled: enable Search campaign display expansion
     display_expansion_enabled: alias for display_network_enabled
-    max_cpc: Maximize Clicks CPC cap when bidding_strategy is TARGET_SPEND, or
-        when the existing campaign already uses TARGET_SPEND
+    max_cpc: Maximize Clicks CPC cap when bidding_strategy is TARGET_SPEND
+    ad_schedule: REPLACES all schedule criteria. Each entry: {day_of_week,
+        start_hour, end_hour, start_minute, end_minute}.
 
     Call confirm_and_apply with the returned plan_id to execute.
     """
@@ -891,11 +1768,13 @@ def update_campaign(
         target_roas=target_roas,
         daily_budget=daily_budget,
         geo_target_ids=geo_target_ids,
+        geo_exclude_ids=geo_exclude_ids,
         language_ids=language_ids,
         search_partners_enabled=search_partners_enabled,
         display_network_enabled=display_network_enabled,
         display_expansion_enabled=display_expansion_enabled,
         max_cpc=max_cpc,
+        ad_schedule=ad_schedule,
     )
 
 
@@ -939,6 +1818,48 @@ def draft_responsive_search_ad(
         final_url=final_url,
         path1=path1,
         path2=path2,
+    )
+
+
+@mcp.tool(annotations=_WRITE)
+@_safe
+def update_responsive_search_ad(
+    ad_id: str,
+    customer_id: str = "",
+    final_url: str = "",
+    path1: str = "",
+    path2: str = "",
+    clear_path1: bool = False,
+    clear_path2: bool = False,
+) -> dict:
+    """Update mutable fields on an existing RSA — returns a PREVIEW.
+
+    In-place edit of an RSA without creating a new ad (preserves serving
+    history and avoids the learning-period reset that pause-old + create-new
+    triggers). Google Ads API v23 lets you mutate ``final_urls``, ``path1``,
+    and ``path2`` on existing RSAs; ``headlines`` and ``descriptions`` remain
+    immutable — for those you still need draft_responsive_search_ad +
+    pause_entity on the old ad.
+
+    Argument semantics:
+        - ``final_url``: empty -> no change; non-empty -> replaces final URL
+        - ``path1`` / ``path2``: empty -> no change; non-empty -> sets value
+        - ``clear_path1`` / ``clear_path2``: True -> set to empty string
+
+    At least one mutation must be requested. Call confirm_and_apply with the
+    returned plan_id to execute.
+    """
+    from adloop.ads.write import update_responsive_search_ad as _impl
+
+    return _impl(
+        _config,
+        customer_id=customer_id or _config.ads.customer_id,
+        ad_id=ad_id,
+        final_url=final_url,
+        path1=path1,
+        path2=path2,
+        clear_path1=clear_path1,
+        clear_path2=clear_path2,
     )
 
 
@@ -1073,11 +1994,16 @@ def update_ad_group(
 @mcp.tool(annotations=_WRITE)
 @_safe
 def draft_callouts(
-    campaign_id: str,
     callouts: list[str],
+    campaign_id: str = "",
     customer_id: str = "",
 ) -> dict:
-    """Draft campaign callout assets — returns a PREVIEW."""
+    """Draft callout assets — returns a PREVIEW.
+
+    If ``campaign_id`` is empty, callouts attach at the customer/account
+    level (CustomerAsset) and apply to all eligible campaigns. Pass a
+    campaign_id to scope them to one campaign instead.
+    """
     from adloop.ads.write import draft_callouts as _impl
 
     return _impl(
@@ -1091,11 +2017,15 @@ def draft_callouts(
 @mcp.tool(annotations=_WRITE)
 @_safe
 def draft_structured_snippets(
-    campaign_id: str,
     snippets: list[dict],
+    campaign_id: str = "",
     customer_id: str = "",
 ) -> dict:
-    """Draft campaign structured snippet assets — returns a PREVIEW."""
+    """Draft structured snippet assets — returns a PREVIEW.
+
+    If ``campaign_id`` is empty, snippets attach at the customer/account
+    level. Pass a campaign_id to scope to one campaign.
+    """
     from adloop.ads.write import draft_structured_snippets as _impl
 
     return _impl(
@@ -1109,11 +2039,34 @@ def draft_structured_snippets(
 @mcp.tool(annotations=_WRITE)
 @_safe
 def draft_image_assets(
-    campaign_id: str,
     image_paths: list[str],
+    campaign_id: str = "",
     customer_id: str = "",
+    field_types: list[str] | None = None,
 ) -> dict:
-    """Draft campaign image assets from local PNG, JPEG, or GIF files."""
+    """Draft image assets from local PNG, JPEG, or GIF files — returns a PREVIEW.
+
+    Scope:
+        - If ``campaign_id`` is empty (default), images attach at the
+          customer/account level (CustomerAsset).
+        - If ``campaign_id`` is provided, images attach at that campaign
+          (CampaignAsset).
+
+    Field type:
+        Each image's AssetFieldType is auto-detected from its aspect
+        ratio (with a 'logo' filename hint):
+          1:1 → SQUARE_MARKETING_IMAGE (or BUSINESS_LOGO if 'logo' in name)
+          1.91:1 → MARKETING_IMAGE
+          4:1 → LANDSCAPE_LOGO (logo hint required)
+          4:5 → PORTRAIT_MARKETING_IMAGE
+        Pass ``field_types`` (one entry per image, same order as
+        image_paths) to override. Valid override values:
+        MARKETING_IMAGE, SQUARE_MARKETING_IMAGE,
+        PORTRAIT_MARKETING_IMAGE, TALL_PORTRAIT_MARKETING_IMAGE,
+        LOGO, LANDSCAPE_LOGO, BUSINESS_LOGO.
+
+    Call confirm_and_apply with the returned plan_id to execute.
+    """
     from adloop.ads.write import draft_image_assets as _impl
 
     return _impl(
@@ -1121,6 +2074,39 @@ def draft_image_assets(
         customer_id=customer_id or _config.ads.customer_id,
         campaign_id=campaign_id,
         image_paths=image_paths,
+        field_types=field_types,
+    )
+
+
+@mcp.tool(annotations=_WRITE)
+@_safe
+def draft_business_name_asset(
+    business_name: str,
+    campaign_id: str = "",
+    customer_id: str = "",
+) -> dict:
+    """Draft a BUSINESS_NAME text asset — returns a PREVIEW.
+
+    Creates a TEXT asset with the business name and links it as
+    ``BUSINESS_NAME`` so Google can show the brand name alongside ads.
+
+    Scope:
+        - If ``campaign_id`` is empty (default), the asset attaches at the
+          customer/account level (CustomerAsset) and applies to all
+          eligible campaigns.
+        - If ``campaign_id`` is provided, it scopes to that one campaign.
+
+    business_name: max 25 characters per Google Ads policy.
+
+    Call confirm_and_apply with the returned plan_id to execute.
+    """
+    from adloop.ads.write import draft_business_name_asset as _impl
+
+    return _impl(
+        _config,
+        customer_id=customer_id or _config.ads.customer_id,
+        campaign_id=campaign_id,
+        business_name=business_name,
     )
 
 
@@ -1219,23 +2205,28 @@ def remove_entity(
 @mcp.tool(annotations=_WRITE)
 @_safe
 def draft_sitelinks(
-    campaign_id: str,
     sitelinks: list[dict],
+    campaign_id: str = "",
     customer_id: str = "",
 ) -> dict:
-    """Draft sitelink extensions for a campaign — returns a PREVIEW.
+    """Draft sitelink extensions — returns a PREVIEW.
 
     Sitelinks appear as additional links below your ad, increasing click area
     and directing users to specific pages.
 
-    campaign_id: the campaign to attach sitelinks to
+    Scope:
+        - If ``campaign_id`` is empty, sitelinks attach at the customer/account
+          level (CustomerAsset) and apply to all eligible campaigns.
+        - If ``campaign_id`` is provided, sitelinks attach at the campaign level
+          (CampaignAsset).
+
     sitelinks: list of dicts, each with:
         - link_text (str, required, max 25 chars) — the clickable text shown
         - final_url (str, required) — destination URL for this sitelink
         - description1 (str, optional, max 35 chars) — first description line
         - description2 (str, optional, max 35 chars) — second description line
 
-    Google recommends at least 4 sitelinks per campaign. Fewer than 2 may not show.
+    Google recommends at least 4 sitelinks. Fewer than 2 may not show.
 
     Call confirm_and_apply with the returned plan_id to execute.
     """
@@ -1246,6 +2237,583 @@ def draft_sitelinks(
         customer_id=customer_id or _config.ads.customer_id,
         campaign_id=campaign_id,
         sitelinks=sitelinks,
+    )
+
+
+@mcp.tool(annotations=_WRITE)
+@_safe
+def draft_call_asset(
+    phone_number: str,
+    country_code: str = "US",
+    campaign_id: str = "",
+    customer_id: str = "",
+    call_conversion_action_id: str = "",
+    ad_schedule: list[dict] | None = None,
+) -> dict:
+    """Draft a call asset (phone extension) — returns a PREVIEW.
+
+    Scope:
+        - If ``campaign_id`` is empty, the call asset is added at the
+          customer/account level via CustomerAsset.
+        - If ``campaign_id`` is provided, the call asset is scoped to that
+          single campaign via CampaignAsset.
+
+    phone_number: human-formatted or E.164 (e.g. "(916) 339-3676" or
+        "+19163393676"). Auto-normalized to E.164 using country_code when
+        no leading '+' is present.
+    country_code: ISO-3166 alpha-2 (default "US"). Used only for E.164
+        normalization when phone_number lacks a leading '+'.
+    call_conversion_action_id: optional Google Ads conversion action ID to
+        use for call-conversion counting (e.g. count calls ≥60 sec).
+    ad_schedule: optional list limiting hours when the call asset shows.
+        Each entry: {day_of_week: MONDAY..SUNDAY, start_hour: 0-23,
+        end_hour: 0-24, start_minute: 0/15/30/45, end_minute: 0/15/30/45}.
+
+    NOTE: Google Ads requires manual phone-number verification before the
+    call asset can serve. The asset is created via API but won't show in
+    ads until verification is completed in Tools → Assets → Calls.
+
+    Call confirm_and_apply with the returned plan_id to execute.
+    """
+    from adloop.ads.write import draft_call_asset as _impl
+
+    return _impl(
+        _config,
+        customer_id=customer_id or _config.ads.customer_id,
+        phone_number=phone_number,
+        country_code=country_code,
+        campaign_id=campaign_id,
+        call_conversion_action_id=call_conversion_action_id,
+        ad_schedule=ad_schedule,
+    )
+
+
+@mcp.tool(annotations=_WRITE)
+@_safe
+def draft_location_asset(
+    business_profile_account_id: str,
+    asset_set_name: str = "",
+    campaign_id: str = "",
+    customer_id: str = "",
+    label_filters: list[str] | None = None,
+    listing_id_filters: list[str] | None = None,
+) -> dict:
+    """Draft a Google Business Profile-backed location AssetSet — PREVIEW.
+
+    Creates a LOCATION_SYNC AssetSet that pulls business locations from a
+    linked Google Business Profile (GBP) and exposes them as location assets
+    in ads (used by location extensions and the local map pin).
+
+    business_profile_account_id: numeric GBP/LBC account ID. Find it in
+        the Google Business Profile admin URL or settings.
+    asset_set_name: optional human-readable name. Defaults to
+        "GBP Locations - <id>".
+    campaign_id: empty (default) for customer/account-level scope; pass a
+        campaign ID to limit the location assets to one campaign.
+    label_filters: optional list of GBP location labels to limit sync.
+    listing_id_filters: optional list of GBP listing IDs to limit sync.
+
+    REQUIRED PRECONDITION: the Google Business Profile must already be
+    linked at Tools → Linked accounts → Business Profile in Google Ads.
+    If it isn't, this tool will fail at apply time with a clear error.
+
+    Call confirm_and_apply with the returned plan_id to execute.
+    """
+    from adloop.ads.write import draft_location_asset as _impl
+
+    return _impl(
+        _config,
+        customer_id=customer_id or _config.ads.customer_id,
+        business_profile_account_id=business_profile_account_id,
+        asset_set_name=asset_set_name,
+        campaign_id=campaign_id,
+        label_filters=label_filters,
+        listing_id_filters=listing_id_filters,
+    )
+
+
+@mcp.tool(annotations=_WRITE)
+@_safe
+def draft_promotion(
+    promotion_target: str,
+    final_url: str,
+    money_off: float = 0,
+    percent_off: float = 0,
+    currency_code: str = "USD",
+    promotion_code: str = "",
+    orders_over_amount: float = 0,
+    occasion: str = "",
+    discount_modifier: str = "",
+    language_code: str = "en",
+    start_date: str = "",
+    end_date: str = "",
+    redemption_start_date: str = "",
+    redemption_end_date: str = "",
+    campaign_id: str = "",
+    customer_id: str = "",
+    ad_schedule: list[dict] | None = None,
+) -> dict:
+    """Draft a promotion extension asset — returns a PREVIEW.
+
+    Creates a PromotionAsset and links it at campaign or customer scope.
+    Exactly one of money_off / percent_off must be provided.
+
+    Scope:
+        - campaign_id provided  → CampaignAsset link.
+        - campaign_id empty     → CustomerAsset link (account-level, applies
+          to every eligible campaign automatically).
+
+    Required:
+        promotion_target: what the promotion is for, e.g. "Window Tint"
+            (max 20 chars; this is the label Google shows in the ad).
+        final_url: landing page (must return 2xx/3xx — validated).
+        money_off OR percent_off: the discount amount.
+
+    Optional:
+        currency_code: ISO 4217 (default USD).
+        promotion_code: optional coupon code (max 15 chars).
+        orders_over_amount: minimum order amount that unlocks the promo.
+        occasion: optional event tag — BLACK_FRIDAY, CYBER_MONDAY,
+            CHRISTMAS, NEW_YEARS, MOTHERS_DAY, FATHERS_DAY, BACK_TO_SCHOOL,
+            HALLOWEEN, SUMMER_SALE, WINTER_SALE, etc. Leave blank for
+            always-on.
+        discount_modifier: "UP_TO" surfaces "Up to $X off" instead of
+            "$X off". Leave blank for plain.
+        language_code: BCP-47 (default "en").
+        start_date / end_date: YYYY-MM-DD.
+        redemption_start_date / redemption_end_date: YYYY-MM-DD.
+        ad_schedule: optional list — see add_ad_schedule for shape.
+
+    Call confirm_and_apply with the returned plan_id to execute.
+    """
+    from adloop.ads.write import draft_promotion as _impl
+
+    return _impl(
+        _config,
+        customer_id=customer_id or _config.ads.customer_id,
+        promotion_target=promotion_target,
+        final_url=final_url,
+        money_off=money_off,
+        percent_off=percent_off,
+        currency_code=currency_code,
+        promotion_code=promotion_code,
+        orders_over_amount=orders_over_amount,
+        occasion=occasion,
+        discount_modifier=discount_modifier,
+        language_code=language_code,
+        start_date=start_date,
+        end_date=end_date,
+        redemption_start_date=redemption_start_date,
+        redemption_end_date=redemption_end_date,
+        campaign_id=campaign_id,
+        ad_schedule=ad_schedule,
+    )
+
+
+@mcp.tool(annotations=_WRITE)
+@_safe
+def update_promotion(
+    asset_id: str,
+    promotion_target: str,
+    final_url: str,
+    money_off: float = 0,
+    percent_off: float = 0,
+    currency_code: str = "USD",
+    promotion_code: str = "",
+    orders_over_amount: float = 0,
+    occasion: str = "",
+    discount_modifier: str = "",
+    language_code: str = "en",
+    start_date: str = "",
+    end_date: str = "",
+    redemption_start_date: str = "",
+    redemption_end_date: str = "",
+    campaign_id: str = "",
+    customer_id: str = "",
+    ad_schedule: list[dict] | None = None,
+) -> dict:
+    """Update a promotion via swap — returns a PREVIEW.
+
+    PromotionAsset fields are immutable once created, so "update" is a SWAP:
+        1. Create a new PromotionAsset with the new values.
+        2. Link it at the same scope.
+        3. Unlink the old asset.
+
+    The old Asset row stays in the account (orphaned) — Google Ads API
+    does not support hard-deleting Asset rows.
+
+    asset_id: numeric ID of the existing PromotionAsset (find via
+        SELECT asset.id, asset.promotion_asset.promotion_target FROM asset
+        WHERE asset.type = 'PROMOTION').
+    campaign_id: pass to scope BOTH the new and old links to that
+        campaign. Empty for customer/account-level scope.
+
+    All other parameters: see draft_promotion.
+
+    Call confirm_and_apply with the returned plan_id to execute.
+    """
+    from adloop.ads.write import update_promotion as _impl
+
+    return _impl(
+        _config,
+        customer_id=customer_id or _config.ads.customer_id,
+        asset_id=asset_id,
+        campaign_id=campaign_id,
+        promotion_target=promotion_target,
+        final_url=final_url,
+        money_off=money_off,
+        percent_off=percent_off,
+        currency_code=currency_code,
+        promotion_code=promotion_code,
+        orders_over_amount=orders_over_amount,
+        occasion=occasion,
+        discount_modifier=discount_modifier,
+        language_code=language_code,
+        start_date=start_date,
+        end_date=end_date,
+        redemption_start_date=redemption_start_date,
+        redemption_end_date=redemption_end_date,
+        ad_schedule=ad_schedule,
+    )
+
+
+@mcp.tool(annotations=_WRITE)
+@_safe
+def link_asset_to_customer(
+    links: list[dict],
+    customer_id: str = "",
+) -> dict:
+    """Link EXISTING assets to the customer (account) — returns a PREVIEW.
+
+    Use this to "promote" assets that already exist in the account
+    (typically attached to legacy campaigns) so they apply at the account
+    level and inherit to every eligible campaign automatically.
+
+    Unlike draft_image_assets / draft_callouts / etc., this does NOT
+    create new Asset rows — it only adds CustomerAsset link rows
+    pointing to assets you already have.
+
+    Find candidate asset_ids via run_gaql:
+        SELECT asset.id, asset.type, asset.name FROM asset
+
+    links: list of dicts, each with:
+        - asset_id (str, required) — numeric asset ID
+        - field_type (str, required) — AssetFieldType enum value, e.g.
+          BUSINESS_LOGO, AD_IMAGE, MARKETING_IMAGE, SQUARE_MARKETING_IMAGE,
+          BUSINESS_NAME, SITELINK, CALLOUT, CALL, PROMOTION
+
+    Call confirm_and_apply with the returned plan_id to execute.
+    """
+    from adloop.ads.write import link_asset_to_customer as _impl
+
+    return _impl(
+        _config,
+        customer_id=customer_id or _config.ads.customer_id,
+        links=links,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Conversion Actions (create / update / remove)
+# ---------------------------------------------------------------------------
+
+
+@mcp.tool(annotations=_WRITE)
+@_safe
+def draft_create_conversion_action(
+    name: str,
+    type_: str,
+    category: str = "DEFAULT",
+    default_value: float = 0,
+    currency_code: str = "USD",
+    always_use_default_value: bool = False,
+    counting_type: str = "ONE_PER_CLICK",
+    phone_call_duration_seconds: int = 0,
+    primary_for_goal: bool = True,
+    include_in_conversions_metric: bool = True,
+    click_through_window_days: int = 0,
+    view_through_window_days: int = 0,
+    attribution_model: str = "",
+    customer_id: str = "",
+) -> dict:
+    """Draft a new ConversionAction — returns a PREVIEW.
+
+    type_ values: AD_CALL, WEBSITE_CALL, WEBPAGE, WEBPAGE_CODELESS,
+        GOOGLE_ANALYTICS_4_CUSTOM, GOOGLE_ANALYTICS_4_PURCHASE,
+        UPLOAD_CALLS, UPLOAD_CLICKS, FLOODLIGHT_ACTION, STORE_VISITS,
+        STORE_SALES_DIRECT_UPLOAD.
+
+    category: DEFAULT, PHONE_CALL_LEAD, SUBMIT_LEAD_FORM, PURCHASE,
+        SIGNUP, LEAD, CONTACT, GET_DIRECTIONS, ENGAGEMENT, etc.
+
+    For WEBSITE_CALL with GFN, set:
+        type_="WEBSITE_CALL", category="PHONE_CALL_LEAD",
+        phone_call_duration_seconds=90, default_value=250
+
+    For AD_CALL (calls from Call assets in ads), set:
+        type_="AD_CALL", category="PHONE_CALL_LEAD",
+        default_value=250, counting_type="ONE_PER_CLICK"
+        (the duration threshold for AD_CALL lives on the Call ASSET,
+         not on the conversion action — see update_call_asset)
+
+    Call confirm_and_apply with the returned plan_id to execute.
+    """
+    from adloop.ads.conversion_actions import draft_create_conversion_action as _impl
+
+    return _impl(
+        _config,
+        customer_id=customer_id or _config.ads.customer_id,
+        name=name,
+        type_=type_,
+        category=category,
+        default_value=default_value,
+        currency_code=currency_code,
+        always_use_default_value=always_use_default_value,
+        counting_type=counting_type,
+        phone_call_duration_seconds=phone_call_duration_seconds,
+        primary_for_goal=primary_for_goal,
+        include_in_conversions_metric=include_in_conversions_metric,
+        click_through_window_days=click_through_window_days,
+        view_through_window_days=view_through_window_days,
+        attribution_model=attribution_model,
+    )
+
+
+@mcp.tool(annotations=_WRITE)
+@_safe
+def draft_update_conversion_action(
+    conversion_action_id: str,
+    name: str = "",
+    primary_for_goal: bool | None = None,
+    default_value: float = 0,
+    currency_code: str = "",
+    always_use_default_value: bool | None = None,
+    counting_type: str = "",
+    phone_call_duration_seconds: int = 0,
+    include_in_conversions_metric: bool | None = None,
+    click_through_window_days: int = 0,
+    view_through_window_days: int = 0,
+    attribution_model: str = "",
+    customer_id: str = "",
+) -> dict:
+    """Draft a partial UPDATE of an existing ConversionAction — PREVIEW.
+
+    Pass only the fields you want to change. Empty strings/0/None mean
+    "do not change this field".
+
+    Common workflows:
+      - Rename: name="Calls from Ads (>=90s)"
+      - Demote to Secondary: primary_for_goal=False
+      - Set value: default_value=250, currency_code="USD",
+        always_use_default_value=True
+      - Set call duration threshold: phone_call_duration_seconds=90
+      - Switch counting: counting_type="ONE_PER_CLICK"
+
+    Call confirm_and_apply with the returned plan_id to execute.
+    """
+    from adloop.ads.conversion_actions import draft_update_conversion_action as _impl
+
+    return _impl(
+        _config,
+        customer_id=customer_id or _config.ads.customer_id,
+        conversion_action_id=conversion_action_id,
+        name=name,
+        primary_for_goal=primary_for_goal,
+        default_value=default_value,
+        currency_code=currency_code,
+        always_use_default_value=always_use_default_value,
+        counting_type=counting_type,
+        phone_call_duration_seconds=phone_call_duration_seconds,
+        include_in_conversions_metric=include_in_conversions_metric,
+        click_through_window_days=click_through_window_days,
+        view_through_window_days=view_through_window_days,
+        attribution_model=attribution_model,
+    )
+
+
+@mcp.tool(annotations=_DESTRUCTIVE)
+@_safe
+def draft_remove_conversion_action(
+    conversion_action_id: str,
+    customer_id: str = "",
+) -> dict:
+    """Draft a REMOVAL of a ConversionAction — returns PREVIEW (irreversible).
+
+    Removed conversion actions stop counting. Historical data is preserved.
+
+    Note: SMART_CAMPAIGN_* and GOOGLE_HOSTED types reject removal with
+    MUTATE_NOT_ALLOWED — those are auto-managed by Google.
+
+    Call confirm_and_apply with the returned plan_id to execute.
+    """
+    from adloop.ads.conversion_actions import draft_remove_conversion_action as _impl
+
+    return _impl(
+        _config,
+        customer_id=customer_id or _config.ads.customer_id,
+        conversion_action_id=conversion_action_id,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Asset in-place updates (call asset, sitelink, callout)
+# ---------------------------------------------------------------------------
+
+
+@mcp.tool(annotations=_WRITE)
+@_safe
+def update_call_asset(
+    asset_id: str,
+    phone_number: str = "",
+    country_code: str = "",
+    call_conversion_action_id: str = "",
+    call_conversion_reporting_state: str = "",
+    ad_schedule: list[dict] | None = None,
+    customer_id: str = "",
+) -> dict:
+    """Update an existing CallAsset in place — returns a PREVIEW.
+
+    Common use case: re-point a Call asset at a specific conversion action
+    (e.g. 'Calls from Ads (>=90s)') with USE_RESOURCE_LEVEL.
+
+    Fields:
+        phone_number: human or E.164 (auto-normalized)
+        country_code: ISO-3166 alpha-2 (default US when normalizing)
+        call_conversion_action_id: numeric conversion action ID
+        call_conversion_reporting_state: DISABLED |
+            USE_ACCOUNT_LEVEL_CALL_CONVERSION_ACTION |
+            USE_RESOURCE_LEVEL_CALL_CONVERSION_ACTION
+        ad_schedule: optional schedule list (replaces existing)
+
+    Call confirm_and_apply with the returned plan_id to execute.
+    """
+    from adloop.ads.write import update_call_asset as _impl
+
+    return _impl(
+        _config,
+        customer_id=customer_id or _config.ads.customer_id,
+        asset_id=asset_id,
+        phone_number=phone_number,
+        country_code=country_code,
+        call_conversion_action_id=call_conversion_action_id,
+        call_conversion_reporting_state=call_conversion_reporting_state,
+        ad_schedule=ad_schedule,
+    )
+
+
+@mcp.tool(annotations=_WRITE)
+@_safe
+def update_sitelink(
+    asset_id: str,
+    link_text: str = "",
+    final_url: str = "",
+    description1: str = "",
+    description2: str = "",
+    customer_id: str = "",
+) -> dict:
+    """Update an existing SitelinkAsset in place — returns a PREVIEW.
+
+    Pass only the fields you want to change. Empty string = "do not change".
+    URL is validated for reachability when provided.
+    """
+    from adloop.ads.write import update_sitelink as _impl
+
+    return _impl(
+        _config,
+        customer_id=customer_id or _config.ads.customer_id,
+        asset_id=asset_id,
+        link_text=link_text,
+        final_url=final_url,
+        description1=description1,
+        description2=description2,
+    )
+
+
+@mcp.tool(annotations=_WRITE)
+@_safe
+def update_callout(
+    asset_id: str,
+    callout_text: str,
+    customer_id: str = "",
+) -> dict:
+    """Update an existing CalloutAsset's text in place — returns a PREVIEW.
+
+    callout_text: new callout text (max 25 chars).
+    """
+    from adloop.ads.write import update_callout as _impl
+
+    return _impl(
+        _config,
+        customer_id=customer_id or _config.ads.customer_id,
+        asset_id=asset_id,
+        callout_text=callout_text,
+    )
+
+
+@mcp.tool(annotations=_WRITE)
+@_safe
+def add_ad_schedule(
+    campaign_id: str,
+    schedule: list[dict],
+    customer_id: str = "",
+) -> dict:
+    """Draft ad schedule criteria for a campaign — returns a PREVIEW.
+
+    Adds AdScheduleInfo CampaignCriterion records so the campaign only
+    serves during the specified hours/days. Hours follow the account's
+    configured time zone.
+
+    schedule: list of dicts:
+        - day_of_week: MONDAY..SUNDAY
+        - start_hour: 0..23
+        - end_hour: 0..24 (must be > start)
+        - start_minute / end_minute: 0, 15, 30, or 45 (default 0)
+
+    Note: this tool is additive. Existing schedule criteria are not
+    removed; if you need a clean slate, use remove_entity on the existing
+    schedule criteria first.
+
+    Call confirm_and_apply with the returned plan_id to execute.
+    """
+    from adloop.ads.write import add_ad_schedule as _impl
+
+    return _impl(
+        _config,
+        customer_id=customer_id or _config.ads.customer_id,
+        campaign_id=campaign_id,
+        schedule=schedule,
+    )
+
+
+@mcp.tool(annotations=_WRITE)
+@_safe
+def add_geo_exclusions(
+    campaign_id: str,
+    geo_target_ids: list[str],
+    customer_id: str = "",
+) -> dict:
+    """Draft negative geo CampaignCriterion records — returns a PREVIEW.
+
+    Adds excluded locations so the campaign does not serve to users in
+    those geos. Use this when you have a broad include list but specific
+    sub-geos to suppress (e.g. include "California" but exclude "Los
+    Angeles").
+
+    geo_target_ids: list of geoTargetConstant IDs. Look them up via:
+        SELECT geo_target_constant.id, geo_target_constant.name
+        FROM geo_target_constant
+        WHERE geo_target_constant.country_code = 'US'
+          AND geo_target_constant.name = 'Los Angeles'
+
+    Call confirm_and_apply with the returned plan_id to execute.
+    """
+    from adloop.ads.write import add_geo_exclusions as _impl
+
+    return _impl(
+        _config,
+        customer_id=customer_id or _config.ads.customer_id,
+        campaign_id=campaign_id,
+        geo_target_ids=geo_target_ids,
     )
 
 

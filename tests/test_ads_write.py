@@ -27,6 +27,7 @@ class _FakeMutateOperationResponse:
         self.campaign_criterion_result = _FakeResult()
         self.asset_result = _FakeResult()
         self.campaign_asset_result = _FakeResult()
+        self.customer_asset_result = _FakeResult()
         self._response_type = response_type
         if response_type:
             getattr(self, response_type).resource_name = resource_name
@@ -506,6 +507,7 @@ def test_apply_campaign_asset_variants_create_asset_and_link_operations(tmp_path
         client,
         "1234567890",
         {
+            "scope": "campaign",
             "campaign_id": "1001",
             "images": [
                 {
@@ -523,13 +525,16 @@ def test_apply_campaign_asset_variants_create_asset_and_link_operations(tmp_path
     assert image_asset.name == "AdLoop image square deadbeefcafe"
     assert image_asset.type_ == client.enums.AssetTypeEnum.IMAGE
     assert image_asset.image_asset.mime_type == client.enums.MimeTypeEnum.IMAGE_PNG
-    assert image_link.field_type == client.enums.AssetFieldTypeEnum.AD_IMAGE
+    # Field type is now auto-detected from aspect ratio (1:1 → SQUARE_MARKETING_IMAGE).
+    # AD_IMAGE was rejected by Google's API for direct asset linking.
+    assert image_link.field_type == client.enums.AssetFieldTypeEnum.SQUARE_MARKETING_IMAGE
 
     google_ads_service._responses = responses
     write._apply_create_image_assets(
         client,
         "1234567890",
         {
+            "scope": "campaign",
             "campaign_id": "1001",
             "images": [
                 {
