@@ -1909,6 +1909,33 @@ def _execute_plan(config: AdLoopConfig, plan: object) -> dict:
     """Dispatch to the right Google Ads mutate call based on plan.operation."""
     from adloop.ads.client import get_ads_client, normalize_customer_id
 
+    # GTM operations don't need a Google Ads client and don't use customer_id.
+    # Route them to GTM apply handlers that fetch their own GTM client.
+    if plan.operation in (
+        "create_gtm_tag", "create_gtm_trigger", "publish_gtm_workspace",
+        "update_gtm_tag", "update_gtm_trigger",
+        "delete_gtm_tag", "delete_gtm_trigger",
+    ):
+        from adloop.gtm.write import (
+            _apply_create_gtm_tag,
+            _apply_create_gtm_trigger,
+            _apply_publish_gtm_workspace,
+            _apply_update_gtm_tag,
+            _apply_update_gtm_trigger,
+            _apply_delete_gtm_tag,
+            _apply_delete_gtm_trigger,
+        )
+        gtm_dispatch = {
+            "create_gtm_tag": _apply_create_gtm_tag,
+            "create_gtm_trigger": _apply_create_gtm_trigger,
+            "publish_gtm_workspace": _apply_publish_gtm_workspace,
+            "update_gtm_tag": _apply_update_gtm_tag,
+            "update_gtm_trigger": _apply_update_gtm_trigger,
+            "delete_gtm_tag": _apply_delete_gtm_tag,
+            "delete_gtm_trigger": _apply_delete_gtm_trigger,
+        }
+        return gtm_dispatch[plan.operation](None, "", plan.changes)
+
     client = get_ads_client(config)
     cid = normalize_customer_id(plan.customer_id)
 

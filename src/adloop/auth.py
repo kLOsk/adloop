@@ -19,6 +19,9 @@ _ALL_SCOPES = [
     "https://www.googleapis.com/auth/analytics.edit",
     "https://www.googleapis.com/auth/adwords",
     "https://www.googleapis.com/auth/tagmanager.readonly",
+    "https://www.googleapis.com/auth/tagmanager.edit.containers",
+    "https://www.googleapis.com/auth/tagmanager.edit.containerversions",
+    "https://www.googleapis.com/auth/tagmanager.publish",
 ]
 
 _GA4_SCOPES = [
@@ -32,6 +35,9 @@ _ADS_SCOPES = [
 
 _GTM_SCOPES = [
     "https://www.googleapis.com/auth/tagmanager.readonly",
+    "https://www.googleapis.com/auth/tagmanager.edit.containers",
+    "https://www.googleapis.com/auth/tagmanager.edit.containerversions",
+    "https://www.googleapis.com/auth/tagmanager.publish",
 ]
 
 
