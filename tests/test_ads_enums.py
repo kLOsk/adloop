@@ -77,39 +77,7 @@ class TestEnumNames:
         assert c1 is c2
 
 
-class TestModulesUseDynamicEnums:
-    """Confirm the validators we refactored actually pull from the SDK."""
-
-    def test_conversion_actions_uses_sdk_types(self):
-        from adloop.ads import conversion_actions
-
-        sdk_types = enum_names("ConversionActionTypeEnum")
-        # The module-level constant should BE the dynamic frozenset.
-        assert conversion_actions._VALID_TYPES == sdk_types
-        # Should include members the old hardcoded list missed
-        # (sanity check: the dynamic list is a strict superset).
-        assert "CLICK_TO_CALL" in conversion_actions._VALID_TYPES
-
-    def test_conversion_actions_uses_sdk_categories(self):
-        from adloop.ads import conversion_actions
-
-        assert (
-            conversion_actions._VALID_CATEGORIES
-            == enum_names("ConversionActionCategoryEnum")
-        )
-
-    def test_write_promotion_occasions_dynamic(self):
-        from adloop.ads import write
-
-        assert (
-            write._VALID_PROMOTION_OCCASIONS
-            == enum_names("PromotionExtensionOccasionEnum")
-        )
-
-    def test_write_call_reporting_states_dynamic(self):
-        from adloop.ads import write
-
-        assert (
-            write._VALID_CALL_REPORTING_STATES
-            == enum_names("CallConversionReportingStateEnum")
-        )
+# Note: tests asserting that downstream modules (conversion_actions, write)
+# use the dynamic enum sets live in those modules' own test files (see
+# tests/test_conversion_actions.py and tests/test_ads_extensions.py once the
+# follow-up PRs land). Keeping this file focused on the helper itself.
