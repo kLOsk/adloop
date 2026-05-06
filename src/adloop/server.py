@@ -715,6 +715,256 @@ def attribution_check(
 
 @mcp.tool(annotations=_READONLY)
 @_safe
+def audit_event_coverage(
+    expected_events: list[str],
+    gtm_account_id: str,
+    gtm_container_id: str,
+    property_id: str = "",
+    date_range_start: str = "",
+    date_range_end: str = "",
+) -> dict:
+    """Three-way audit: codebase events ↔ GTM tags ↔ GA4 actual fires.
+
+    First, search the user's codebase for gtag('event', ...) and
+    dataLayer.push({event: ...}) calls and extract every distinct event name.
+    Pass that list as `expected_events`. The tool fetches the LIVE GTM
+    container, joins it against GA4 event counts for the date range, and
+    returns a per-event matrix with one of these statuses:
+      ok                          — tag active and event firing
+      ok_auto_collected           — GA4 Enhanced Measurement event, no tag needed
+      no_tag_no_fire              — codebase event, no GTM tag, never fires
+      tag_paused                  — GTM tag exists but is paused
+      tag_active_but_not_firing   — tag is active but no GA4 hits
+      gtm_only_firing             — GA4 event from a tag, not in codebase
+      gtm_only_not_firing         — tag exists, not in codebase, no fires
+      ga4_only                    — fires in GA4, no tag, no codebase ref
+      ga4_fires_no_tag            — codebase event firing without a GTM tag
+      auto_event_only             — Enhanced Measurement event with no codebase ref
+
+    Also surfaces dynamic-event tags ({{Event}} variables) and Custom HTML
+    tags that the audit cannot interpret automatically.
+
+    GTM IDs come from Tag Manager UI → Admin → Container Settings.
+    Date format: "YYYY-MM-DD". Empty = last 30 days.
+    """
+    from adloop.crossref import audit_event_coverage as _impl
+
+    return _impl(
+        _config,
+        expected_events=expected_events,
+        gtm_account_id=gtm_account_id,
+        gtm_container_id=gtm_container_id,
+        property_id=property_id or _config.ga4.property_id,
+        date_range_start=date_range_start,
+        date_range_end=date_range_end,
+    )
+
+
+@mcp.tool(annotations=_READONLY)
+@_safe
+def list_gtm_accounts() -> dict:
+    """List all GTM accounts the AdLoop service account / OAuth user can read.
+
+    Use this for first-time discovery before calling audit_event_coverage —
+    you need the account_id from here. If this returns an empty list, the
+    service account hasn't been added to any GTM container with at least
+    Read permission.
+    """
+    from adloop.gtm.read import list_accounts as _impl
+
+    return _impl(_config)
+
+
+@mcp.tool(annotations=_READONLY)
+@_safe
+def list_gtm_containers(gtm_account_id: str) -> dict:
+    """List all containers under a GTM account.
+
+    Returns container_id (the numeric ID needed by audit_event_coverage),
+    public_id (the GTM-XXXXXXX string shown in the UI), name, and usage
+    context (web / iOS / Android / amp / server).
+    """
+    from adloop.gtm.read import list_containers as _impl
+
+    return _impl(_config, account_id=gtm_account_id)
+
+
+@mcp.tool(annotations=_READONLY)
+@_safe
+def list_gtm_tags(gtm_account_id: str, gtm_container_id: str) -> dict:
+    """List every tag in the LIVE GTM container.
+
+    Each tag includes type, status, parsed parameters, the GA4 event name
+    (for GA4 event tags), and resolved firing/blocking trigger names.
+    Use after audit_event_coverage to inspect specific tags.
+    """
+    from adloop.gtm.read import list_tags as _impl
+
+    return _impl(
+        _config, account_id=gtm_account_id, container_id=gtm_container_id
+    )
+
+
+@mcp.tool(annotations=_READONLY)
+@_safe
+def get_gtm_tag(
+    gtm_account_id: str, gtm_container_id: str, tag_id: str
+) -> dict:
+    """Get the full RAW configuration for a single GTM tag.
+
+    Includes every parameter, firing/blocking triggers (with their filter
+    conditions resolved to text), priority, pause status, sampling, and
+    monitoring metadata. Use to inspect a tag flagged by audit_event_coverage.
+    """
+    from adloop.gtm.read import get_tag as _impl
+
+    return _impl(
+        _config,
+        account_id=gtm_account_id,
+        container_id=gtm_container_id,
+        tag_id=tag_id,
+    )
+
+
+@mcp.tool(annotations=_READONLY)
+@_safe
+def list_gtm_triggers(gtm_account_id: str, gtm_container_id: str) -> dict:
+    """List every trigger in the LIVE GTM container.
+
+    Each trigger has its filter conditions parsed to readable text
+    (e.g. "{{Page Path}} matches RegExp ^/service-promotions/"). Use to
+    diagnose why a tag fires or doesn't fire on specific pages.
+    """
+    from adloop.gtm.read import list_triggers as _impl
+
+    return _impl(
+        _config, account_id=gtm_account_id, container_id=gtm_container_id
+    )
+
+
+@mcp.tool(annotations=_READONLY)
+@_safe
+def get_gtm_trigger(
+    gtm_account_id: str, gtm_container_id: str, trigger_id: str
+) -> dict:
+    """Get the full RAW configuration for a single GTM trigger.
+
+    Includes filters, auto-event filters, custom-event filters, validation
+    settings, and a list of every tag that uses this trigger. Use to
+    diagnose why a tag with a specific trigger ID does or doesn't fire.
+    """
+    from adloop.gtm.read import get_trigger as _impl
+
+    return _impl(
+        _config,
+        account_id=gtm_account_id,
+        container_id=gtm_container_id,
+        trigger_id=trigger_id,
+    )
+
+
+@mcp.tool(annotations=_READONLY)
+@_safe
+def list_gtm_variables(gtm_account_id: str, gtm_container_id: str) -> dict:
+    """List GTM variables — both custom and enabled built-in.
+
+    Custom variables come from the live container. Built-in variables
+    (Page URL, Click Element, Form ID, etc.) come from the workspace's
+    enabled-built-ins list. Variables matter because triggers reference
+    them — if a trigger uses {{Form ID}} but Form ID isn't enabled, the
+    trigger never matches.
+    """
+    from adloop.gtm.read import list_variables as _impl
+
+    return _impl(
+        _config, account_id=gtm_account_id, container_id=gtm_container_id
+    )
+
+
+@mcp.tool(annotations=_READONLY)
+@_safe
+def list_gtm_workspaces(gtm_account_id: str, gtm_container_id: str) -> dict:
+    """List workspaces (drafts) under a GTM container.
+
+    Workspace IDs are needed for `get_gtm_workspace_diff`. Most containers
+    have a single Default Workspace; multiple workspaces appear when the
+    team uses parallel drafts.
+    """
+    from adloop.gtm.read import list_workspaces as _impl
+
+    return _impl(
+        _config, account_id=gtm_account_id, container_id=gtm_container_id
+    )
+
+
+@mcp.tool(annotations=_READONLY)
+@_safe
+def get_gtm_workspace_diff(
+    gtm_account_id: str, gtm_container_id: str, workspace_id: str
+) -> dict:
+    """Show drafted-but-not-published changes in a GTM workspace.
+
+    Returns the list of entities (tags, triggers, variables) added,
+    modified, or deleted relative to the live published version, plus
+    any merge conflicts. Common cause of "I edited a tag but nothing
+    happened" — the workspace was never published. is_clean=true means
+    no pending changes and no conflicts.
+    """
+    from adloop.gtm.read import get_workspace_diff as _impl
+
+    return _impl(
+        _config,
+        account_id=gtm_account_id,
+        container_id=gtm_container_id,
+        workspace_id=workspace_id,
+    )
+
+
+@mcp.tool(annotations=_READONLY)
+@_safe
+def list_gtm_versions(
+    gtm_account_id: str, gtm_container_id: str, page_size: int = 50
+) -> dict:
+    """List published GTM version history (newest first).
+
+    Version headers include version_id, name, and entity counts. Use to
+    correlate a metric drop with a recent publish: fetch versions, find
+    one with timestamps near the drop date, then call get_gtm_version
+    for full content + author info.
+    """
+    from adloop.gtm.read import list_versions as _impl
+
+    return _impl(
+        _config,
+        account_id=gtm_account_id,
+        container_id=gtm_container_id,
+        page_size=page_size,
+    )
+
+
+@mcp.tool(annotations=_READONLY)
+@_safe
+def get_gtm_version(
+    gtm_account_id: str, gtm_container_id: str, container_version_id: str
+) -> dict:
+    """Get full metadata + entity counts for a single GTM container version.
+
+    Returns name, description, fingerprint, and lists of tag/trigger/
+    variable names at that point in time. Use after list_gtm_versions
+    when correlating a metric drop with a specific publish.
+    """
+    from adloop.gtm.read import get_version as _impl
+
+    return _impl(
+        _config,
+        account_id=gtm_account_id,
+        container_id=gtm_container_id,
+        container_version_id=container_version_id,
+    )
+
+
+@mcp.tool(annotations=_READONLY)
+@_safe
 def run_gaql(
     query: str,
     customer_id: str = "",
@@ -1430,3 +1680,299 @@ if _os.getenv("ADLOOP_DEBUG_TOOLS", "").lower() in ("1", "true", "yes", "on"):
     except ImportError:
         # _debug_tools.py is intentionally absent in released builds.
         pass
+# ---------------------------------------------------------------------------# GTM Write Tools# ---------------------------------------------------------------------------
+
+@mcp.tool(annotations=_WRITE)
+@_safe
+def draft_gtm_tag(
+    gtm_account_id: str,
+    gtm_container_id: str,
+    name: str,
+    tag_type: str,
+    parameters: list[dict] | None = None,
+    firing_trigger_ids: list[str] | None = None,
+    blocking_trigger_ids: list[str] | None = None,
+    paused: bool = False,
+    notes: str = "",
+    workspace_id: str = "",
+) -> dict:
+    """Draft a new GTM tag in the Default Workspace — returns a PREVIEW.
+
+    Common tag_type values:
+        googtag — Google Tag (gtag.js config). Required for both AW-... and G-...
+        awct    — Google Ads Conversion Tracking
+        gclidw  — Conversion Linker (no parameters required)
+        html    — Custom HTML
+        gaawe   — GA4 Event tag
+
+    parameters: list of GTM parameter dicts. Common shapes:
+
+        Google Tag config (Google Ads):
+            [{"type": "TEMPLATE", "key": "tagId", "value": "AW-11437481610"}]
+
+        Google Ads Conversion (with phone_conversion_number for GFN):
+            [{"type": "TEMPLATE", "key": "conversionId", "value": "11437481610"},
+             {"type": "TEMPLATE", "key": "conversionLabel", "value": "_qxp..."},
+             {"type": "TEMPLATE", "key": "conversionValue", "value": "250"},
+             {"type": "TEMPLATE", "key": "conversionCurrency", "value": "USD"},
+             {"type": "TEMPLATE", "key": "phone_conversion_number",
+              "value": "(916) 460-9257"}]
+
+        Custom HTML (e.g. GFN snippet):
+            [{"type": "TEMPLATE", "key": "html",
+              "value": "<script>...gtag config...</script>"},
+             {"type": "BOOLEAN", "key": "supportDocumentWrite", "value": "false"}]
+
+    firing_trigger_ids: list of trigger ID strings. Use ["2147479573"] for
+        the built-in "All Pages — Initialization" trigger.
+
+    Call confirm_and_apply with the returned plan_id to execute.
+    """
+    from adloop.gtm.write import draft_gtm_tag as _impl
+
+    return _impl(
+        _config,
+        account_id=gtm_account_id,
+        container_id=gtm_container_id,
+        workspace_id=workspace_id,
+        name=name,
+        tag_type=tag_type,
+        parameters=parameters,
+        firing_trigger_ids=firing_trigger_ids,
+        blocking_trigger_ids=blocking_trigger_ids,
+        paused=paused,
+        notes=notes,
+    )
+
+@mcp.tool(annotations=_WRITE)
+@_safe
+def draft_gtm_trigger(
+    gtm_account_id: str,
+    gtm_container_id: str,
+    name: str,
+    trigger_type: str,
+    filters: list[dict] | None = None,
+    custom_event_filters: list[dict] | None = None,
+    auto_event_filters: list[dict] | None = None,
+    custom_event_name: str = "",
+    parameters: list[dict] | None = None,
+    notes: str = "",
+    workspace_id: str = "",
+) -> dict:
+    """Draft a new GTM trigger in the Default Workspace — returns a PREVIEW.
+
+    Common trigger_type values:
+        pageview, dom_ready, window_loaded
+        click, linkClick
+        formSubmission
+        customEvent (requires custom_event_name)
+
+    filters: GTM filter shape — list of dicts:
+        [{"type": "EQUALS"|"CONTAINS"|"STARTS_WITH"|"REGEX"|"GREATER"|...,
+          "parameter": [
+            {"type": "TEMPLATE", "key": "arg0", "value": "{{Variable}}"},
+            {"type": "TEMPLATE", "key": "arg1", "value": "expected"}
+          ]}]
+
+    Common patterns:
+
+        Click on tel: links anywhere on site:
+            trigger_type="linkClick", filters=[{
+                "type": "STARTS_WITH",
+                "parameter": [
+                    {"type": "TEMPLATE", "key": "arg0", "value": "{{Click URL}}"},
+                    {"type": "TEMPLATE", "key": "arg1", "value": "tel:"}
+                ]
+            }]
+
+        Form submit on /contacts:
+            trigger_type="formSubmission", filters=[{
+                "type": "CONTAINS",
+                "parameter": [
+                    {"type": "TEMPLATE", "key": "arg0", "value": "{{Page Path}}"},
+                    {"type": "TEMPLATE", "key": "arg1", "value": "/contacts"}
+                ]
+            }]
+
+    Call confirm_and_apply with the returned plan_id to execute.
+    """
+    from adloop.gtm.write import draft_gtm_trigger as _impl
+
+    return _impl(
+        _config,
+        account_id=gtm_account_id,
+        container_id=gtm_container_id,
+        workspace_id=workspace_id,
+        name=name,
+        trigger_type=trigger_type,
+        filters=filters,
+        custom_event_filters=custom_event_filters,
+        auto_event_filters=auto_event_filters,
+        custom_event_name=custom_event_name,
+        parameters=parameters,
+        notes=notes,
+    )
+
+@mcp.tool(annotations=_DESTRUCTIVE)
+@_safe
+def publish_gtm_workspace(
+    gtm_account_id: str,
+    gtm_container_id: str,
+    workspace_id: str = "",
+    version_name: str = "",
+    version_notes: str = "",
+) -> dict:
+    """Publish the workspace's drafted changes — returns a PREVIEW (irreversible apply).
+
+    Publishing creates a new container version from the workspace and sets it
+    LIVE. Until you call confirm_and_apply with dry_run=false, no live change
+    happens.
+
+    Once published, all visitors with the GTM snippet on their pages will
+    start firing the new tags within minutes. There's no rollback to the
+    workspace state — to revert, you'd publish a previous version (use
+    list_gtm_versions to find one).
+
+    workspace_id: leave empty to use the Default Workspace.
+    version_name: optional friendly name for the version.
+    version_notes: optional release notes.
+
+    Call confirm_and_apply with the returned plan_id to execute.
+    """
+    from adloop.gtm.write import publish_gtm_workspace as _impl
+
+    return _impl(
+        _config,
+        account_id=gtm_account_id,
+        container_id=gtm_container_id,
+        workspace_id=workspace_id,
+        version_name=version_name,
+        version_notes=version_notes,
+    )
+
+@mcp.tool(annotations=_WRITE)
+@_safe
+def draft_update_gtm_tag(
+    gtm_account_id: str,
+    gtm_container_id: str,
+    tag_id: str,
+    name: str = "",
+    parameters: list[dict] | None = None,
+    firing_trigger_ids: list[str] | None = None,
+    blocking_trigger_ids: list[str] | None = None,
+    paused: bool | None = None,
+    notes: str = "",
+    tag_type: str = "",
+    workspace_id: str = "",
+) -> dict:
+    """Draft a partial UPDATE to an existing GTM tag — returns a PREVIEW.
+
+    Pass only the fields you want to change. Empty/None means "keep current".
+
+    Common use cases:
+      - Rename a tag: pass `name`
+      - Pause/unpause: pass `paused=True/False`
+      - Replace parameters: pass full `parameters` list (no partial merge)
+      - Re-route firing triggers: pass `firing_trigger_ids`
+
+    Note: tag type cannot usually be changed; if you need to switch (e.g.
+    `html` → `awcc`), delete the old and create a new one.
+
+    Call confirm_and_apply with the returned plan_id to execute.
+    """
+    from adloop.gtm.write import draft_update_gtm_tag as _impl
+
+    return _impl(
+        _config,
+        account_id=gtm_account_id,
+        container_id=gtm_container_id,
+        workspace_id=workspace_id,
+        tag_id=tag_id,
+        name=name,
+        parameters=parameters,
+        firing_trigger_ids=firing_trigger_ids,
+        blocking_trigger_ids=blocking_trigger_ids,
+        paused=paused,
+        notes=notes,
+        tag_type=tag_type,
+    )
+
+@mcp.tool(annotations=_WRITE)
+@_safe
+def draft_update_gtm_trigger(
+    gtm_account_id: str,
+    gtm_container_id: str,
+    trigger_id: str,
+    name: str = "",
+    filters: list[dict] | None = None,
+    custom_event_filters: list[dict] | None = None,
+    auto_event_filters: list[dict] | None = None,
+    parameters: list[dict] | None = None,
+    notes: str = "",
+    workspace_id: str = "",
+) -> dict:
+    """Draft a partial UPDATE to an existing GTM trigger — returns a PREVIEW.
+
+    Trigger type cannot be changed (delete + create instead).
+
+    Call confirm_and_apply with the returned plan_id to execute.
+    """
+    from adloop.gtm.write import draft_update_gtm_trigger as _impl
+
+    return _impl(
+        _config,
+        account_id=gtm_account_id,
+        container_id=gtm_container_id,
+        workspace_id=workspace_id,
+        trigger_id=trigger_id,
+        name=name,
+        filters=filters,
+        custom_event_filters=custom_event_filters,
+        auto_event_filters=auto_event_filters,
+        parameters=parameters,
+        notes=notes,
+    )
+
+@mcp.tool(annotations=_DESTRUCTIVE)
+@_safe
+def draft_delete_gtm_tag(
+    gtm_account_id: str,
+    gtm_container_id: str,
+    tag_id: str,
+    workspace_id: str = "",
+) -> dict:
+    """Draft a deletion of a GTM tag — returns a PREVIEW (irreversible).
+
+    Publish the workspace to make the deletion live.
+    """
+    from adloop.gtm.write import draft_delete_gtm_tag as _impl
+
+    return _impl(
+        _config,
+        account_id=gtm_account_id,
+        container_id=gtm_container_id,
+        workspace_id=workspace_id,
+        tag_id=tag_id,
+    )
+
+@mcp.tool(annotations=_DESTRUCTIVE)
+@_safe
+def draft_delete_gtm_trigger(
+    gtm_account_id: str,
+    gtm_container_id: str,
+    trigger_id: str,
+    workspace_id: str = "",
+) -> dict:
+    """Draft a deletion of a GTM trigger — returns a PREVIEW (irreversible).
+
+    GTM blocks the deletion if any tag references this trigger.
+    """
+    from adloop.gtm.write import draft_delete_gtm_trigger as _impl
+
+    return _impl(
+        _config,
+        account_id=gtm_account_id,
+        container_id=gtm_container_id,
+        workspace_id=workspace_id,
+        trigger_id=trigger_id,
+    )
