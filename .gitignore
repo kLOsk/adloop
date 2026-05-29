@@ -43,6 +43,18 @@ credentials.json
 !src/adloop/bundled_credentials.json
 token.json
 *.pem
+*.token
+*.token.json
+
+# Local client work (audits, tokens, ops notes, generated PDFs)
+# These contain real business data and credentials and must never ship to the repo.
+clients/
+
+# Local ops scripts + their outputs
+# scripts/ at the repo root contains personal per-client utilities;
+# only scripts that ship as part of AdLoop live in src/adloop/cli/.
+scripts/output/
+scripts/__pycache__/
 
 # Test / coverage
 .pytest_cache/
