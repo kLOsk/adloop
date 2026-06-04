@@ -27,6 +27,7 @@ class _FakeMutateOperationResponse:
         self.campaign_criterion_result = _FakeResult()
         self.asset_result = _FakeResult()
         self.campaign_asset_result = _FakeResult()
+        self.customer_asset_result = _FakeResult()
         self._response_type = response_type
         if response_type:
             getattr(self, response_type).resource_name = resource_name
@@ -704,6 +705,7 @@ def test_apply_campaign_asset_variants_create_asset_and_link_operations(tmp_path
         client,
         "1234567890",
         {
+            "scope": "campaign",
             "campaign_id": "1001",
             "images": [
                 {
@@ -721,13 +723,16 @@ def test_apply_campaign_asset_variants_create_asset_and_link_operations(tmp_path
     assert image_asset.name == "AdLoop image square deadbeefcafe"
     assert image_asset.type_ == client.enums.AssetTypeEnum.IMAGE
     assert image_asset.image_asset.mime_type == client.enums.MimeTypeEnum.IMAGE_PNG
-    assert image_link.field_type == client.enums.AssetFieldTypeEnum.AD_IMAGE
+    # Field type is now auto-detected from aspect ratio (1:1 → SQUARE_MARKETING_IMAGE).
+    # AD_IMAGE was rejected by Google's API for direct asset linking.
+    assert image_link.field_type == client.enums.AssetFieldTypeEnum.SQUARE_MARKETING_IMAGE
 
     google_ads_service._responses = responses
     write._apply_create_image_assets(
         client,
         "1234567890",
         {
+            "scope": "campaign",
             "campaign_id": "1001",
             "images": [
                 {
@@ -1705,16 +1710,19 @@ class TestDetachSharedSetValidation:
 def test_apply_attach_shared_set_to_campaigns_creates_one_op_per_campaign():
     captured: dict = {}
 
-    def _mutate(customer_id, operations, partial_failure=False):
-        captured["customer_id"] = customer_id
-        captured["operations"] = list(operations)
-        captured["partial_failure"] = partial_failure
+    # Real SDK signature: mutate_campaign_shared_sets(request=...) — the
+    # flattened partial_failure kwarg is NOT accepted, so partial_failure
+    # rides on the request object.
+    def _mutate(request):
+        captured["customer_id"] = request.customer_id
+        captured["operations"] = list(request.operations)
+        captured["partial_failure"] = request.partial_failure
         return SimpleNamespace(
             results=[
                 SimpleNamespace(
-                    resource_name=f"customers/{customer_id}/campaignSharedSets/{i}~9001"
+                    resource_name=f"customers/{request.customer_id}/campaignSharedSets/{i}~9001"
                 )
-                for i, _ in enumerate(operations, start=1001)
+                for i, _ in enumerate(request.operations, start=1001)
             ],
             partial_failure_error=SimpleNamespace(code=0, message="", details=[]),
         )
@@ -1755,8 +1763,9 @@ def test_apply_attach_shared_set_to_campaigns_surfaces_partial_failure():
     """When a subset of attach ops fail, succeeded ones return resource_names
     and failed ones surface in failed_campaigns with their campaign_id."""
 
-    def _mutate(customer_id, operations, partial_failure=False):
+    def _mutate(request):
         # Op #1 (index 1, campaign_id "1002") fails — empty resource_name.
+        customer_id = request.customer_id
         return SimpleNamespace(
             results=[
                 SimpleNamespace(
@@ -1811,13 +1820,14 @@ def test_apply_attach_shared_set_to_campaigns_surfaces_partial_failure():
 def test_apply_detach_shared_set_from_campaigns_uses_composite_resource_name():
     captured: dict = {}
 
-    def _mutate(customer_id, operations, partial_failure=False):
-        captured["customer_id"] = customer_id
-        captured["operations"] = list(operations)
-        captured["partial_failure"] = partial_failure
+    def _mutate(request):
+        captured["customer_id"] = request.customer_id
+        captured["operations"] = list(request.operations)
+        captured["partial_failure"] = request.partial_failure
         return SimpleNamespace(
             results=[
-                SimpleNamespace(resource_name=op.remove) for op in operations
+                SimpleNamespace(resource_name=op.remove)
+                for op in request.operations
             ],
             partial_failure_error=SimpleNamespace(code=0, message="", details=[]),
         )
@@ -1847,8 +1857,9 @@ def test_apply_detach_shared_set_from_campaigns_surfaces_partial_failure():
     """When a detach op targets a non-existent linkage, that op fails but
     the others succeed and the result surfaces both."""
 
-    def _mutate(customer_id, operations, partial_failure=False):
+    def _mutate(request):
         # Op #0 (campaign_id "1001") fails — empty resource_name.
+        operations = list(request.operations)
         return SimpleNamespace(
             results=[
                 SimpleNamespace(resource_name=""),
