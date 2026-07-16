@@ -1705,16 +1705,16 @@ class TestDetachSharedSetValidation:
 def test_apply_attach_shared_set_to_campaigns_creates_one_op_per_campaign():
     captured: dict = {}
 
-    def _mutate(customer_id, operations, partial_failure=False):
-        captured["customer_id"] = customer_id
-        captured["operations"] = list(operations)
-        captured["partial_failure"] = partial_failure
+    def _mutate(request):
+        captured["customer_id"] = request.customer_id
+        captured["operations"] = list(request.operations)
+        captured["partial_failure"] = request.partial_failure
         return SimpleNamespace(
             results=[
                 SimpleNamespace(
-                    resource_name=f"customers/{customer_id}/campaignSharedSets/{i}~9001"
+                    resource_name=f"customers/{request.customer_id}/campaignSharedSets/{i}~9001"
                 )
-                for i, _ in enumerate(operations, start=1001)
+                for i, _ in enumerate(request.operations, start=1001)
             ],
             partial_failure_error=SimpleNamespace(code=0, message="", details=[]),
         )
@@ -1755,16 +1755,16 @@ def test_apply_attach_shared_set_to_campaigns_surfaces_partial_failure():
     """When a subset of attach ops fail, succeeded ones return resource_names
     and failed ones surface in failed_campaigns with their campaign_id."""
 
-    def _mutate(customer_id, operations, partial_failure=False):
+    def _mutate(request):
         # Op #1 (index 1, campaign_id "1002") fails — empty resource_name.
         return SimpleNamespace(
             results=[
                 SimpleNamespace(
-                    resource_name=f"customers/{customer_id}/campaignSharedSets/1001~9001"
+                    resource_name=f"customers/{request.customer_id}/campaignSharedSets/1001~9001"
                 ),
                 SimpleNamespace(resource_name=""),
                 SimpleNamespace(
-                    resource_name=f"customers/{customer_id}/campaignSharedSets/1003~9001"
+                    resource_name=f"customers/{request.customer_id}/campaignSharedSets/1003~9001"
                 ),
             ],
             partial_failure_error=SimpleNamespace(
@@ -1811,13 +1811,14 @@ def test_apply_attach_shared_set_to_campaigns_surfaces_partial_failure():
 def test_apply_detach_shared_set_from_campaigns_uses_composite_resource_name():
     captured: dict = {}
 
-    def _mutate(customer_id, operations, partial_failure=False):
-        captured["customer_id"] = customer_id
-        captured["operations"] = list(operations)
-        captured["partial_failure"] = partial_failure
+    def _mutate(request):
+        captured["customer_id"] = request.customer_id
+        captured["operations"] = list(request.operations)
+        captured["partial_failure"] = request.partial_failure
         return SimpleNamespace(
             results=[
-                SimpleNamespace(resource_name=op.remove) for op in operations
+                SimpleNamespace(resource_name=op.remove)
+                for op in request.operations
             ],
             partial_failure_error=SimpleNamespace(code=0, message="", details=[]),
         )
@@ -1847,12 +1848,12 @@ def test_apply_detach_shared_set_from_campaigns_surfaces_partial_failure():
     """When a detach op targets a non-existent linkage, that op fails but
     the others succeed and the result surfaces both."""
 
-    def _mutate(customer_id, operations, partial_failure=False):
+    def _mutate(request):
         # Op #0 (campaign_id "1001") fails — empty resource_name.
         return SimpleNamespace(
             results=[
                 SimpleNamespace(resource_name=""),
-                SimpleNamespace(resource_name=operations[1].remove),
+                SimpleNamespace(resource_name=request.operations[1].remove),
             ],
             partial_failure_error=SimpleNamespace(
                 code=3,

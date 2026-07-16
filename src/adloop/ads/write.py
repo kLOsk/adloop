@@ -3146,11 +3146,14 @@ def _apply_attach_shared_set_to_campaigns(
         css.shared_set = shared_set_resource
         operations.append(op)
 
-    response = css_service.mutate_campaign_shared_sets(
-        customer_id=cid,
-        operations=operations,
-        partial_failure=True,
-    )
+    # partial_failure is not a flattened kwarg on the generated client's
+    # mutate method (only customer_id/operations are); it must be set on an
+    # explicit MutateCampaignSharedSetsRequest.
+    request = client.get_type("MutateCampaignSharedSetsRequest")
+    request.customer_id = cid
+    request.operations = operations
+    request.partial_failure = True
+    response = css_service.mutate_campaign_shared_sets(request=request)
 
     pf_error = getattr(response, "partial_failure_error", None)
     per_op_errors = _parse_partial_failure_per_op(client, pf_error)
@@ -3213,11 +3216,13 @@ def _apply_detach_shared_set_from_campaigns(
         )
         operations.append(op)
 
-    response = css_service.mutate_campaign_shared_sets(
-        customer_id=cid,
-        operations=operations,
-        partial_failure=True,
-    )
+    # See _apply_attach_shared_set_to_campaigns: partial_failure must be set
+    # on an explicit request object, not passed as a kwarg.
+    request = client.get_type("MutateCampaignSharedSetsRequest")
+    request.customer_id = cid
+    request.operations = operations
+    request.partial_failure = True
+    response = css_service.mutate_campaign_shared_sets(request=request)
 
     pf_error = getattr(response, "partial_failure_error", None)
     per_op_errors = _parse_partial_failure_per_op(client, pf_error)
