@@ -1,0 +1,5 @@
+version: "1"
+runtime: python
+build:
+    install: pip install --no-cache-dir .
+    start: python -m server
