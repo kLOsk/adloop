@@ -1808,6 +1808,55 @@ def _extract_error_message(exc: Exception) -> str:
     return fallback if fallback else repr(exc)
 
 
+def _redact_changes_for_audit(operation: str, changes: dict) -> dict:
+    """Return an audit-safe copy of a plan's ``changes`` dict.
+
+    Some upload operations carry data that must never hit the audit log
+    verbatim:
+
+    * ``upload_call_conversions`` — each frozen row holds a raw E.164
+      ``caller_id``. Google requires it raw for call-to-click matching (it
+      cannot be hashed), so it lives in the plan for apply — but it is PII and
+      must be REDACTED here (e.g. ``+155***0142``). Sample rows already carry
+      redacted ids; we redact the ``rows`` list too.
+    * ``upload_enhanced_conversions_for_leads`` — rows already contain only
+      SHA-256 hashes (no raw PII), so they are safe. We still drop the bulky
+      per-row hash blob from the audit record to keep it compact and to avoid
+      logging identifier hashes at row granularity; the non-PII summary
+      counters (row_count, total_value, rows_with_email/phone/order_id) remain.
+
+    Non-upload operations are returned unchanged.
+    """
+    if operation == "upload_call_conversions":
+        from adloop.ads.conversion_actions import _redact_caller_id
+
+        redacted = dict(changes)
+        rows = redacted.get("rows")
+        if isinstance(rows, list):
+            redacted["rows"] = [
+                {**{k: v for k, v in row.items() if k != "caller_id"},
+                 "caller_id": _redact_caller_id(row.get("caller_id", ""))}
+                for row in rows
+            ]
+        return redacted
+
+    if operation == "upload_enhanced_conversions_for_leads":
+        redacted = dict(changes)
+        # Rows are hash-only, but drop the row-level hash blob from the audit
+        # trail — the summary counters above it are sufficient for an audit.
+        if "rows" in redacted:
+            redacted = {
+                k: v for k, v in redacted.items() if k != "rows"
+            }
+            redacted["rows_redacted"] = (
+                f"{changes.get('row_count', len(changes.get('rows') or []))} "
+                "hashed rows omitted from audit log (SHA-256, no raw PII)"
+            )
+        return redacted
+
+    return changes
+
+
 def confirm_and_apply(
     config: AdLoopConfig,
     *,
@@ -1833,6 +1882,8 @@ def confirm_and_apply(
     if config.safety.require_dry_run:
         dry_run = True
 
+    audit_changes = _redact_changes_for_audit(plan.operation, plan.changes)
+
     if dry_run:
         log_mutation(
             config.safety.log_file,
@@ -1840,7 +1891,7 @@ def confirm_and_apply(
             customer_id=plan.customer_id,
             entity_type=plan.entity_type,
             entity_id=plan.entity_id,
-            changes=plan.changes,
+            changes=audit_changes,
             dry_run=True,
             result="dry_run_success",
         )
@@ -1859,7 +1910,7 @@ def confirm_and_apply(
             "status": "DRY_RUN_SUCCESS",
             "plan_id": plan.plan_id,
             "operation": plan.operation,
-            "changes": plan.changes,
+            "changes": audit_changes,
         }
         if forced_by_config:
             # The caller passed dry_run=false but safety.require_dry_run
@@ -1900,7 +1951,7 @@ def confirm_and_apply(
             customer_id=plan.customer_id,
             entity_type=plan.entity_type,
             entity_id=plan.entity_id,
-            changes=plan.changes,
+            changes=audit_changes,
             dry_run=False,
             result="refused_two_phase",
         )
@@ -1927,7 +1978,7 @@ def confirm_and_apply(
             customer_id=plan.customer_id,
             entity_type=plan.entity_type,
             entity_id=plan.entity_id,
-            changes=plan.changes,
+            changes=audit_changes,
             dry_run=False,
             result="error",
             error=error_message,
@@ -1940,7 +1991,7 @@ def confirm_and_apply(
         customer_id=plan.customer_id,
         entity_type=plan.entity_type,
         entity_id=plan.entity_id,
-        changes=plan.changes,
+        changes=audit_changes,
         dry_run=False,
         result="success",
     )
@@ -2628,6 +2679,16 @@ def _execute_plan(config: AdLoopConfig, plan: object) -> dict:
     client = get_ads_client(config)
     cid = normalize_customer_id(plan.customer_id)
 
+    # Conversion-action CRUD lives in its own module; import lazily so the
+    # dispatch table (and this module) don't take the dependency at import time.
+    from adloop.ads.conversion_actions import (
+        _apply_create_conversion_action,
+        _apply_remove_conversion_action,
+        _apply_update_conversion_action,
+        _apply_upload_call_conversions,
+        _apply_upload_enhanced_conversions_for_leads,
+    )
+
     dispatch = {
         "create_campaign": _apply_create_campaign,
         "create_ad_group": _apply_create_ad_group,
@@ -2649,6 +2710,13 @@ def _execute_plan(config: AdLoopConfig, plan: object) -> dict:
         "create_structured_snippets": _apply_create_structured_snippets,
         "create_image_assets": _apply_create_image_assets,
         "create_sitelinks": _apply_create_sitelinks,
+        "create_conversion_action": _apply_create_conversion_action,
+        "update_conversion_action": _apply_update_conversion_action,
+        "remove_conversion_action": _apply_remove_conversion_action,
+        "upload_call_conversions": _apply_upload_call_conversions,
+        "upload_enhanced_conversions_for_leads": (
+            _apply_upload_enhanced_conversions_for_leads
+        ),
     }
 
     handler = dispatch.get(plan.operation)
