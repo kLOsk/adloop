@@ -1852,17 +1852,27 @@ def update_ad_group(
 @mcp.tool(annotations=_WRITE, tags={"ads"})
 @_safe
 def draft_callouts(
-    campaign_id: str,
     callouts: _StrList,
+    campaign_id: str = "",
+    ad_group_id: str = "",
     customer_id: str = "",
 ) -> dict:
-    """Draft campaign callout assets — returns a PREVIEW."""
+    """Draft callout assets — returns a PREVIEW.
+
+    Scope (most-specific wins):
+      - ad_group_id set  → the callouts link to that ad group only (use for
+        per-service callouts inside a multi-ad-group campaign).
+      - campaign_id set  → the callouts link at the campaign level.
+      - both empty       → the callouts link at the customer/account level and
+        apply to all eligible campaigns.
+    """
     from adloop.ads.write import draft_callouts as _impl
 
     return _impl(
         current_config(),
         customer_id=customer_id or current_config().ads.customer_id,
         campaign_id=campaign_id,
+        ad_group_id=ad_group_id,
         callouts=callouts,
     )
 
@@ -1870,17 +1880,25 @@ def draft_callouts(
 @mcp.tool(annotations=_WRITE, tags={"ads"})
 @_safe
 def draft_structured_snippets(
-    campaign_id: str,
     snippets: _DictList,
+    campaign_id: str = "",
+    ad_group_id: str = "",
     customer_id: str = "",
 ) -> dict:
-    """Draft campaign structured snippet assets — returns a PREVIEW."""
+    """Draft structured snippet assets — returns a PREVIEW.
+
+    Scope (most-specific wins):
+      - ad_group_id set  → snippets link to that ad group only.
+      - campaign_id set  → snippets link at the campaign level.
+      - both empty       → snippets link at the customer/account level.
+    """
     from adloop.ads.write import draft_structured_snippets as _impl
 
     return _impl(
         current_config(),
         customer_id=customer_id or current_config().ads.customer_id,
         campaign_id=campaign_id,
+        ad_group_id=ad_group_id,
         snippets=snippets,
     )
 
@@ -2025,6 +2043,458 @@ def draft_sitelinks(
         customer_id=customer_id or current_config().ads.customer_id,
         campaign_id=campaign_id,
         sitelinks=sitelinks,
+    )
+
+
+@mcp.tool(annotations=_WRITE, tags={"ads"})
+@_safe
+def draft_call_asset(
+    phone_number: str,
+    country_code: str = "US",
+    campaign_id: str = "",
+    ad_group_id: str = "",
+    call_conversion_action_id: str = "",
+    ad_schedule: _DictListOpt = None,
+    customer_id: str = "",
+) -> dict:
+    """Draft a call asset (phone extension) — returns a PREVIEW.
+
+    Scope (most-specific wins):
+      - ad_group_id set  → the call asset attaches to that ad group only.
+      - campaign_id set  → the call asset attaches at the campaign level.
+      - both empty       → the call asset attaches at the customer/account level.
+
+    phone_number: human or E.164 (e.g. "+15555550142" or "(555) 555-0142").
+    country_code: 2-letter ISO code used to canonicalize a national number to
+        E.164; ignored when phone_number already starts with '+'.
+    call_conversion_action_id: optional conversion action ID to count
+        qualifying calls at the resource level.
+    ad_schedule: optional list of {day_of_week, start_hour, end_hour,
+        start_minute, end_minute} entries limiting when the extension shows.
+
+    Google Ads requires manual phone-number verification before call assets
+    serve. Call confirm_and_apply with the returned plan_id to execute.
+    """
+    from adloop.ads.write import draft_call_asset as _impl
+
+    return _impl(
+        current_config(),
+        customer_id=customer_id or current_config().ads.customer_id,
+        phone_number=phone_number,
+        country_code=country_code,
+        campaign_id=campaign_id,
+        ad_group_id=ad_group_id,
+        call_conversion_action_id=call_conversion_action_id,
+        ad_schedule=ad_schedule,
+    )
+
+
+@mcp.tool(annotations=_WRITE, tags={"ads"})
+@_safe
+def add_ad_schedule(
+    campaign_id: str,
+    schedule: _DictList,
+    customer_id: str = "",
+) -> dict:
+    """Draft ad schedule additions for a campaign — returns a PREVIEW.
+
+    Creates AD_SCHEDULE CampaignCriterion records so the campaign only serves
+    during the given hours/days (in the account's time zone). Additive — it
+    does NOT replace existing schedule criteria.
+
+    schedule: list of dicts with keys:
+        - day_of_week: MONDAY..SUNDAY
+        - start_hour: 0..23
+        - end_hour: 0..24 (must be > start)
+        - start_minute / end_minute: 0, 15, 30, or 45 (default 0)
+
+    Call confirm_and_apply with the returned plan_id to execute.
+    """
+    from adloop.ads.write import add_ad_schedule as _impl
+
+    return _impl(
+        current_config(),
+        customer_id=customer_id or current_config().ads.customer_id,
+        campaign_id=campaign_id,
+        schedule=schedule,
+    )
+
+
+@mcp.tool(annotations=_WRITE, tags={"ads"})
+@_safe
+def draft_promotion(
+    promotion_target: str,
+    final_url: str,
+    money_off: float = 0,
+    percent_off: float = 0,
+    currency_code: str = "USD",
+    promotion_code: str = "",
+    orders_over_amount: float = 0,
+    occasion: str = "",
+    discount_modifier: str = "",
+    language_code: str = "en",
+    start_date: str = "",
+    end_date: str = "",
+    redemption_start_date: str = "",
+    redemption_end_date: str = "",
+    campaign_id: str = "",
+    ad_group_id: str = "",
+    ad_schedule: _DictListOpt = None,
+    customer_id: str = "",
+) -> dict:
+    """Draft a promotion extension asset — returns a PREVIEW.
+
+    Scope (most-specific wins): ad_group_id → campaign_id → customer/account.
+    Exactly one of money_off / percent_off is required.
+
+    promotion_target: label Google shows (max 20 chars).
+    final_url: reachable landing page (validated).
+    occasion / discount_modifier: optional Google enum tags.
+    promotion_code and orders_over_amount are mutually exclusive.
+
+    Call confirm_and_apply with the returned plan_id to execute.
+    """
+    from adloop.ads.write import draft_promotion as _impl
+
+    return _impl(
+        current_config(),
+        customer_id=customer_id or current_config().ads.customer_id,
+        promotion_target=promotion_target,
+        final_url=final_url,
+        money_off=money_off,
+        percent_off=percent_off,
+        currency_code=currency_code,
+        promotion_code=promotion_code,
+        orders_over_amount=orders_over_amount,
+        occasion=occasion,
+        discount_modifier=discount_modifier,
+        language_code=language_code,
+        start_date=start_date,
+        end_date=end_date,
+        redemption_start_date=redemption_start_date,
+        redemption_end_date=redemption_end_date,
+        campaign_id=campaign_id,
+        ad_group_id=ad_group_id,
+        ad_schedule=ad_schedule,
+    )
+
+
+@mcp.tool(annotations=_WRITE, tags={"ads"})
+@_safe
+def update_promotion(
+    asset_id: str,
+    promotion_target: str,
+    final_url: str,
+    money_off: float = 0,
+    percent_off: float = 0,
+    currency_code: str = "USD",
+    promotion_code: str = "",
+    orders_over_amount: float = 0,
+    occasion: str = "",
+    discount_modifier: str = "",
+    language_code: str = "en",
+    start_date: str = "",
+    end_date: str = "",
+    redemption_start_date: str = "",
+    redemption_end_date: str = "",
+    campaign_id: str = "",
+    ad_schedule: _DictListOpt = None,
+    customer_id: str = "",
+) -> dict:
+    """Update a promotion asset via swap — returns a PREVIEW.
+
+    PromotionAsset fields are immutable, so this creates a new asset with the
+    new values, links it at the same scope, and unlinks the old one. Pass
+    campaign_id for campaign scope; leave empty for customer/account scope.
+    The old Asset row stays in the account (orphaned) — Google reclaims it.
+
+    asset_id: numeric ID of the existing PromotionAsset to replace.
+
+    Call confirm_and_apply with the returned plan_id to execute.
+    """
+    from adloop.ads.write import update_promotion as _impl
+
+    return _impl(
+        current_config(),
+        customer_id=customer_id or current_config().ads.customer_id,
+        asset_id=asset_id,
+        campaign_id=campaign_id,
+        promotion_target=promotion_target,
+        final_url=final_url,
+        money_off=money_off,
+        percent_off=percent_off,
+        currency_code=currency_code,
+        promotion_code=promotion_code,
+        orders_over_amount=orders_over_amount,
+        occasion=occasion,
+        discount_modifier=discount_modifier,
+        language_code=language_code,
+        start_date=start_date,
+        end_date=end_date,
+        redemption_start_date=redemption_start_date,
+        redemption_end_date=redemption_end_date,
+        ad_schedule=ad_schedule,
+    )
+
+
+@mcp.tool(annotations=_WRITE, tags={"ads"})
+@_safe
+def draft_price_asset(
+    offerings: _DictList,
+    campaign_id: str = "",
+    ad_group_id: str = "",
+    price_type: str = "SERVICES",
+    price_qualifier: str = "FROM",
+    language_code: str = "en",
+    currency_code: str = "USD",
+    customer_id: str = "",
+) -> dict:
+    """Draft a price extension asset — returns a PREVIEW.
+
+    Scope (most-specific wins): ad_group_id → campaign_id → customer/account.
+    Google Ads requires 3-8 offerings.
+
+    offerings: list of 3-8 dicts, each with header (<=25), description (<=25),
+        price (> 0), final_url (reachable), optional final_mobile_url and unit.
+    price_type: SERVICES (default), BRANDS, EVENTS, etc.
+    price_qualifier: FROM (default), UP_TO, AVERAGE, or empty.
+
+    Every price MUST match the amount shown on its final_url page.
+
+    Call confirm_and_apply with the returned plan_id to execute.
+    """
+    from adloop.ads.write import draft_price_asset as _impl
+
+    return _impl(
+        current_config(),
+        customer_id=customer_id or current_config().ads.customer_id,
+        campaign_id=campaign_id,
+        ad_group_id=ad_group_id,
+        price_type=price_type,
+        price_qualifier=price_qualifier,
+        language_code=language_code,
+        currency_code=currency_code,
+        offerings=offerings,
+    )
+
+
+@mcp.tool(annotations=_WRITE, tags={"ads"})
+@_safe
+def update_structured_snippet(
+    asset_id: str,
+    header: str,
+    values: _StrList,
+    campaign_id: str = "",
+    ad_group_id: str = "",
+    customer_id: str = "",
+) -> dict:
+    """Update a structured snippet via swap — returns a PREVIEW.
+
+    StructuredSnippetAsset fields are immutable, so this creates a new asset
+    with the new header/values, links it at the same scope, and unlinks the
+    old one. Scope (most-specific wins): ad_group_id → campaign_id →
+    customer/account, and MUST match where the old asset is linked.
+
+    asset_id: numeric ID of the existing StructuredSnippetAsset to replace.
+    header: official structured-snippet header (e.g. "Brands", "Services").
+    values: 3-10 values, each <= 25 chars.
+
+    Call confirm_and_apply with the returned plan_id to execute.
+    """
+    from adloop.ads.write import update_structured_snippet as _impl
+
+    return _impl(
+        current_config(),
+        customer_id=customer_id or current_config().ads.customer_id,
+        asset_id=asset_id,
+        campaign_id=campaign_id,
+        ad_group_id=ad_group_id,
+        header=header,
+        values=values,
+    )
+
+
+@mcp.tool(annotations=_WRITE, tags={"ads"})
+@_safe
+def update_call_asset(
+    asset_id: str,
+    phone_number: str = "",
+    country_code: str = "",
+    call_conversion_action_id: str = "",
+    call_conversion_reporting_state: str = "",
+    ad_schedule: _DictListOpt = None,
+    customer_id: str = "",
+) -> dict:
+    """Update an existing CallAsset in place — returns a PREVIEW.
+
+    Pass only the fields to change (empty string/None = leave unchanged). Use
+    this to re-point a call asset at a resource-level conversion action, change
+    the number, or replace the ad-schedule windows.
+
+    asset_id: numeric ID of the existing call asset.
+    call_conversion_reporting_state: DISABLED |
+        USE_ACCOUNT_LEVEL_CALL_CONVERSION_ACTION |
+        USE_RESOURCE_LEVEL_CALL_CONVERSION_ACTION
+
+    Call confirm_and_apply with the returned plan_id to execute.
+    """
+    from adloop.ads.write import update_call_asset as _impl
+
+    return _impl(
+        current_config(),
+        customer_id=customer_id or current_config().ads.customer_id,
+        asset_id=asset_id,
+        phone_number=phone_number,
+        country_code=country_code,
+        call_conversion_action_id=call_conversion_action_id,
+        call_conversion_reporting_state=call_conversion_reporting_state,
+        ad_schedule=ad_schedule,
+    )
+
+
+@mcp.tool(annotations=_WRITE, tags={"ads"})
+@_safe
+def update_sitelink(
+    asset_id: str,
+    link_text: str = "",
+    final_url: str = "",
+    description1: str = "",
+    description2: str = "",
+    customer_id: str = "",
+) -> dict:
+    """Update an existing SitelinkAsset in place — returns a PREVIEW.
+
+    Pass only the fields to change (empty string = leave unchanged). A changed
+    final_url is validated for reachability.
+
+    asset_id: numeric ID of the existing sitelink asset.
+    link_text: max 25 chars. description1/description2: max 35 chars each.
+
+    Call confirm_and_apply with the returned plan_id to execute.
+    """
+    from adloop.ads.write import update_sitelink as _impl
+
+    return _impl(
+        current_config(),
+        customer_id=customer_id or current_config().ads.customer_id,
+        asset_id=asset_id,
+        link_text=link_text,
+        final_url=final_url,
+        description1=description1,
+        description2=description2,
+    )
+
+
+@mcp.tool(annotations=_WRITE, tags={"ads"})
+@_safe
+def update_callout(
+    asset_id: str,
+    callout_text: str,
+    customer_id: str = "",
+) -> dict:
+    """Update an existing CalloutAsset's text in place — returns a PREVIEW.
+
+    asset_id: numeric ID of the existing callout asset.
+    callout_text: new callout text (max 25 chars).
+
+    Call confirm_and_apply with the returned plan_id to execute.
+    """
+    from adloop.ads.write import update_callout as _impl
+
+    return _impl(
+        current_config(),
+        customer_id=customer_id or current_config().ads.customer_id,
+        asset_id=asset_id,
+        callout_text=callout_text,
+    )
+
+
+@mcp.tool(annotations=_WRITE, tags={"ads"})
+@_safe
+def draft_location_asset(
+    business_profile_account_id: str,
+    asset_set_name: str = "",
+    campaign_id: str = "",
+    label_filters: _StrListOpt = None,
+    listing_id_filters: _StrListOpt = None,
+    customer_id: str = "",
+) -> dict:
+    """Draft a Google Business Profile location AssetSet — returns a PREVIEW.
+
+    Creates a LOCATION_SYNC AssetSet that pulls locations from a linked Google
+    Business Profile and links it at customer scope (or to one campaign when
+    campaign_id is set). The GBP must already be linked in Google Ads → Tools
+    → Linked accounts → Business Profile.
+
+    business_profile_account_id: numeric GBP/LBC account ID.
+    label_filters / listing_id_filters: optional filters to limit which GBP
+        locations sync.
+
+    Call confirm_and_apply with the returned plan_id to execute.
+    """
+    from adloop.ads.write import draft_location_asset as _impl
+
+    return _impl(
+        current_config(),
+        customer_id=customer_id or current_config().ads.customer_id,
+        business_profile_account_id=business_profile_account_id,
+        asset_set_name=asset_set_name,
+        campaign_id=campaign_id,
+        label_filters=label_filters,
+        listing_id_filters=listing_id_filters,
+    )
+
+
+@mcp.tool(annotations=_WRITE, tags={"ads"})
+@_safe
+def draft_business_name_asset(
+    business_name: str,
+    campaign_id: str = "",
+    customer_id: str = "",
+) -> dict:
+    """Draft a business-name asset — returns a PREVIEW.
+
+    Creates a TEXT asset linked as BUSINESS_NAME. Links at customer scope by
+    default, or to one campaign when campaign_id is set.
+
+    business_name: max 25 characters per Google Ads policy.
+
+    Call confirm_and_apply with the returned plan_id to execute.
+    """
+    from adloop.ads.write import draft_business_name_asset as _impl
+
+    return _impl(
+        current_config(),
+        customer_id=customer_id or current_config().ads.customer_id,
+        campaign_id=campaign_id,
+        business_name=business_name,
+    )
+
+
+@mcp.tool(annotations=_WRITE, tags={"ads"})
+@_safe
+def link_asset_to_customer(
+    links: _DictList,
+    customer_id: str = "",
+) -> dict:
+    """Link EXISTING assets to the customer/account level — returns a PREVIEW.
+
+    "Promotes" assets that already exist (typically on legacy campaigns) so
+    they apply account-wide. Does NOT create new Asset rows — only CustomerAsset
+    link rows. Find candidate asset_ids via: SELECT asset.id, asset.type,
+    asset.name FROM asset.
+
+    links: list of dicts, each with asset_id (numeric str) and field_type
+        (AssetFieldType, e.g. BUSINESS_LOGO, MARKETING_IMAGE, SITELINK, CALL).
+
+    Call confirm_and_apply with the returned plan_id to execute.
+    """
+    from adloop.ads.write import link_asset_to_customer as _impl
+
+    return _impl(
+        current_config(),
+        customer_id=customer_id or current_config().ads.customer_id,
+        links=links,
     )
 
 
