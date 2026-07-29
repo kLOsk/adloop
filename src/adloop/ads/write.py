@@ -2628,6 +2628,14 @@ def _execute_plan(config: AdLoopConfig, plan: object) -> dict:
     client = get_ads_client(config)
     cid = normalize_customer_id(plan.customer_id)
 
+    # Conversion-action CRUD lives in its own module; import lazily so the
+    # dispatch table (and this module) don't take the dependency at import time.
+    from adloop.ads.conversion_actions import (
+        _apply_create_conversion_action,
+        _apply_remove_conversion_action,
+        _apply_update_conversion_action,
+    )
+
     dispatch = {
         "create_campaign": _apply_create_campaign,
         "create_ad_group": _apply_create_ad_group,
@@ -2649,6 +2657,9 @@ def _execute_plan(config: AdLoopConfig, plan: object) -> dict:
         "create_structured_snippets": _apply_create_structured_snippets,
         "create_image_assets": _apply_create_image_assets,
         "create_sitelinks": _apply_create_sitelinks,
+        "create_conversion_action": _apply_create_conversion_action,
+        "update_conversion_action": _apply_update_conversion_action,
+        "remove_conversion_action": _apply_remove_conversion_action,
     }
 
     handler = dispatch.get(plan.operation)

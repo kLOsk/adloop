@@ -2090,6 +2090,130 @@ def draft_key_event(
     )
 
 
+@mcp.tool(annotations=_WRITE, tags={"ads"})
+@_safe
+def draft_create_conversion_action(
+    name: str,
+    type_: str,
+    category: str = "DEFAULT",
+    default_value: float = 0,
+    currency_code: str = "USD",
+    always_use_default_value: bool = False,
+    counting_type: str = "ONE_PER_CLICK",
+    phone_call_duration_seconds: int = 0,
+    primary_for_goal: bool = True,
+    include_in_conversions_metric: bool = True,
+    click_through_window_days: int = 0,
+    view_through_window_days: int = 0,
+    attribution_model: str = "",
+    customer_id: str = "",
+) -> dict:
+    """Draft a new Google Ads ConversionAction — returns a PREVIEW.
+
+    type_: AD_CALL, WEBSITE_CALL, WEBPAGE, WEBPAGE_CODELESS,
+      GOOGLE_ANALYTICS_4_CUSTOM, etc. category: PHONE_CALL_LEAD,
+      SUBMIT_LEAD_FORM, PURCHASE, ... (default DEFAULT).
+
+    A positive default_value with always_use_default_value=False is a legal
+    "fallback" config — the preview warns but does NOT flip the flag.
+    include_in_conversions_metric is IMMUTABLE on create (change it later via
+    draft_update_conversion_action). Call confirm_and_apply with the returned
+    plan_id to execute.
+    """
+    from adloop.ads.conversion_actions import (
+        draft_create_conversion_action as _impl,
+    )
+
+    return _impl(
+        current_config(),
+        customer_id=customer_id or current_config().ads.customer_id,
+        name=name,
+        type_=type_,
+        category=category,
+        default_value=default_value,
+        currency_code=currency_code,
+        always_use_default_value=always_use_default_value,
+        counting_type=counting_type,
+        phone_call_duration_seconds=phone_call_duration_seconds,
+        primary_for_goal=primary_for_goal,
+        include_in_conversions_metric=include_in_conversions_metric,
+        click_through_window_days=click_through_window_days,
+        view_through_window_days=view_through_window_days,
+        attribution_model=attribution_model,
+    )
+
+
+@mcp.tool(annotations=_WRITE, tags={"ads"})
+@_safe
+def draft_update_conversion_action(
+    conversion_action_id: str,
+    name: str = "",
+    primary_for_goal: bool | None = None,
+    default_value: float = 0,
+    currency_code: str = "",
+    always_use_default_value: bool | None = None,
+    counting_type: str = "",
+    phone_call_duration_seconds: int = 0,
+    include_in_conversions_metric: bool | None = None,
+    click_through_window_days: int = 0,
+    view_through_window_days: int = 0,
+    attribution_model: str = "",
+    customer_id: str = "",
+) -> dict:
+    """Draft a partial UPDATE of an existing ConversionAction — returns PREVIEW.
+
+    Only the parameters you pass non-empty/non-default are sent to the API.
+    Use to rename, demote a Primary to Secondary, change value, adjust the
+    call-duration threshold, or change attribution. Find the ID via:
+    SELECT conversion_action.id, conversion_action.name FROM conversion_action.
+    Call confirm_and_apply with the returned plan_id to execute.
+    """
+    from adloop.ads.conversion_actions import (
+        draft_update_conversion_action as _impl,
+    )
+
+    return _impl(
+        current_config(),
+        customer_id=customer_id or current_config().ads.customer_id,
+        conversion_action_id=conversion_action_id,
+        name=name,
+        primary_for_goal=primary_for_goal,
+        default_value=default_value,
+        currency_code=currency_code,
+        always_use_default_value=always_use_default_value,
+        counting_type=counting_type,
+        phone_call_duration_seconds=phone_call_duration_seconds,
+        include_in_conversions_metric=include_in_conversions_metric,
+        click_through_window_days=click_through_window_days,
+        view_through_window_days=view_through_window_days,
+        attribution_model=attribution_model,
+    )
+
+
+@mcp.tool(annotations=_WRITE, tags={"ads"})
+@_safe
+def draft_remove_conversion_action(
+    conversion_action_id: str,
+    customer_id: str = "",
+) -> dict:
+    """Draft a REMOVAL of a ConversionAction — returns a PREVIEW.
+
+    Removal stops counting and drops the action from goal lists; historical
+    data is preserved but the action is irreversible. SMART_CAMPAIGN_* and
+    GOOGLE_HOSTED types reject removal with MUTATE_NOT_ALLOWED. Call
+    confirm_and_apply with the returned plan_id to execute.
+    """
+    from adloop.ads.conversion_actions import (
+        draft_remove_conversion_action as _impl,
+    )
+
+    return _impl(
+        current_config(),
+        customer_id=customer_id or current_config().ads.customer_id,
+        conversion_action_id=conversion_action_id,
+    )
+
+
 @mcp.tool(annotations=_READONLY, tags={"tracking"})
 @_safe
 def validate_tracking(
