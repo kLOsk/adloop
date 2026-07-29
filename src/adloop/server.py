@@ -72,6 +72,9 @@ _DictListOpt = Annotated[
 _StrOrDictList = Annotated[
     list[str | dict], BeforeValidator(_coerce_json_string_to_list)
 ]
+_StrOrDictListOpt = Annotated[
+    list[str | dict] | None, BeforeValidator(_coerce_json_string_to_list)
+]
 
 def _build_orchestration_instructions() -> str:
     """Compact orchestration hint sent via MCP ``InitializeResult.instructions``.
@@ -1580,6 +1583,65 @@ def draft_responsive_search_ad(
         final_url=final_url,
         path1=path1,
         path2=path2,
+    )
+
+
+@mcp.tool(annotations=_WRITE, tags={"ads"})
+@_safe
+def update_responsive_search_ad(
+    ad_id: str,
+    customer_id: str = "",
+    headlines: _StrOrDictListOpt = None,
+    descriptions: _StrOrDictListOpt = None,
+    final_url: str = "",
+    path1: str = "",
+    path2: str = "",
+    clear_path1: bool = False,
+    clear_path2: bool = False,
+) -> dict:
+    """Update mutable fields on an existing RSA in place — returns a PREVIEW.
+
+    Edits an existing RSA without creating a new ad; the ad keeps its ID.
+    Google Ads API v23 (``AdService.MutateAds``) permits in-place mutation of
+    ``final_urls``, ``path1``, ``path2``, ``headlines``, and ``descriptions``.
+
+    IMPORTANT: replacing headlines or descriptions is NOT a free in-place
+    edit. Even though the ad ID is preserved, swapping the creative text
+    RESETS the ad's asset-combination learning and performance history and
+    sends the ad BACK THROUGH Google policy review — Google treats the
+    creative as new for optimization. URL-only and path-only edits do not
+    incur this. When headlines/descriptions change, the returned preview
+    includes a ``warnings`` entry — surface it to the user before applying.
+
+    Headlines/descriptions are LIST-REPLACE — when provided, the supplied
+    list fully swaps in for the existing one, and Google's RSA constraints
+    apply (3-15 headlines, 2-4 descriptions, 30/90 char limits, pin-slot
+    rules). Each entry may be a plain string (unpinned) or
+    ``{"text": "...", "pinned_field": "HEADLINE_1"}``.
+
+    Argument semantics:
+        - ``headlines`` / ``descriptions``: None or [] -> no change;
+          non-empty list -> replaces the existing list in full
+        - ``final_url``: empty -> no change; non-empty -> replaces final URL
+        - ``path1`` / ``path2``: empty -> no change; non-empty -> sets value
+        - ``clear_path1`` / ``clear_path2``: True -> set to empty string
+
+    At least one mutation must be requested. Call confirm_and_apply with the
+    returned plan_id to execute.
+    """
+    from adloop.ads.write import update_responsive_search_ad as _impl
+
+    return _impl(
+        current_config(),
+        customer_id=customer_id or current_config().ads.customer_id,
+        ad_id=ad_id,
+        headlines=headlines,
+        descriptions=descriptions,
+        final_url=final_url,
+        path1=path1,
+        path2=path2,
+        clear_path1=clear_path1,
+        clear_path2=clear_path2,
     )
 
 

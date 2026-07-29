@@ -539,6 +539,175 @@ def draft_responsive_search_ad(
     return preview
 
 
+# Fires when an in-place RSA update replaces headlines or descriptions. This is
+# NOT a free edit: swapping the creative text resets the ad's optimization even
+# though the ad keeps its ID. This is the single most important thing to relay
+# to the user before applying such a change.
+_RSA_TEXT_UPDATE_WARNING = (
+    "Replacing headlines/descriptions is NOT a free in-place edit. Even though "
+    "the ad keeps its ID, Google treats the creative as new: this resets the "
+    "ad's asset-combination learning and wipes its performance history, and the "
+    "ad is sent back through policy review before it can serve again. Only "
+    "replace headlines/descriptions when the copy genuinely needs to change — "
+    "for URL or display-path tweaks these effects do not apply."
+)
+
+
+def update_responsive_search_ad(
+    config: AdLoopConfig,
+    *,
+    customer_id: str = "",
+    ad_id: str = "",
+    headlines: list[str | dict] | None = None,
+    descriptions: list[str | dict] | None = None,
+    final_url: str = "",
+    path1: str = "",
+    path2: str = "",
+    clear_path1: bool = False,
+    clear_path2: bool = False,
+) -> dict:
+    """Draft an in-place update on an existing RSA — returns a PREVIEW.
+
+    Mutates fields on an existing Responsive Search Ad in place via the
+    Google Ads API v23 ``AdService.MutateAds``. The ad keeps its ID. The
+    following fields are mutable in place: ``final_urls``,
+    ``responsive_search_ad.path1``, ``responsive_search_ad.path2``,
+    ``responsive_search_ad.headlines``, ``responsive_search_ad.descriptions``.
+
+    IMPORTANT — replacing headlines or descriptions is NOT a cost-free edit.
+    Even though the ad ID is preserved, swapping the creative text RESETS the
+    ad's asset-combination learning and performance reporting and sends the ad
+    BACK THROUGH policy review — Google treats the creative as new for
+    optimization. URL-only and display-path-only edits do not incur this reset.
+    The returned preview carries a prominent warning whenever headlines or
+    descriptions are being replaced; relay it to the user before applying.
+
+    Headlines/descriptions are list-replace: when provided, the entire list
+    swaps in. Google's RSA constraints still apply — 3-15 headlines,
+    2-4 descriptions, 30/90 char caps, pin-slot rules — and are validated
+    here before the plan is stored. Each entry may be a plain string
+    (unpinned) or ``{"text": "...", "pinned_field": "HEADLINE_1"}``.
+
+    Argument semantics:
+        - ``headlines`` / ``descriptions`` None or [] -> no change
+        - ``final_url`` empty -> no change; non-empty -> replaces final_urls
+        - ``path1`` / ``path2`` empty -> no change; non-empty -> sets value
+        - ``clear_path1`` / ``clear_path2`` True -> set the path to empty
+          (overrides the corresponding path string argument)
+
+    At least one mutation must be requested. Call ``confirm_and_apply`` with
+    the returned plan_id to execute.
+    """
+    from adloop.safety.guards import SafetyViolation, check_blocked_operation
+    from adloop.safety.preview import ChangePlan, store_plan
+
+    try:
+        check_blocked_operation("update_responsive_search_ad", config.safety)
+    except SafetyViolation as e:
+        return {"error": str(e)}
+
+    errors: list[str] = []
+
+    if not ad_id:
+        errors.append("ad_id is required")
+    elif not str(ad_id).isdigit():
+        errors.append("ad_id must be a numeric ID")
+
+    final_url = (final_url or "").strip()
+    path1 = (path1 or "").strip()
+    path2 = (path2 or "").strip()
+
+    if path1 and len(path1) > 15:
+        errors.append(f"path1 must be 15 chars or fewer (got {len(path1)})")
+    if path2 and len(path2) > 15:
+        errors.append(f"path2 must be 15 chars or fewer (got {len(path2)})")
+
+    norm_headlines: list[dict] = []
+    norm_descriptions: list[dict] = []
+    if headlines:
+        try:
+            norm_headlines = _normalize_rsa_assets(headlines)
+        except ValueError as e:
+            errors.append(str(e))
+    if descriptions:
+        try:
+            norm_descriptions = _normalize_rsa_assets(descriptions)
+        except ValueError as e:
+            errors.append(str(e))
+
+    if norm_headlines or norm_descriptions:
+        # Only enforce count on the list being replaced. The other list is
+        # untouched on the live ad, so its size on the wire is whatever the
+        # ad already has — not our problem to validate.
+        errors.extend(
+            _validate_rsa_assets(
+                norm_headlines,
+                norm_descriptions,
+                enforce_headline_count=bool(norm_headlines),
+                enforce_description_count=bool(norm_descriptions),
+            )
+        )
+
+    has_url_change = bool(final_url)
+    has_path1_change = bool(path1) or clear_path1
+    has_path2_change = bool(path2) or clear_path2
+    has_headlines_change = bool(norm_headlines)
+    has_descriptions_change = bool(norm_descriptions)
+
+    if not (
+        has_url_change
+        or has_path1_change
+        or has_path2_change
+        or has_headlines_change
+        or has_descriptions_change
+    ):
+        errors.append(
+            "No changes specified — provide final_url, path1, path2, "
+            "clear_path1, clear_path2, headlines, or descriptions"
+        )
+
+    if errors:
+        return {"error": "Validation failed", "details": errors}
+
+    if has_url_change:
+        url_check = _validate_urls([final_url])
+        if url_check.get(final_url):
+            return {
+                "error": "URL validation failed",
+                "details": [
+                    f"final_url '{final_url}' is not reachable: "
+                    f"{url_check[final_url]}. Ads MUST point to working URLs."
+                ],
+            }
+
+    changes: dict = {"ad_id": str(ad_id)}
+    if has_url_change:
+        changes["final_url"] = final_url
+    if has_path1_change:
+        changes["path1"] = "" if clear_path1 else path1
+    if has_path2_change:
+        changes["path2"] = "" if clear_path2 else path2
+    if has_headlines_change:
+        changes["headlines"] = norm_headlines
+    if has_descriptions_change:
+        changes["descriptions"] = norm_descriptions
+
+    plan = ChangePlan(
+        operation="update_responsive_search_ad",
+        entity_type="ad",
+        entity_id=str(ad_id),
+        customer_id=customer_id,
+        changes=changes,
+    )
+    store_plan(plan)
+    preview = plan.to_preview()
+    # Only warn when the creative text is actually being replaced — URL/path
+    # edits do not trigger the learning reset or policy re-review.
+    if has_headlines_change or has_descriptions_change:
+        preview["warnings"] = [_RSA_TEXT_UPDATE_WARNING]
+    return preview
+
+
 def draft_keywords(
     config: AdLoopConfig,
     *,
@@ -2194,25 +2363,32 @@ def _check_broad_match_safety(
     return []
 
 
-def _validate_rsa(
-    ad_group_id: str,
+def _validate_rsa_assets(
     headlines: list[dict],
     descriptions: list[dict],
-    final_url: str,
+    enforce_headline_count: bool = True,
+    enforce_description_count: bool = True,
 ) -> list[str]:
-    errors = []
-    if not ad_group_id:
-        errors.append("ad_group_id is required")
-    if not final_url:
-        errors.append("final_url is required")
-    if len(headlines) < 3:
-        errors.append(f"Need at least 3 headlines, got {len(headlines)}")
-    if len(headlines) > 15:
-        errors.append(f"Maximum 15 headlines, got {len(headlines)}")
-    if len(descriptions) < 2:
-        errors.append(f"Need at least 2 descriptions, got {len(descriptions)}")
-    if len(descriptions) > 4:
-        errors.append(f"Maximum 4 descriptions, got {len(descriptions)}")
+    """Validate RSA headline/description content: count, char limits, pin slots.
+
+    Shared by ``_validate_rsa`` (full RSA create) and
+    ``update_responsive_search_ad`` (in-place replace of headlines/descriptions).
+    Google enforces 3-15 headlines / 2-4 descriptions whenever a list is sent.
+    The update path passes ``enforce_*_count=False`` for a list it is NOT
+    replacing, since an omitted list stays untouched on the live ad — only the
+    supplied list is gated on count.
+    """
+    errors: list[str] = []
+    if enforce_headline_count:
+        if len(headlines) < 3:
+            errors.append(f"Need at least 3 headlines, got {len(headlines)}")
+        if len(headlines) > 15:
+            errors.append(f"Maximum 15 headlines, got {len(headlines)}")
+    if enforce_description_count:
+        if len(descriptions) < 2:
+            errors.append(f"Need at least 2 descriptions, got {len(descriptions)}")
+        if len(descriptions) > 4:
+            errors.append(f"Maximum 4 descriptions, got {len(descriptions)}")
 
     headline_pin_counts: dict[str, int] = {}
     for i, h in enumerate(headlines):
@@ -2253,6 +2429,22 @@ def _validate_rsa(
     for pin, count in description_pin_counts.items():
         if count > 1:
             errors.append(f"At most 1 description may pin to {pin}; got {count}")
+
+    return errors
+
+
+def _validate_rsa(
+    ad_group_id: str,
+    headlines: list[dict],
+    descriptions: list[dict],
+    final_url: str,
+) -> list[str]:
+    errors = []
+    if not ad_group_id:
+        errors.append("ad_group_id is required")
+    if not final_url:
+        errors.append("final_url is required")
+    errors.extend(_validate_rsa_assets(headlines, descriptions))
 
     return errors
 
@@ -2634,6 +2826,7 @@ def _execute_plan(config: AdLoopConfig, plan: object) -> dict:
         "update_campaign": _apply_update_campaign,
         "update_ad_group": _apply_update_ad_group,
         "create_responsive_search_ad": _apply_create_rsa,
+        "update_responsive_search_ad": _apply_update_rsa,
         "add_keywords": _apply_add_keywords,
         "add_negative_keywords": _apply_add_negative_keywords,
         "add_negative_locations": _apply_add_negative_locations,
@@ -3091,6 +3284,68 @@ def _apply_create_rsa(client: object, cid: str, changes: dict) -> dict:
     response = service.mutate_ad_group_ads(
         customer_id=cid, operations=[operation]
     )
+    return {"resource_name": response.results[0].resource_name}
+
+
+def _apply_update_rsa(client: object, cid: str, changes: dict) -> dict:
+    """Update mutable fields on an existing RSA in place.
+
+    Builds a sparse ``AdOperation.update`` with only the fields the caller
+    asked to change, attached to a FieldMask so Google Ads ignores everything
+    else. Mutable in place on RSAs via ``AdService.MutateAds`` (API v23):
+    ``final_urls``, ``responsive_search_ad.path1``,
+    ``responsive_search_ad.path2``, ``responsive_search_ad.headlines``,
+    ``responsive_search_ad.descriptions``. Headlines/descriptions are
+    list-replace — the supplied list fully replaces the existing one. Note
+    that replacing the creative text resets the ad's learning and re-triggers
+    policy review even though the ad keeps its ID (see
+    ``update_responsive_search_ad``).
+    """
+    from google.protobuf import field_mask_pb2
+
+    service = client.get_service("AdService")
+    operation = client.get_type("AdOperation")
+    ad = operation.update
+    ad.resource_name = service.ad_path(cid, changes["ad_id"])
+
+    field_paths: list[str] = []
+
+    if "final_url" in changes:
+        ad.final_urls.append(changes["final_url"])
+        field_paths.append("final_urls")
+
+    if "path1" in changes:
+        ad.responsive_search_ad.path1 = changes["path1"]
+        field_paths.append("responsive_search_ad.path1")
+
+    if "path2" in changes:
+        ad.responsive_search_ad.path2 = changes["path2"]
+        field_paths.append("responsive_search_ad.path2")
+
+    if "headlines" in changes:
+        for entry in changes["headlines"]:
+            asset = client.get_type("AdTextAsset")
+            asset.text = entry["text"]
+            if entry.get("pinned_field"):
+                asset.pinned_field = client.enums.ServedAssetFieldTypeEnum[
+                    entry["pinned_field"]
+                ]
+            ad.responsive_search_ad.headlines.append(asset)
+        field_paths.append("responsive_search_ad.headlines")
+
+    if "descriptions" in changes:
+        for entry in changes["descriptions"]:
+            asset = client.get_type("AdTextAsset")
+            asset.text = entry["text"]
+            if entry.get("pinned_field"):
+                asset.pinned_field = client.enums.ServedAssetFieldTypeEnum[
+                    entry["pinned_field"]
+                ]
+            ad.responsive_search_ad.descriptions.append(asset)
+        field_paths.append("responsive_search_ad.descriptions")
+
+    operation.update_mask = field_mask_pb2.FieldMask(paths=field_paths)
+    response = service.mutate_ads(customer_id=cid, operations=[operation])
     return {"resource_name": response.results[0].resource_name}
 
 
