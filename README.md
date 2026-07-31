@@ -2,6 +2,8 @@
 
 # AdLoop
 
+[![MCP Toplist](https://mcptoplist.com/badge/glama%2FkLOsk%2Fadloop.svg)](https://mcptoplist.com/server/glama%2FkLOsk%2Fadloop)
+
 **The AI command center for Google Ads, GA4, and tracking code.**
 
 [![PyPI](https://img.shields.io/pypi/v/adloop.svg)](https://pypi.org/project/adloop/)
