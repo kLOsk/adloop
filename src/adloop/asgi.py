@@ -83,15 +83,20 @@ def _prepare_server():
     """
     _configure_server_runtime()
     from adloop.hosting.auth import install_auth
-    from adloop.hosting.credentials import install_credentials_provider
     from adloop.hosting.datastore import install_datastore
+    from adloop.hosting.shared_credentials import install_shared_credentials_provider
+    from adloop.hosting.shared_token_lookup import build_shared_token_lookup
     from adloop.hosting.token_lookup import build_supabase_token_lookup
     from adloop.server import mcp
 
     install_auth(mcp)  # Supabase auth + tenant middleware (if configured)
-    # Per-user Google creds. With a DB configured, the real Supabase token
-    # lookup (Phase E) is used; otherwise it falls back to the env-var dev token.
-    install_credentials_provider(build_supabase_token_lookup())
+    # GA4/GTM/GSC run off the shared reporting@ token (one per service); Ads
+    # stays per-user. With a DB configured, the real Supabase lookups are used;
+    # otherwise the env-var dev fallbacks apply (local dev only).
+    install_shared_credentials_provider(
+        shared_lookup=build_shared_token_lookup(),
+        ads_lookup=build_supabase_token_lookup(),
+    )
     install_datastore()  # Supabase-backed plan store + audit sink (if configured)
     return mcp
 

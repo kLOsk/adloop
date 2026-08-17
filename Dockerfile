@@ -34,7 +34,7 @@ ENV PATH="/app/.venv/bin:$PATH"
 # v1 (Phase F): expose only the Ads + GA4 toolsets (core tools always survive).
 # Overridable at deploy, but a comma-valued env is awkward via --set-env-vars,
 # so it lives here as the baked default. Matches Phase C's ads+ga4-only creds.
-ENV ADLOOP_TOOLSETS=ads,ga4
+ENV ADLOOP_TOOLSETS=ads,ga4,gtm,gsc
 
 # Cloud Run's conventional default; main() honors $PORT if Cloud Run overrides it.
 ENV PORT=8080
