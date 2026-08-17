@@ -533,6 +533,45 @@ def run_gsc_report(
 
 
 # ---------------------------------------------------------------------------
+# Client Reporting-Target Resolution
+# ---------------------------------------------------------------------------
+
+
+@mcp.tool(annotations=_READONLY, tags={"core"})
+@_safe
+def resolve_client_google_targets(client_id: str) -> dict:
+    """Resolve a ClientBrain client to its Google reporting targets.
+
+    Given a ClientBrain client id (uuid), returns that client's GA4 property id,
+    GTM account + container id, and GSC site url — the ids to pass to the GA4,
+    GTM, and Search Console report tools. Look the client id up first via the
+    ClientBrain connector (find_client). Any target not configured for the
+    client comes back null.
+
+    client_id: the ClientBrain client id (uuid), e.g. from find_client.
+    """
+    from adloop.hosting.client_resolution import build_client_target_resolver
+
+    resolver = build_client_target_resolver()
+    if resolver is None:
+        raise RuntimeError(
+            "Client target resolution needs a database connection "
+            "(ADLOOP_DATABASE_URL); it is unavailable in local mode."
+        )
+    targets = resolver(client_id)
+    if targets is None:
+        return {
+            "client_id": client_id,
+            "ga4_property_id": None,
+            "gtm_account_id": None,
+            "gtm_container_id": None,
+            "gsc_site_url": None,
+            "note": "No Google reporting targets are mapped for this client yet.",
+        }
+    return {"client_id": client_id, **targets}
+
+
+# ---------------------------------------------------------------------------
 # Google Ads Read Tools
 # ---------------------------------------------------------------------------
 
