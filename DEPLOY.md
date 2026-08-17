@@ -63,7 +63,7 @@ app layer (Supabase OAuth 2.1 + client_id pinning via `SupabaseProvider`), so
 Cloud Run IAM must not also gate it — Claude reaches it with a bearer token, not a
 Google identity.
 
-`ADLOOP_TOOLSETS=ads,ga4` is baked into the image (Dockerfile), so it's not passed
+`ADLOOP_TOOLSETS=ads,ga4,gtm,gsc` is baked into the image (Dockerfile), so it's not passed
 here. `ADLOOP_BASE_URL` / allow-lists / `ADLOOP_EXPECTED_CLIENT_ID` are set in
 step 4 once we know the URL + connector id.
 
@@ -80,7 +80,7 @@ gcloud run deploy adloop-hosted --source . --region us-west1 --allow-unauthentic
 > Add `ADLOOP_DATABASE_URL=adloop-database-url:latest` to `--set-secrets` once the
 > DB password is available. It's optional at boot — `install_datastore()` falls
 > back to an in-memory store if unset — so the first deploy can omit it (as above)
-> and a later `gcloud run services update` can add it. `ADLOOP_TOOLSETS=ads,ga4`
+> and a later `gcloud run services update` can add it. `ADLOOP_TOOLSETS=ads,ga4,gtm,gsc`
 > is baked into the image, so it's never passed here (a comma-valued env would
 > also need `--env-vars-file`).
 
@@ -124,13 +124,32 @@ set before real use.
 | `ADLOOP_EXPECTED_CLIENT_ID` | env (step 4) | connector client_id to pin |
 | `ADLOOP_GOOGLE_CLIENT_ID` | env | Web client `955371824855-h0dp…` |
 | `ADLOOP_ADS_LOGIN_CUSTOMER_ID` | env | MCC `4762726066` |
-| `ADLOOP_TOOLSETS` | image (Dockerfile) | `ads,ga4` |
+| `ADLOOP_TOOLSETS` | image (Dockerfile) | `ads,ga4,gtm,gsc` |
 | `ADLOOP_ALLOWED_HOSTS` / `_ORIGINS` | env (step 4) | Cloud Run host / origin |
 | `ADLOOP_DATABASE_URL` | 🔒 secret | IPv4 shared-pooler string, port 6543 |
 | `ADLOOP_GOOGLE_CLIENT_SECRET` | 🔒 secret | Web client secret |
 | `ADLOOP_ADS_DEVELOPER_TOKEN` | 🔒 secret | Ads dev token |
 | `ADLOOP_DB_POOL_MAX` | env (optional) | max pooled conns/instance (default 4) |
 | `ADLOOP_DEV_REFRESH_TOKEN` | — | **local-dev only; never set in prod.** Phase E's per-user lookup replaces it. Set it temporarily only for a single-user staging smoke test. |
+
+## Shared Google reporting (GA4 / GTM / GSC)
+
+GA4/GTM/GSC run off the shared `reporting@` token via ClientBrain's Vault. The
+server needs each service's Web OAuth client — the **same three clients
+ClientBrain captured the tokens with** — plus a DB connection:
+
+| Var | Where | Value / notes |
+|---|---|---|
+| `ADLOOP_GA4_CLIENT_ID` / `ADLOOP_GTM_CLIENT_ID` / `ADLOOP_GSC_CLIENT_ID` | env | the 3 shared Web client ids |
+| `ADLOOP_GA4_CLIENT_SECRET` / `ADLOOP_GTM_CLIENT_SECRET` / `ADLOOP_GSC_CLIENT_SECRET` | 🔒 secret | the 3 shared Web client secrets |
+| `ADLOOP_DATABASE_URL` | 🔒 secret | **Required** for the reporting tools (shared token lookup + client resolution), unlike Ads where it's optional. |
+
+`ADLOOP_TOOLSETS=ads,ga4,gtm,gsc` is baked into the image. Pass the three client
+ids in the `--set-env-vars` list and the three secrets in `--set-secrets` (create
+them in Secret Manager like the others and grant the runtime SA `secretAccessor`).
+The RPCs the server calls (`public.get_shared_google_refresh_credential`,
+`public.resolve_client_google_targets`) are already granted to `postgres` in the
+ClientBrain migrations, so no extra DB grant is needed.
 
 ## Security
 
