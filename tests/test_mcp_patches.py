@@ -10,7 +10,22 @@ embedder to arm it.
 
 import inspect
 
-from mcp.shared import session as mcp_session
+import pytest
+
+# mcp 2.x removed mcp.shared.session, and install() already treats that as
+# "nothing to patch" (it try/excepts the same import and returns). Mirror
+# that rather than failing collection — but skip only the two tests that
+# need a RequestResponder to talk about. The side-effect-free invariant
+# below is about our own module and must hold on every mcp version.
+try:
+    from mcp.shared import session as mcp_session
+except ImportError:  # mcp >= 2
+    mcp_session = None
+
+needs_request_responder = pytest.mark.skipif(
+    mcp_session is None,
+    reason="mcp >= 2 has no mcp.shared.session; the pysdk-2416 patch no-ops",
+)
 
 
 def test_importing_the_server_stays_side_effect_free():
@@ -27,6 +42,7 @@ def test_importing_the_server_stays_side_effect_free():
     )
 
 
+@needs_request_responder
 def test_install_runtime_patches_arms_the_cancellation_guard():
     import adloop
 
@@ -55,6 +71,7 @@ def test_install_runtime_patches_arms_the_cancellation_guard():
         assert not getattr(responder, "_adloop_2416_patched", False)
 
 
+@needs_request_responder
 def test_install_runtime_patches_is_idempotent():
     import adloop
 
