@@ -1,6 +1,6 @@
 [project]
 name = "adloop"
-version = "0.13.1"
+version = "0.13.2"
 description = "The AI command center for Google Ads, GA4, and tracking code."
 readme = "README.md"
 authors = [
