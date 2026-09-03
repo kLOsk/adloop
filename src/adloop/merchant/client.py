@@ -13,7 +13,15 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from adloop.config import AdLoopConfig
 
-_BASE = "https://merchantapi.googleapis.com/accounts/v1"
+_BASE = "https://merchantapi.googleapis.com"
+
+# The Merchant API is split into independently versioned sub-APIs, and the
+# sub-API is part of the path: accounts/v1 serves accounts and account
+# issues, but product-status aggregation lives under issueresolution/v1.
+# Guessing wrong yields a bare 404 with no error message, so every call
+# states its sub-API and API_ACCOUNTS is only the default.
+API_ACCOUNTS = "accounts/v1"
+API_ISSUE_RESOLUTION = "issueresolution/v1"
 
 # Google blocks every Merchant API call from a GCP project that is not
 # registered as a developer with the merchant account (401 UNAUTHENTICATED,
@@ -32,6 +40,7 @@ def _request(
     method: str,
     path: str,
     *,
+    api: str = API_ACCOUNTS,
     params: dict | None = None,
     json_body: dict | None = None,
 ) -> dict:
@@ -39,10 +48,11 @@ def _request(
 
     from adloop.auth import get_merchant_credentials
 
+    url = f"{_BASE}/{api.strip('/')}/{path.lstrip('/')}"
     session = AuthorizedSession(get_merchant_credentials(config))
     response = session.request(
         method,
-        f"{_BASE}/{path.lstrip('/')}",
+        url,
         params=params or {},
         json=json_body,
         timeout=30,
@@ -55,18 +65,35 @@ def _request(
             pass
         if _REGISTRATION_MARKER in detail:
             raise MerchantNotRegistered(detail)
-        raise RuntimeError(f"Merchant API returned {response.status_code}: {detail}")
+        # A wrong sub-API prefix answers 404 with an empty message, so name
+        # the URL that failed rather than reporting a bare status code.
+        raise RuntimeError(
+            f"Merchant API returned {response.status_code} for {url}"
+            f"{f': {detail}' if detail else ''}"
+        )
     return response.json()
 
 
-def merchant_get(config: AdLoopConfig, path: str, params: dict | None = None) -> dict:
-    """Authorized GET against the Merchant API accounts_v1 surface."""
-    return _request(config, "GET", path, params=params)
+def merchant_get(
+    config: AdLoopConfig,
+    path: str,
+    params: dict | None = None,
+    *,
+    api: str = API_ACCOUNTS,
+) -> dict:
+    """Authorized GET against a Merchant API sub-API (default: accounts)."""
+    return _request(config, "GET", path, api=api, params=params)
 
 
-def merchant_post(config: AdLoopConfig, path: str, body: dict | None = None) -> dict:
-    """Authorized POST against the Merchant API accounts_v1 surface."""
-    return _request(config, "POST", path, json_body=body or {})
+def merchant_post(
+    config: AdLoopConfig,
+    path: str,
+    body: dict | None = None,
+    *,
+    api: str = API_ACCOUNTS,
+) -> dict:
+    """Authorized POST against a Merchant API sub-API (default: accounts)."""
+    return _request(config, "POST", path, api=api, json_body=body or {})
 
 
 def register_gcp(config: AdLoopConfig, account_id: str) -> dict:

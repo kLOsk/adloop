@@ -118,6 +118,7 @@ def get_merchant_feed_health(
     them) with account-level issues that can suspend the whole account.
     """
     from adloop.merchant.client import (
+        API_ISSUE_RESOLUTION,
         MerchantNotRegistered,
         merchant_get,
         register_gcp,
@@ -132,8 +133,12 @@ def get_merchant_feed_health(
 
     def _fetch() -> tuple[dict, dict]:
         return (
+            # Product-status aggregation is served by the issueresolution
+            # sub-API, not accounts — the wrong prefix 404s.
             merchant_get(
-                config, f"accounts/{account_id}/aggregateProductStatuses"
+                config,
+                f"accounts/{account_id}/aggregateProductStatuses",
+                api=API_ISSUE_RESOLUTION,
             ),
             merchant_get(config, f"accounts/{account_id}/issues"),
         )

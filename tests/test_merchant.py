@@ -7,7 +7,7 @@ from unittest.mock import patch
 import pytest
 
 from adloop.config import AdLoopConfig
-from adloop.merchant import read
+from adloop.merchant import client, read
 
 
 @pytest.fixture
@@ -16,11 +16,16 @@ def config() -> AdLoopConfig:
 
 
 def _patch_get(responses: dict):
-    """Map path-prefix → payload for adloop.merchant.client.merchant_get."""
-    calls: list[tuple[str, dict]] = []
+    """Map path-prefix → payload for adloop.merchant.client.merchant_get.
 
-    def fake(config, path, params=None):
-        calls.append((path, params or {}))
+    Records the sub-API each call selects: the Merchant API splits across
+    accounts/v1, issueresolution/v1 and friends, and picking the wrong one
+    404s, so the choice is asserted rather than mocked away.
+    """
+    calls: list[tuple[str, str, dict]] = []
+
+    def fake(config, path, params=None, *, api=client.API_ACCOUNTS):
+        calls.append((path, api, params or {}))
         for prefix, payload in responses.items():
             if path.endswith(prefix):
                 return payload
@@ -94,9 +99,9 @@ class TestFeedHealth:
         with patcher:
             result = read.get_merchant_feed_health(config, account_id="111")
 
-        assert [c[0] for c in calls] == [
-            "accounts/111/aggregateProductStatuses",
-            "accounts/111/issues",
+        assert [(c[0], c[1]) for c in calls] == [
+            ("accounts/111/aggregateProductStatuses", "issueresolution/v1"),
+            ("accounts/111/issues", "accounts/v1"),
         ]
         assert result["totals"] == {"approved": 900, "pending": 20,
                                     "disapproved": 80}
@@ -185,7 +190,8 @@ class TestDeveloperRegistration:
             client.register_gcp(config, "111")
 
         assert captured["method"] == "POST"
-        assert captured["url"].endswith(
+        assert captured["url"] == (
+            "https://merchantapi.googleapis.com/accounts/v1/"
             "accounts/111/developerRegistration:registerGcp"
         )
 
@@ -206,7 +212,7 @@ class TestDeveloperRegistration:
 
         state = {"calls": 0}
 
-        def fake_get(c, path, params=None):
+        def fake_get(c, path, params=None, *, api=client.API_ACCOUNTS):
             state["calls"] += 1
             if state["calls"] == 1:
                 raise MerchantNotRegistered(self._GOOGLE_MESSAGE)
@@ -251,3 +257,114 @@ class TestDeveloperRegistration:
         assert result["registration_required"] is True
         assert "403" in result["error"]
         assert "Admin access" in result["hint"]
+
+
+class TestSubApiRouting:
+    """The Merchant API is split into independently versioned sub-APIs and
+    the sub-API is part of the URL. Every other test mocks merchant_get, so
+    nothing exercised the URL the client actually builds — which is how
+    aggregateProductStatuses shipped pointed at accounts/v1, where it
+    answers 404 with an empty error message. Verified against the live
+    Discovery documents (accounts_v1, issueresolution_v1; rev 20260903).
+    """
+
+    def _capture(self):
+        captured = {}
+
+        class _FakeResponse:
+            status_code = 200
+
+            def json(self):
+                return {}
+
+        class _FakeSession:
+            def __init__(self, *_): ...
+
+            def request(self, method, url, **kwargs):
+                captured["url"] = url
+                return _FakeResponse()
+
+        return captured, patch(
+            "google.auth.transport.requests.AuthorizedSession", _FakeSession
+        ), patch("adloop.auth.get_merchant_credentials", return_value=object())
+
+    def test_accounts_calls_go_to_the_accounts_sub_api(self, config):
+        captured, session, creds = self._capture()
+        with session, creds:
+            client.merchant_get(config, "accounts")
+            assert captured["url"] == (
+                "https://merchantapi.googleapis.com/accounts/v1/accounts"
+            )
+
+            client.merchant_get(config, "accounts/111/issues")
+            assert captured["url"] == (
+                "https://merchantapi.googleapis.com/accounts/v1/"
+                "accounts/111/issues"
+            )
+
+    def test_aggregate_product_statuses_goes_to_issue_resolution(self, config):
+        captured, session, creds = self._capture()
+        with session, creds:
+            client.merchant_get(
+                config,
+                "accounts/111/aggregateProductStatuses",
+                api=client.API_ISSUE_RESOLUTION,
+            )
+
+        assert captured["url"] == (
+            "https://merchantapi.googleapis.com/issueresolution/v1/"
+            "accounts/111/aggregateProductStatuses"
+        )
+
+    def test_feed_health_builds_both_real_urls(self, config):
+        """End to end through the tool, with only the transport faked."""
+        urls: list[str] = []
+
+        class _FakeResponse:
+            status_code = 200
+
+            def json(self):
+                return {}
+
+        class _FakeSession:
+            def __init__(self, *_): ...
+
+            def request(self, method, url, **kwargs):
+                urls.append(url)
+                return _FakeResponse()
+
+        with patch("google.auth.transport.requests.AuthorizedSession",
+                   _FakeSession), \
+             patch("adloop.auth.get_merchant_credentials",
+                   return_value=object()):
+            read.get_merchant_feed_health(config, account_id="111")
+
+        assert urls == [
+            "https://merchantapi.googleapis.com/issueresolution/v1/"
+            "accounts/111/aggregateProductStatuses",
+            "https://merchantapi.googleapis.com/accounts/v1/"
+            "accounts/111/issues",
+        ]
+
+    def test_non_200_names_the_url_that_failed(self, config):
+        """A bare 'returned 404:' with no message is what made this bug
+        opaque in production; the URL has to be in the error."""
+
+        class _FakeResponse:
+            status_code = 404
+
+            def json(self):
+                return {}
+
+        class _FakeSession:
+            def __init__(self, *_): ...
+
+            def request(self, *args, **kwargs):
+                return _FakeResponse()
+
+        with patch("google.auth.transport.requests.AuthorizedSession",
+                   _FakeSession), \
+             patch("adloop.auth.get_merchant_credentials",
+                   return_value=object()):
+            with pytest.raises(RuntimeError, match=r"404 for .*/accounts/v1/accounts/111/issues"):
+                client.merchant_get(config, "accounts/111/issues")
