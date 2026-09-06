@@ -1,3 +1,5 @@
+<!-- mcp-name: com.getadloop/adloop -->
+
 <div align="center">
 
 # AdLoop
