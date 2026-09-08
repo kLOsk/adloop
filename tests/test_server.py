@@ -313,6 +313,45 @@ class TestNoStaleModuleConfig:
             runtime.set_default_config(None)
             preview_store.set_plan_store(InMemoryPlanStore())
 
+    @pytest.mark.asyncio
+    async def test_update_responsive_search_ad_tool_resolves_runtime_config(self):
+        from adloop import runtime
+        from adloop.config import AdLoopConfig, AdsConfig, SafetyConfig
+        from adloop.safety import preview as preview_store
+        from adloop.safety.preview import InMemoryPlanStore
+        from adloop.server import mcp
+
+        preview_store.set_plan_store(InMemoryPlanStore())
+        runtime.set_default_config(
+            AdLoopConfig(
+                ads=AdsConfig(customer_id="123-456-7890"),
+                safety=SafetyConfig(require_dry_run=True),
+            )
+        )
+        try:
+            tool = await mcp.get_tool("update_responsive_search_ad")
+            # A path-only edit avoids URL reachability checks and the
+            # learning-reset warning — keeps the call-through hermetic.
+            result = tool.fn(ad_id="999", path1="Pricing")
+            assert "error" not in result, result.get("error")
+            assert result["operation"] == "update_responsive_search_ad"
+            assert result["plan_id"]
+            # headlines/descriptions accept both plain strings and pinned dicts
+            # via the _StrOrDictListOpt coercion alias.
+            result2 = tool.fn(
+                ad_id="1000",
+                headlines=[
+                    "Fast Free Shipping",
+                    {"text": "Shop the Sale", "pinned_field": "HEADLINE_1"},
+                    "Save 20% Now",
+                ],
+            )
+            assert "error" not in result2, result2.get("error")
+            assert result2.get("warnings"), "text replace must warn"
+        finally:
+            runtime.set_default_config(None)
+            preview_store.set_plan_store(InMemoryPlanStore())
+
 
 class TestToolsets:
     """ADLOOP_TOOLSETS taxonomy + filtering (shared contract with AdLoop Cloud)."""
