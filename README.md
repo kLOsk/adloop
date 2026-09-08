@@ -16,12 +16,12 @@
 
 An MCP server that gives your AI assistant read + write access to Google Ads and GA4 — with safety guardrails that prevent accidental spend.
 
-**[☁️ Skip the setup — use AdLoop Cloud (free beta)](https://getadloop.com)** &nbsp;·&nbsp; or self-host: `pip install adloop`
+**[☁️ Skip the setup — use AdLoop Cloud (free plan, no card)](https://getadloop.com)** &nbsp;·&nbsp; or self-host: `pip install adloop`
 
 </div>
 
 > [!TIP]
-> **[AdLoop Cloud](https://getadloop.com) is the hosted version of this project, live now and free during beta.** Connect Google in two clicks and use the full toolset from claude.ai, ChatGPT, Claude Code, Cursor, or Gemini. No Google Cloud project, no developer token, no OAuth verification wait. EU-hosted, GDPR-first, DPA included.
+> **[AdLoop Cloud](https://getadloop.com) is the hosted version of this project, with a free plan that needs no credit card.** Connect Google in two clicks and use the full toolset from claude.ai, ChatGPT, Claude Code, Cursor, or Gemini. No Google Cloud project, no developer token, no OAuth verification wait. EU-hosted, GDPR-first, DPA included.
 
 > 📚 **Documentation: [docs.getadloop.com](https://docs.getadloop.com)** — setup guides per AI client, toolsets, the safety model, and troubleshooting for both editions.
 
@@ -39,7 +39,7 @@ Both versions run the same tools with the same safety model. The difference is w
 | **Works with** | claude.ai, ChatGPT, Claude Code, Cursor, Gemini | Claude Code, Cursor, Claude Desktop, any local MCP client |
 | **Where your data flows** | EU servers (Germany), GDPR-first, DPA included | 100% your machine — nothing leaves it |
 | **Updates** | Automatic | `pip install -U adloop` |
-| **Price** | Free during beta | Free forever (MIT) |
+| **Price** | Free plan, no card; [paid plans](https://getadloop.com/preise) for more accounts and volume | Free forever (MIT) |
 
 **Not sure? [Start with Cloud](https://getadloop.com)** — it's the fastest way to see what AdLoop can do, and it's the only way to use AdLoop from claude.ai or ChatGPT. Self-host when you want everything on your own machine or need to modify the code. And if you're here to hack on AdLoop itself: welcome, keep scrolling.
 
@@ -493,7 +493,7 @@ What's been shipped and what's next:
 - ~~Claude Code support~~ ✓ — `CLAUDE.md`, `.mcp.json`, `.claude/rules/`, `.claude/commands/`, CLI wizard snippets
 - **Claude Desktop one-click install** — `adloop install claude-desktop` (and/or a `.dxt` extension bundle) that writes the AdLoop MCP entry into `claude_desktop_config.json` automatically, so Claude Desktop + Cowork users don't have to hand-edit JSON
 - ~~PyPI package~~ ✓ — `pip install adloop`
-- ~~[AdLoop Cloud](https://getadloop.com)~~ ✓ — the hosted version, live in beta: no Google Cloud project, no developer token, connect Google in two clicks (EU-hosted, GDPR-first)
+- ~~[AdLoop Cloud](https://getadloop.com)~~ ✓ — the hosted version: no Google Cloud project, no developer token, connect Google in two clicks (EU-hosted, GDPR-first)
 - ~~Headless server support~~ ✓ — manual URL copy-paste flow for servers without a browser
 - ~~Behavioral eval suites~~ ✓ — 28 prompt-and-expectation tests covering read, write, tracking, and planning workflows
 - ~~Google Tag Manager integration~~ ✓ — read tools for tags, triggers, variables, workspaces, and version history, plus the `audit_event_coverage` three-way join across codebase events, GTM tags, and GA4 actual fires
