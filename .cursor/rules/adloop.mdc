@@ -658,16 +658,29 @@ For cities/regions, use `run_gaql` with `geo_target_constant` resource or look u
 
 ### Common Language IDs (languageConstants)
 
-| ID | Language |
-|----|----------|
-| 1000 | English |
-| 1001 | German |
-| 1002 | French |
-| 1003 | Italian |
-| 1004 | Spanish |
-| 1005 | Dutch |
-| 1009 | Portuguese |
-| 1014 | Polish |
+Verified against the `language_constant` resource. Google accepts a wrong
+language ID silently, so confirm anything not listed here with:
+`SELECT language_constant.id, language_constant.code, language_constant.name FROM language_constant`
+
+| ID | Code | Language |
+|----|------|----------|
+| 1000 | en | English |
+| 1001 | de | German |
+| 1002 | fr | French |
+| 1003 | es | Spanish |
+| 1004 | it | Italian |
+| 1005 | ja | Japanese |
+| 1009 | da | Danish |
+| 1010 | nl | Dutch |
+| 1011 | fi | Finnish |
+| 1014 | pt | Portuguese |
+| 1015 | sv | Swedish |
+| 1017 | zh_CN | Chinese (simplified) |
+| 1019 | ar | Arabic |
+| 1021 | cs | Czech |
+| 1030 | pl | Polish |
+| 1031 | ru | Russian |
+| 1037 | tr | Turkish |
 
 ## Marketing Best Practices
 

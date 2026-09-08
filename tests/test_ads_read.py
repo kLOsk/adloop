@@ -171,6 +171,33 @@ class TestKeywordPerformanceCompact:
 
         assert result["low_quality_score"] == []
 
+    def test_compact_treats_zero_quality_score_as_unrated(
+        self, config, monkeypatch
+    ):
+        # Google never assigns a real score of 0; 0 and null both mean "too
+        # few impressions to rate". Counting them as "< 5" reported a normal
+        # unrated long tail as an account-wide relevance crisis (issue #62).
+        _patch_rows(monkeypatch, [
+            {
+                "ad_group_criterion.keyword.text": f"kw{i}",
+                "ad_group_criterion.keyword.match_type": "EXACT",
+                "ad_group_criterion.quality_info.quality_score": score,
+                "metrics.cost_micros": 1_000_000,
+                "metrics.conversions": 1,
+            }
+            for i, score in enumerate([0, 0, None, 3, 7])
+        ])
+
+        result = read.get_keyword_performance(
+            config, customer_id="123", compact=True
+        )
+
+        # Only the genuine 3 counts as low quality.
+        assert len(result["low_quality_score"]) == 1
+        assert result["low_quality_score"][0]["quality_score"] == 3
+        assert result["unrated_quality_score"] == 3
+        assert any("no quality score yet" in i for i in result["insights"])
+
 
 class TestSearchTermsCompact:
     def test_compact_ranks_waste_by_cost_and_converters_by_conversions(
@@ -252,3 +279,45 @@ class TestAdPerformanceCompact:
         assert single == ["AG g2"]
         assert any("below best practice" in i for i in result["insights"])
         assert any("one enabled ad" in i for i in result["insights"])
+
+
+class TestCompactTotalsDisclosure:
+    def test_search_term_totals_declare_themselves_partial_at_the_limit(
+        self, config, monkeypatch
+    ):
+        # The query behind search terms is LIMIT 200, so totals over the rows
+        # returned are not account totals. Labelling them "totals" without
+        # saying so silently under-reports cost and conversions (issue #64).
+        _patch_rows(monkeypatch, [
+            {
+                "search_term_view.search_term": f"term {i}",
+                "campaign.name": "C",
+                "metrics.clicks": 1,
+                "metrics.cost_micros": 1_000_000,
+                "metrics.conversions": 0,
+                "metrics.impressions": 10,
+            }
+            for i in range(200)
+        ])
+
+        result = read.get_search_terms(config, customer_id="123", compact=True)
+
+        assert result["totals"]["partial"] is True
+        assert result["totals"]["rows_counted"] == 200
+        assert "not the whole account" in result["totals"]["partial_reason"]
+
+    def test_totals_below_the_limit_are_not_flagged(self, config, monkeypatch):
+        _patch_rows(monkeypatch, [
+            {
+                "search_term_view.search_term": "term",
+                "campaign.name": "C",
+                "metrics.clicks": 1,
+                "metrics.cost_micros": 1_000_000,
+                "metrics.conversions": 0,
+                "metrics.impressions": 10,
+            }
+        ])
+
+        result = read.get_search_terms(config, customer_id="123", compact=True)
+
+        assert "partial" not in result["totals"]

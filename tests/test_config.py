@@ -53,3 +53,45 @@ class TestLoadConfig:
         monkeypatch.setenv("ADLOOP_CONFIG", str(tmp_path / "from-env.yaml"))
         config = load_config()
         assert config.source_path == str(tmp_path / "from-env.yaml")
+
+
+class TestBlankValuesFallBackToDefaults:
+    """An explicit empty value must mean "unset", not "use empty" (issue #65)."""
+
+    def _write(self, tmp_path, body):
+        path = tmp_path / "config.yaml"
+        path.write_text(body)
+        return path
+
+    def test_blank_token_path_uses_the_default(self, tmp_path):
+        from adloop.config import load_config
+
+        # Path("") is Path("."), the cwd always exists, so adloop read the
+        # working directory as a token file and died with a message that
+        # pointed nowhere near the config.
+        path = self._write(tmp_path, 'google:\n  token_path: ""\n')
+        assert load_config(str(path)).google.token_path == "~/.adloop/token.json"
+
+    def test_whitespace_only_token_path_uses_the_default(self, tmp_path):
+        from adloop.config import load_config
+
+        path = self._write(tmp_path, 'google:\n  token_path: "   "\n')
+        assert load_config(str(path)).google.token_path == "~/.adloop/token.json"
+
+    def test_blank_log_file_uses_the_default(self, tmp_path):
+        from adloop.config import load_config
+
+        path = self._write(tmp_path, 'safety:\n  log_file: ""\n')
+        assert load_config(str(path)).safety.log_file == "~/.adloop/audit.log"
+
+    def test_a_real_value_still_wins(self, tmp_path):
+        from adloop.config import load_config
+
+        path = self._write(tmp_path, 'google:\n  token_path: "/tmp/t.json"\n')
+        assert load_config(str(path)).google.token_path == "/tmp/t.json"
+
+    def test_numeric_customer_id_arrives_as_text(self, tmp_path):
+        from adloop.config import load_config
+
+        path = self._write(tmp_path, "ads:\n  customer_id: 1234567890\n")
+        assert load_config(str(path)).ads.customer_id == "1234567890"

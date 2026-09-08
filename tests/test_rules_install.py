@@ -444,3 +444,39 @@ class TestEdgeCases:
         results = rules_install.install_rules(home=tmp_path, install_commands=False)
         # No detected clients -> no results.
         assert results == [] or all(r.action == "manual" for r in results)
+
+
+class TestShippedLanguageTable:
+    """The language table ships into the assistant's context, and Google
+    accepts a wrong language constant silently (issue #59)."""
+
+    PATHS = [
+        "src/adloop/rules/adloop.md",
+        ".claude/rules/adloop.md",
+        ".cursor/rules/adloop.mdc",
+    ]
+
+    def _table(self, path):
+        from pathlib import Path
+
+        lines = Path(path).read_text().splitlines()
+        start = next(i for i, l in enumerate(lines) if "Common Language IDs" in l)
+        return [
+            l.strip() for l in lines[start:start + 40]
+            if l.strip().startswith("| 1")
+        ]
+
+    def test_the_three_copies_carry_the_same_table(self):
+        tables = [self._table(p) for p in self.PATHS]
+        assert tables[0] == tables[1] == tables[2]
+        assert tables[0], "no language rows found"
+
+    def test_the_transposed_pair_stays_corrected(self):
+        # 1003/1004 were swapped, and Italian vs Spanish is the pair most
+        # likely to be reintroduced by someone "fixing" the order.
+        table = "\n".join(self._table(self.PATHS[0]))
+        assert "| 1003 | es | Spanish |" in table
+        assert "| 1004 | it | Italian |" in table
+        assert "| 1005 | ja | Japanese |" in table
+        assert "| 1009 | da | Danish |" in table
+        assert "| 1014 | pt | Portuguese |" in table

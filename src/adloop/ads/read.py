@@ -278,10 +278,24 @@ def get_keyword_performance(
         return {"keywords": rows, "total_keywords": len(rows)}
 
     qs_field = "ad_group_criterion.quality_info.quality_score"
+
+    def _rated_score(r: dict) -> int | None:
+        """The Quality Score, or None when Google has not assigned one.
+
+        Google never issues a real score of 0: both null and 0 mean "not
+        enough impressions to rate". Counting those as "< 5" reports an
+        ordinary unrated long tail as an account-wide relevance problem and
+        sends the assistant off fixing ads and landing pages that are fine.
+        """
+        score = r.get(qs_field)
+
+        return score if isinstance(score, int) and score > 0 else None
+
     low_quality = [
         r for r in rows
-        if r.get(qs_field) is not None and (r.get(qs_field) or 0) < 5
+        if (score := _rated_score(r)) is not None and score < 5
     ]
+    unrated_count = sum(1 for r in rows if _rated_score(r) is None)
     zero_conv_spenders = [
         r for r in rows
         if (r.get("metrics.cost_micros") or 0) > 0
@@ -304,6 +318,11 @@ def get_keyword_performance(
             f"{len(low_quality)} keyword(s) have quality score < 5 — fix ad "
             f"relevance and landing pages before adding keywords or budget."
         )
+    if unrated_count:
+        insights.append(
+            f"{unrated_count} keyword(s) have no quality score yet (too few "
+            f"impressions to rate). They are excluded from the count above."
+        )
     if zero_conv_spenders:
         wasted = round(
             sum((r.get("metrics.cost_micros") or 0) for r in zero_conv_spenders)
@@ -325,6 +344,7 @@ def get_keyword_performance(
         ),
         "keywords_top_spend": top,
         "low_quality_score": [_kw(r) for r in low_quality[:10]],
+        "unrated_quality_score": unrated_count,
         "zero_conversion_spenders": [_kw(r) for r in zero_conv_spenders[:10]],
         "insights": insights,
         "note": _compact_note(len(top), len(rows), "get_keyword_performance"),
@@ -430,7 +450,7 @@ def get_search_terms(
     return {
         "compact": True,
         "total_search_terms": len(rows),
-        "totals": _compact_totals(rows, currency_code),
+        "totals": _compact_totals(rows, currency_code, row_limit=200),
         "search_terms_top_clicks": top,
         "waste_candidates": [_term(r) for r in waste[:10]],
         "top_converters": [_term(r) for r in converters[:5]],
@@ -923,8 +943,15 @@ def _date_clause(start: str, end: str) -> str:
     return "AND segments.date DURING LAST_30_DAYS"
 
 
-def _compact_totals(rows: list[dict], currency_code: str) -> dict:
-    """Deterministic account-level aggregates over enriched metric rows."""
+def _compact_totals(
+    rows: list[dict], currency_code: str, *, row_limit: int | None = None
+) -> dict:
+    """Deterministic aggregates over the rows given.
+
+    Not account-level whenever the query behind them carries a LIMIT: pass
+    ``row_limit`` for those reports so a truncated total is marked partial
+    instead of being read as the account's real cost and conversions.
+    """
     cost = sum((r.get("metrics.cost_micros") or 0) for r in rows) / 1_000_000
     clicks = sum((r.get("metrics.clicks") or 0) for r in rows)
     impressions = sum((r.get("metrics.impressions") or 0) for r in rows)
@@ -940,6 +967,21 @@ def _compact_totals(rows: list[dict], currency_code: str) -> dict:
         totals["cpa"] = round(cost / conversions, 2)
     if impressions > 0:
         totals["ctr_pct"] = round(clicks / impressions * 100, 2)
+
+    # Hitting the ceiling exactly is indistinguishable from stopping there, so
+    # this errs toward declaring partial. Silently under-reporting cost is the
+    # worse failure: these numbers are labelled "totals" and get compared
+    # against campaign-level truth.
+    if row_limit is not None and len(rows) >= row_limit:
+        totals["partial"] = True
+        totals["rows_counted"] = len(rows)
+        totals["partial_reason"] = (
+            f"The underlying query returns at most {row_limit} rows, ranked by "
+            f"the report's sort metric, and this account reached that ceiling. "
+            f"These totals cover those rows only, not the whole account. Use "
+            f"get_campaign_performance for account-level figures."
+        )
+
     return totals
 
 
