@@ -360,7 +360,7 @@ class TestToolsets:
         from adloop.server import TOOLSETS
 
         assert list(TOOLSETS) == [
-            "ads", "ga4", "tracking", "gtm", "gsc", "web", "merchant",
+            "ads", "ga4", "tracking", "gtm", "gsc", "web", "merchant", "reddit",
         ]
 
     @pytest.mark.asyncio

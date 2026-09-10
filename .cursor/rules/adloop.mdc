@@ -1,12 +1,12 @@
 ---
-description: AdLoop MCP orchestration — Google Ads + GA4 + codebase intelligence
+description: AdLoop MCP orchestration — Google Ads + Reddit Ads + GA4 + codebase intelligence
 globs:
 alwaysApply: true
 ---
 
 # AdLoop — AI Orchestration Rules
 
-You have access to AdLoop MCP tools that connect Google Ads and Google Analytics (GA4) data. These rules teach you how to use them intelligently.
+You have access to AdLoop MCP tools that connect Google Ads, Reddit Ads and Google Analytics (GA4) data. These rules teach you how to use them intelligently.
 
 ## Tool Inventory
 
@@ -14,9 +14,9 @@ You have access to AdLoop MCP tools that connect Google Ads and Google Analytics
 
 | Tool | When to Use | Key Parameters |
 |------|-------------|----------------|
-| `health_check` | First thing to run when tools are failing — tests OAuth token, GA4, and Ads connectivity | (none) |
+| `health_check` | First thing to run when tools are failing — tests OAuth token, GA4, Ads, and (when configured) Reddit Ads connectivity | (none) |
 
-**If health_check reports auth errors:** Tell the user to delete `~/.adloop/token.json` and re-run any tool to trigger re-authorization. If tokens keep expiring weekly, the GCP consent screen needs to be published from "Testing" to "In production".
+**If health_check reports Google auth errors:** Tell the user to delete `~/.adloop/token.json` and re-run any tool to trigger re-authorization. If tokens keep expiring weekly, the GCP consent screen needs to be published from "Testing" to "In production". **Reddit auth errors** (`REDDIT_INVALID_GRANT`, `REDDIT_NOT_CONNECTED`) are fixed by re-running the Reddit step of `adloop init` (self-hosted) or reconnecting under Settings → Reddit Ads (AdLoop Cloud); the Google token is unrelated.
 
 ### GA4 Read Tools
 
@@ -124,6 +124,36 @@ These tools call both APIs internally and return unified results with computed `
 - The Merchant API has no read-only scope; AdLoop's merchant tools are read-only by design — never propose feed edits through these tools. Product-status data lags ~30 minutes — say so when the user just changed the feed.
 - Item issues come ranked by affected products and include Google's resolution documentation links — surface the top 3 with their doc links.
 
+### Reddit Ads Read Tools
+
+Reddit is a second ad platform with its own connection (own OAuth app, no developer token, no approval process). Every Reddit tool takes `ad_account_id` (falls back to `reddit.ad_account_id` in the config). The hierarchy is business → ad account → campaign → ad group → ad (post). There are no keywords-with-quality-scores and no match types: targeting is communities (subreddits), interests, keywords, geolocations, languages, gender, platforms. Money is returned in account currency (Reddit's microcurrency already divided).
+
+| Tool | When to Use | Key Parameters |
+|------|-------------|----------------|
+| `list_reddit_accounts` | First-time discovery — businesses and ad accounts (currency, time zone, approval state) | (none) |
+| `list_reddit_funding_instruments` | Before creating a campaign or ad — billing instruments (need `is_servable`) and posting profiles | `ad_account_id` |
+| `get_reddit_campaigns` | Campaign inventory — configured vs effective status, objective, CBO flag, budget/bid | `ad_account_id`, `include_archived` |
+| `get_reddit_ad_groups` | Budgets, bids, pixel, targeting per ad group | `ad_account_id`, `campaign_id` (optional) |
+| `get_reddit_ads` | Ads with `rejection_reason`, post URL, click URL | `ad_account_id`, `ad_group_id` / `campaign_id` (optional) |
+| `get_reddit_performance` | Any Reddit performance question — spend, clicks, CTR, CPC, conversions, CPA, ROAS with names joined and `insights[]` | `level` (account/campaign/ad_group/ad), `date_range_start`, `date_range_end`, `breakdown` (date/hour/country/region/community/keyword/interest/placement/gender/os_type), `compact` |
+| `run_reddit_report` | Metrics the curated tool omits (REACH, video metrics, per-event conversions) | `fields`, `breakdowns` (≤3), `filter`, date range |
+| `get_reddit_pixels` | Before any conversion-optimized work — pixels and when each event last fired; flags ad groups optimizing for an event the pixel never sent | `ad_account_id` |
+| `search_reddit_targeting` | Look up ids/names for ad-group targeting | `kind` (communities/interests/geolocations/languages/keywords), `query`, `country` |
+
+- **Status has two layers.** `configured_status` is what the advertiser set (ACTIVE/PAUSED/ARCHIVED); `effective_status` is what Reddit computes (`PENDING_APPROVAL`, `REJECTED`, `PENDING_BILLING_INFO`, `PENDING_ID_VERIFICATION`, `CAMPAIGN_PAUSED`, ...). An ACTIVE entity that is REJECTED or blocked by billing does not serve; report the effective status and its cause, not the configured one.
+- **Budgets live on ad groups** unless the campaign has `is_campaign_budget_optimization: true` (then on the campaign). `goal_type` DAILY_SPEND vs LIFETIME_SPEND cannot change after publishing.
+- **Report data lags up to 6 hours** and a window ending today may be empty or partial. Use `compact=true` for account audits.
+- `conversions` in `get_reddit_performance` is the account's *key conversion event*; use `run_reddit_report` with `CONVERSION_PURCHASE_*` / `CONVERSION_SIGN_UP_*` fields for per-event numbers.
+- **Rate limits are per Reddit user** (reporting 60 requests/min). A `REDDIT_RATE_LIMITED` error carries `reset_seconds`: wait, tell the user, never retry in a loop.
+
+### When user asks about Reddit performance or "how are my Reddit ads doing"
+
+1. Call `get_reddit_performance` (level `campaign`, `compact=true` for an overview); drill into `ad_group` / `ad` for the top spenders
+2. Read `insights[]`: zero-conversion spenders, rejected ads, empty windows
+3. If conversions are zero or implausibly low, call `get_reddit_pixels` BEFORE blaming targeting: a pixel that never fired the optimization event explains most "Reddit doesn't convert" cases
+4. Cross-check `get_reddit_ads` for `REJECTED` ads (`rejection_reason`) and `PENDING_APPROVAL` — they explain missing spend
+5. Present spend, clicks, CTR, CPC, conversions, CPA in account currency; compare against Google Ads only on CPA/ROAS, never on CTR (feed placements behave differently from search)
+
 ### When user asks about organic traffic, SEO, or paid/organic overlap
 
 1. Call `list_gsc_sites` if no site is configured; confirm the property with the user
@@ -177,6 +207,20 @@ These tools call both APIs internally and return unified results with computed `
 | `remove_entity` | Propose REMOVING an entity (irreversible) | `entity_type` (incl. "negative_keyword", "shared_criterion", "ad_group_criterion", "campaign_criterion", "campaign_asset", "asset", "customer_asset"), `entity_id` |
 | `confirm_and_apply` | Execute a previously previewed change | `plan_id` from a draft tool, `dry_run` (default true) |
 
+### Reddit Ads Write Tools (ALL require safety confirmation)
+
+Same draft → preview → `confirm_and_apply` gate; the plan carries `platform: "reddit"` and `confirm_and_apply` routes it to Reddit. New campaigns, ad groups and ads are created **PAUSED**. Reddit has no validate-only mode, so `dry_run=true` re-reads the target entity and re-checks the safety caps (`checks` in the response); `DRY_RUN_FAILED` means the real apply would fail too.
+
+| Tool | What It Does | Validation |
+|------|-------------|------------|
+| `pause_reddit_entity` / `enable_reddit_entity` | Set `configured_status` PAUSED / ACTIVE on a campaign, ad group or ad | `entity_type` (campaign/ad_group/ad), `entity_id`; enabling a new ad triggers policy review |
+| `remove_reddit_entity` | ARCHIVE (irreversible — Reddit has no hard delete for entities that ran) | double confirmation; prefer pausing |
+| `update_reddit_campaign` | Name, schedule, `spend_cap`; budget/bid only on CBO campaigns | `daily_budget` or `lifetime_budget` (+ `end_time`) checked against `max_daily_budget`; preview shows old → new |
+| `update_reddit_ad_group` | Budget, bid, schedule, targeting | `daily_budget` vs cap, `bid_value` vs `max_bid_increase_pct`; targeting lists REPLACE the keys you pass (pass full lists), other keys stay |
+| `draft_reddit_campaign` | Create a campaign (PAUSED) | `campaign_name`, `objective` (CLICKS, CONVERSIONS, IMPRESSIONS, LEAD_GENERATION, APP_INSTALLS, CATALOG_SALES, VIDEO_VIEWABLE_IMPRESSIONS), `funding_instrument_id` (from `list_reddit_funding_instruments`); `campaign_budget_optimization=true` needs budget + `bid_strategy` + `bid_type` + `conversion_pixel_id` |
+| `draft_reddit_ad_group` | Create an ad group (PAUSED) | `campaign_id`, `ad_group_name`, `conversion_pixel_id` (REQUIRED by Reddit; from `get_reddit_pixels`), at least one targeting list (geolocations/communities/interests/keywords), and for non-CBO campaigns `daily_budget` (or `lifetime_budget` + `end_time`), `bid_strategy` (BIDLESS, MANUAL_BIDDING, MAXIMIZE_VOLUME, TARGET_CPX), `bid_type` (CPC, CPM, CPV…); `optimization_goal` is the pixel event (PURCHASE, SIGN_UP, LEAD, PAGE_VISIT, …) |
+| `draft_reddit_ad` | Create a post on the profile, then the ad (PAUSED) | `ad_group_id`, `profile_id` (from `list_reddit_funding_instruments`), `headline`, `click_url` (verified reachable), `post_type` TEXT or IMAGE (+ public `image_url`), `call_to_action` (Reddit's fixed labels: Learn More, Sign Up, Shop Now, Download, …), `allow_comments` |
+
 **Write tool workflow:**
 1. Call a `draft_*` tool → returns a preview with a `plan_id`
 2. Show the full preview to the user and wait for approval
@@ -184,7 +228,7 @@ These tools call both APIs internally and return unified results with computed `
 4. Only call with `dry_run=false` after explicit user confirmation
 
 **Safety behaviors:**
-- New campaigns and RSAs are created as PAUSED — user must explicitly enable them after review.
+- New campaigns and RSAs (and every Reddit campaign, ad group and ad) are created as PAUSED — user must explicitly enable them after review.
 - `draft_campaign` REQUIRES `geo_target_ids` and `language_ids` — campaigns without targeting waste budget. The tool rejects drafts with missing targeting.
 - `draft_campaign` enforces the `max_daily_budget` safety cap, rejects BROAD match + non-Smart Bidding, warns if budget is below 5x target CPA, and interprets `max_cpc` by bidding strategy: MANUAL_CPC seeds the initial ad-group bid, TARGET_SPEND sets the Maximize Clicks CPC ceiling.
 - `display_network_enabled` is the canonical Search display-expansion flag. `display_expansion_enabled` is only a compatibility alias and should be normalized away before presenting the plan to the user.
@@ -386,10 +430,23 @@ Most websites (especially in the EU) use a GDPR cookie consent banner. This has 
    - Use `draft_keywords` to add them to an existing ad group
    - Use `draft_campaign` to build a new campaign around them
 
+### When user wants a Reddit campaign (or ad group / ad)
+
+Reddit's structure is campaign → ad group (budget, bid, pixel, targeting) → ad (a post). Build it in that order, one PAUSED entity at a time, each through preview → approval → `confirm_and_apply`.
+
+1. `get_reddit_campaigns` to avoid duplicate names and to learn the account's currency; `list_reddit_funding_instruments` for a servable `funding_instrument_id` and the posting `profile_id`
+2. **Pixel first.** `get_reddit_pixels`: every ad group needs a `conversion_pixel_id`, and a CONVERSIONS objective is pointless if the optimization event never fired. If the account has no pixel, stop and tell the user to create one in Reddit Events Manager
+3. **Targeting.** Ask which countries (and languages) to target if not stated; find ids/names with `search_reddit_targeting` (`geolocations` with `country`, `communities` by query, `interests`, `keywords`). Never draft an untargeted ad group; warn when a geo-targeted ad group has no language list
+4. `draft_reddit_campaign` (objective, funding instrument; leave the budget off unless the user wants campaign budget optimization) → approve → apply
+5. `draft_reddit_ad_group` with `daily_budget` ≤ `max_daily_budget`, `bid_strategy` (MAXIMIZE_VOLUME is the sane default; MANUAL_BIDDING/TARGET_CPX need `bid_value`), `bid_type` (CPC for traffic and conversions), `conversion_pixel_id`, `optimization_goal` matching the pixel event, targeting → approve → apply
+6. `draft_reddit_ad`: verify `click_url` exists (route definition or live page), write a headline in the landing page's language (Reddit titles read like posts, not like search ads — no ALL CAPS, no exclamation stacking), pick a `call_to_action` from Reddit's list, decide `allow_comments` with the user (comments are public and need moderation) → approve → apply
+7. Enable in reverse order once everything exists: ad (`enable_reddit_entity`, triggers policy review; expect `PENDING_APPROVAL` for up to 24h), then ad group, then campaign
+8. After 24h check `get_reddit_ads` for `REJECTED` + `rejection_reason` before touching budgets
+
 ### When user asks to pause or enable something
 
 1. Call the appropriate read tool to confirm the entity exists and get its current status
-2. Call `pause_entity` or `enable_entity` with the entity type and ID
+2. Call `pause_entity` or `enable_entity` (Google) or `pause_reddit_entity` / `enable_reddit_entity` (Reddit) with the entity type and ID
 3. Present the preview with a clear warning about impact (e.g. "This will stop all ads in this campaign")
 4. Wait for confirmation
 

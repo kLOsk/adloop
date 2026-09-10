@@ -49,6 +49,22 @@ class PageSpeedConfig:
 
 
 @dataclass
+class RedditConfig:
+    """Reddit Ads: own OAuth app (Reddit Business Manager → Developer
+    Application), own token file. ``ad_account_id`` is the default account
+    for every Reddit tool; ``username`` only feeds the User-Agent Reddit
+    asks for (``platform:app:version (by /u/name)``)."""
+
+    client_id: str = ""
+    client_secret: str = ""
+    ad_account_id: str = ""
+    business_id: str = ""
+    username: str = ""
+    user_agent: str = ""  # empty = built from client_id + username
+    token_path: str = "~/.adloop/reddit_token.json"
+
+
+@dataclass
 class SafetyConfig:
     max_daily_budget: float = 50.0
     max_bid_increase_pct: int = 100
@@ -70,6 +86,7 @@ class AdLoopConfig:
     gsc: GscConfig = field(default_factory=GscConfig)
     gtm: GtmConfig = field(default_factory=GtmConfig)
     pagespeed: PageSpeedConfig = field(default_factory=PageSpeedConfig)
+    reddit: RedditConfig = field(default_factory=RedditConfig)
     safety: SafetyConfig = field(default_factory=SafetyConfig)
     # Absolute path the config was resolved from (even if it did not exist
     # on disk when loaded). Used by the runtime to tell callers exactly
@@ -128,6 +145,7 @@ def load_config(config_path: str | None = None) -> AdLoopConfig:
     gsc_raw = raw.get("gsc", {})
     gtm_raw = raw.get("gtm", {})
     pagespeed_raw = raw.get("pagespeed", {})
+    reddit_raw = raw.get("reddit", {}) or {}
     safety_raw = raw.get("safety", {})
 
     return AdLoopConfig(
@@ -153,6 +171,15 @@ def load_config(config_path: str | None = None) -> AdLoopConfig:
         ),
         pagespeed=PageSpeedConfig(
             api_key=_text(pagespeed_raw, "api_key"),
+        ),
+        reddit=RedditConfig(
+            client_id=_text(reddit_raw, "client_id"),
+            client_secret=_text(reddit_raw, "client_secret"),
+            ad_account_id=_text(reddit_raw, "ad_account_id"),
+            business_id=_text(reddit_raw, "business_id"),
+            username=_text(reddit_raw, "username"),
+            user_agent=_text(reddit_raw, "user_agent"),
+            token_path=_text(reddit_raw, "token_path", "~/.adloop/reddit_token.json"),
         ),
         safety=SafetyConfig(
             max_daily_budget=safety_raw.get("max_daily_budget", 50.0),

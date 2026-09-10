@@ -60,6 +60,24 @@ pagespeed:
   # for a stable quota. No OAuth involved.
   api_key: ""
 
+reddit:
+  # Reddit Ads (optional). Reddit is a separate OAuth provider with its own
+  # developer app: Reddit Ads Manager -> Business Manager -> Developer
+  # Application -> Create app. Register the redirect URL exactly as
+  # http://localhost:8765/callback, then run `adloop init` and complete the
+  # Reddit Ads step; it writes the token file below. No approval process,
+  # no developer token. Rate limits are per Reddit user, not per app.
+  client_id: ""
+  client_secret: ""
+  # Default ad account for every Reddit tool (find it via list_reddit_accounts).
+  ad_account_id: ""
+  # Your Reddit username; only used to build the descriptive User-Agent that
+  # Reddit requires ("platform:app:version (by /u/name)").
+  username: ""
+  # Override the whole User-Agent string if you prefer.
+  user_agent: ""
+  token_path: "~/.adloop/reddit_token.json"
+
 safety:
   # Maximum daily budget allowed per campaign (in your account's currency).
   # AdLoop will reject any campaign creation or budget change above this.

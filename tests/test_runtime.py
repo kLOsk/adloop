@@ -268,6 +268,31 @@ class TestServerModeGates:
         finally:
             auth.set_credentials_provider(original)
 
+    def test_local_reddit_credentials_refuse_server_mode(self):
+        from adloop.auth import get_reddit_credentials
+
+        runtime.set_deployment_mode("server")
+        with pytest.raises(RuntimeError, match="server mode"):
+            get_reddit_credentials(AdLoopConfig())
+
+    def test_provider_without_reddit_support_fails_with_capability_error(self):
+        from adloop import auth
+
+        class _NoRedditProvider:
+            def ga4_credentials(self, config):  # pragma: no cover
+                raise AssertionError("not exercised")
+
+            def ads_credentials(self, config):  # pragma: no cover
+                raise AssertionError("not exercised")
+
+        original = auth.get_credentials_provider()
+        auth.set_credentials_provider(_NoRedditProvider())
+        try:
+            with pytest.raises(RuntimeError, match="does not support"):
+                auth.get_reddit_credentials(AdLoopConfig())
+        finally:
+            auth.set_credentials_provider(original)
+
     def test_provider_without_gtm_support_fails_with_capability_error(self):
         """A provider that predates GTM (e.g. a hosted deployment that
         hasn't rolled it out) must produce a clear capability error, not an

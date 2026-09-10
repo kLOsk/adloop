@@ -147,9 +147,82 @@ class TestGenerateConfigYamlOptionalServices:
         assert parsed["gsc"]["site_url"] == ""
         assert parsed["gtm"]["container_id"] == ""
         assert parsed["pagespeed"]["api_key"] == ""
+        assert parsed["reddit"]["client_id"] == ""
+        assert parsed["reddit"]["token_path"] == "~/.adloop/reddit_token.json"
+
+    def test_reddit_section_round_trips_through_load_config(self, tmp_path):
+        from adloop.config import load_config
+
+        content = _generate_config_yaml(
+            project_id="",
+            credentials_path="",
+            property_id="123",
+            developer_token="tok",
+            customer_id="111-222-3333",
+            login_customer_id="",
+            max_daily_budget=50.0,
+            require_dry_run=True,
+            reddit_client_id="app-id",
+            reddit_client_secret="app-secret",
+            reddit_ad_account_id="a2_abc",
+            reddit_username="daniel",
+        )
+        path = tmp_path / "config.yaml"
+        path.write_text(content)
+        cfg = load_config(str(path))
+        assert cfg.reddit.client_id == "app-id"
+        assert cfg.reddit.client_secret == "app-secret"
+        assert cfg.reddit.ad_account_id == "a2_abc"
+        assert cfg.reddit.username == "daniel"
+        assert cfg.reddit.token_path == "~/.adloop/reddit_token.json"
 
 
 class TestWizardOptionalServiceSteps:
+    def test_reddit_step_declined_keeps_existing_values(self, monkeypatch):
+        from adloop import cli
+
+        answers = iter(["n"])
+        monkeypatch.setattr("builtins.input", lambda *a: next(answers))
+        existing = {"client_id": "kept-id", "client_secret": "kept-secret", "ad_account_id": "a2_kept", "username": "u"}
+        result = cli._wizard_reddit_step(lambda section, key, fallback="": existing.get(key, ""))
+        assert result == existing
+
+    def test_reddit_step_authorizes_and_picks_single_account(self, monkeypatch):
+        from adloop import cli
+        from adloop.reddit import auth as reddit_auth, read as reddit_read
+
+        authorized = {}
+        monkeypatch.setattr(
+            reddit_auth, "run_local_authorization",
+            lambda cfg, **kw: authorized.update(client_id=cfg.reddit.client_id) or {"refresh_token": "rt"},
+        )
+        monkeypatch.setattr(
+            reddit_read, "list_reddit_accounts",
+            lambda cfg: {"accounts": [{"ad_account_id": "a2_one", "name": "Acme", "currency": "EUR"}]},
+        )
+        answers = iter(["y", "app-id", "app-secret", "daniel", "y"])
+        monkeypatch.setattr("builtins.input", lambda *a: next(answers))
+        result = cli._wizard_reddit_step(lambda *a, **k: "")
+        assert authorized == {"client_id": "app-id"}
+        assert result == {
+            "client_id": "app-id", "client_secret": "app-secret",
+            "ad_account_id": "a2_one", "username": "daniel",
+        }
+
+    def test_reddit_step_survives_failed_authorization(self, monkeypatch):
+        from adloop import cli
+        from adloop.reddit import auth as reddit_auth
+
+        def boom(cfg, **kw):
+            raise reddit_auth.RedditAuthError("denied", error_code="access_denied")
+
+        monkeypatch.setattr(reddit_auth, "run_local_authorization", boom)
+        answers = iter(["y", "app-id", "app-secret", ""])
+        monkeypatch.setattr("builtins.input", lambda *a: next(answers))
+        result = cli._wizard_reddit_step(lambda *a, **k: "")
+        assert result["client_id"] == "app-id"
+        assert result["ad_account_id"] == ""
+
     def test_gsc_step_declined_keeps_existing_value(self, monkeypatch):
         from adloop import cli
 

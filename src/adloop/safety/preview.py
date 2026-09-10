@@ -22,11 +22,15 @@ class ChangePlan:
     created_at: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
     requires_double_confirm: bool = False
     dry_run_result: dict[str, Any] | None = None
+    # Ad platform the plan targets: "" (Google, the default so stored plans
+    # from before the field existed still load) or "reddit".
+    platform: str = ""
 
     def to_preview(self) -> dict[str, Any]:
         """Format as a human-readable preview dict for the AI to present."""
         return {
             "plan_id": self.plan_id,
+            "platform": self.platform or "google",
             "operation": self.operation,
             "entity_type": self.entity_type,
             "entity_id": self.entity_id,

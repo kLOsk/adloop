@@ -151,6 +151,10 @@ def _generate_config_yaml(
     gtm_account_id: str = "",
     gtm_container_id: str = "",
     pagespeed_api_key: str = "",
+    reddit_client_id: str = "",
+    reddit_client_secret: str = "",
+    reddit_ad_account_id: str = "",
+    reddit_username: str = "",
 ) -> str:
     dry_run_str = "true" if require_dry_run else "false"
 
@@ -198,6 +202,17 @@ def _generate_config_yaml(
         "pagespeed:",
         "  # Optional API key for analyze_page_speed (keyless works, low quota).",
         f'  api_key: "{pagespeed_api_key}"',
+        "",
+        "reddit:",
+        "  # Reddit Ads: your own developer app (Reddit Business Manager →",
+        "  # Developer Application). Token file is written by `adloop init`.",
+        f'  client_id: "{reddit_client_id}"',
+        f'  client_secret: "{reddit_client_secret}"',
+        "  # Default ad account for every Reddit tool (see list_reddit_accounts).",
+        f'  ad_account_id: "{reddit_ad_account_id}"',
+        "  # Your Reddit username, only used in the User-Agent Reddit requires.",
+        f'  username: "{reddit_username}"',
+        '  token_path: "~/.adloop/reddit_token.json"',
         "",
         "safety:",
         "  # Maximum daily budget AdLoop can set (safety cap)",
@@ -384,6 +399,92 @@ def _wizard_gsc_step(oauth_ok: bool, _existing) -> str:
         default=_existing("gsc", "site_url"),
         required=False,
     )
+
+
+def _wizard_reddit_step(_existing) -> dict[str, str]:
+    """Optionally connect Reddit Ads: own developer app, own OAuth, own token file.
+
+    Returns the ``reddit:`` values for the config. Reddit's redirect URI
+    must match the app exactly, so the loopback listener uses a fixed port
+    and the user registers precisely that URL on the app.
+    """
+    from adloop.reddit.auth import LOCAL_REDIRECT_URI
+
+    existing_id = _existing("reddit", "client_id")
+    values = {
+        "client_id": existing_id,
+        "client_secret": _existing("reddit", "client_secret"),
+        "ad_account_id": _existing("reddit", "ad_account_id"),
+        "username": _existing("reddit", "username"),
+    }
+    if not _prompt_bool("Connect Reddit Ads? (optional)", default=bool(existing_id)):
+        return values
+
+    _print()
+    _print("  Reddit Ads uses its own developer app (no approval, no developer token):")
+    _print("    1. Reddit Ads Manager → Business Manager → Developer Application → Create app")
+    _print(f"    2. Redirect URL: exactly {LOCAL_REDIRECT_URI}")
+    _print("    3. Copy the app ID and secret below")
+    _print()
+    values["client_id"] = _prompt("Reddit app ID", default=existing_id)
+    values["client_secret"] = _prompt(
+        "Reddit app secret", default=values["client_secret"]
+    )
+    values["username"] = _prompt(
+        "Your Reddit username (for the User-Agent Reddit requires)",
+        default=values["username"],
+        required=False,
+    )
+
+    from adloop.config import AdLoopConfig, RedditConfig
+
+    cfg = AdLoopConfig(
+        reddit=RedditConfig(
+            client_id=values["client_id"],
+            client_secret=values["client_secret"],
+            username=values["username"],
+        )
+    )
+    try:
+        from adloop.reddit.auth import run_local_authorization
+
+        run_local_authorization(cfg)
+        _print("  ✓ Reddit authorized; token saved to ~/.adloop/reddit_token.json")
+    except KeyboardInterrupt:
+        raise
+    except Exception as exc:
+        _print(f"  ✗ Reddit authorization failed: {exc}")
+        _print("    You can re-run `adloop init` later; the app credentials are kept.")
+        return values
+
+    try:
+        from adloop.reddit.read import list_reddit_accounts
+
+        accounts = list_reddit_accounts(cfg).get("accounts", [])
+        if not accounts:
+            _print("  No Reddit ad accounts visible to this user — set ad_account_id later.")
+        elif len(accounts) == 1:
+            acct = accounts[0]
+            _print(f"  ✓ Found Reddit ad account: {acct['name']} ({acct['ad_account_id']})")
+            if _prompt_bool("Use this ad account?", default=True):
+                values["ad_account_id"] = str(acct["ad_account_id"])
+        else:
+            values["ad_account_id"] = _prompt_choice(
+                "Select your Reddit ad account:",
+                [
+                    (
+                        str(a["ad_account_id"]),
+                        f"{a['name']} ({a['ad_account_id']}, {a.get('currency') or '?'}, "
+                        f"{a.get('business_name') or ''})",
+                    )
+                    for a in accounts
+                ],
+            )
+    except KeyboardInterrupt:
+        raise
+    except Exception as exc:
+        _print(f"  Could not list Reddit ad accounts ({exc}); set reddit.ad_account_id later.")
+    return values
 
 
 def _step_header(num: int, title: str) -> None:
@@ -690,6 +791,11 @@ def _run_wizard_post_config(
         required=False,
     )
 
+    # Reddit Ads: a second ad platform with its own OAuth app and token file.
+    step_num += 1
+    _step_header(step_num, "Reddit Ads (optional)")
+    reddit_values = _wizard_reddit_step(_existing)
+
     # Safety defaults
     step_num += 1
     _step_header(step_num, "Safety Defaults")
@@ -726,6 +832,10 @@ def _run_wizard_post_config(
         gtm_account_id=gtm_account_id,
         gtm_container_id=gtm_container_id,
         pagespeed_api_key=pagespeed_api_key,
+        reddit_client_id=reddit_values["client_id"],
+        reddit_client_secret=reddit_values["client_secret"],
+        reddit_ad_account_id=reddit_values["ad_account_id"],
+        reddit_username=reddit_values["username"],
     )
     _CONFIG_PATH.write_text(config_yaml)
     _print(f"  ✓ Config written to {_CONFIG_PATH}")

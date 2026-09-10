@@ -19,6 +19,7 @@ if TYPE_CHECKING:
     from google.auth.credentials import Credentials
 
     from adloop.config import AdLoopConfig
+    from adloop.reddit.auth import RedditCredentials
 
 # Request all scopes in a single OAuth flow so one token works for both
 # GA4 and Google Ads. Without this, separate tokens would constantly
@@ -77,6 +78,8 @@ class CredentialsProvider(Protocol):
 
     def merchant_credentials(self, config: AdLoopConfig) -> Credentials: ...
 
+    def reddit_credentials(self, config: AdLoopConfig) -> RedditCredentials: ...
+
 
 class LocalFileCredentialsProvider:
     """OSS default: local credential files + interactive OAuth.
@@ -115,6 +118,14 @@ class LocalFileCredentialsProvider:
     def merchant_credentials(self, config: AdLoopConfig) -> Credentials:
         self._guard_local_only()
         return _local_credentials(config, _MERCHANT_SCOPES)
+
+    def reddit_credentials(self, config: AdLoopConfig) -> RedditCredentials:
+        # Reddit is a separate OAuth provider: its own app, its own token
+        # file (reddit.token_path), nothing shared with the Google token.
+        self._guard_local_only()
+        from adloop.reddit.auth import local_credentials
+
+        return local_credentials(config)
 
 
 _active_provider: CredentialsProvider = LocalFileCredentialsProvider()
@@ -227,6 +238,18 @@ def get_merchant_credentials(config: AdLoopConfig) -> Credentials:
             "where the provider implements merchant_credentials()."
         )
     return provider.merchant_credentials(config)
+
+
+def get_reddit_credentials(config: AdLoopConfig) -> RedditCredentials:
+    """Return refreshable bearer credentials for the Reddit Ads API."""
+    provider = _active_provider
+    if not hasattr(provider, "reddit_credentials"):
+        raise RuntimeError(
+            "This deployment's credentials provider does not support "
+            "Reddit Ads. Reddit tools are only available where the "
+            "provider implements reddit_credentials()."
+        )
+    return provider.reddit_credentials(config)
 
 
 def _oauth_flow(

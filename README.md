@@ -4,7 +4,7 @@
 
 # AdLoop
 
-**The AI command center for Google Ads, GA4, and tracking code.**
+**The AI command center for Google Ads, Reddit Ads, GA4, and tracking code.**
 
 [![PyPI](https://img.shields.io/pypi/v/adloop.svg)](https://pypi.org/project/adloop/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
@@ -14,7 +14,7 @@
 [![GA4 Data API](https://img.shields.io/badge/GA4-Data%20API-E37400.svg?logo=google-analytics&logoColor=white)](https://developers.google.com/analytics/devguides/reporting/data/v1)
 [![GitHub stars](https://img.shields.io/github/stars/kLOsk/adloop?style=social)](https://github.com/kLOsk/adloop)
 
-An MCP server that gives your AI assistant read + write access to Google Ads and GA4 — with safety guardrails that prevent accidental spend.
+An MCP server that gives your AI assistant read + write access to Google Ads, Reddit Ads and GA4 — with safety guardrails that prevent accidental spend.
 
 **[☁️ Skip the setup — use AdLoop Cloud (free plan, no card)](https://getadloop.com)** &nbsp;·&nbsp; or self-host: `pip install adloop`
 
@@ -170,6 +170,25 @@ These tools read the live GTM container and join it with the codebase + GA4 to f
 > **Setup for Merchant Center tools** — Enable the **Merchant API** in your GCP project (the Content API for Shopping is deprecated). The Merchant API has no read-only scope; AdLoop uses it strictly read-only. Upgrading OAuth users re-authorize once.
 
 > **Setup for GSC tools** — Enable the **Search Console API** in your GCP project. Upgrading OAuth users must re-authorize once for the new scope (delete `~/.adloop/token.json`, run any tool). The killer combo: cross-reference organic queries with `get_keyword_performance` to find paid/organic cannibalization and untapped keyword opportunities.
+
+### Reddit Ads Tools
+
+A second ad platform, same safety model. Reddit is a separate connection: its own developer app, its own OAuth, no developer token and no approval process. Every tool takes `ad_account_id` (defaults to `reddit.ad_account_id`).
+
+| Tool | What It Does |
+|------|-------------|
+| `list_reddit_accounts` | Discover businesses and ad accounts (currency, time zone, approval state) |
+| `list_reddit_funding_instruments` | Billing instruments and posting profiles — prerequisites for creating campaigns and ads |
+| `get_reddit_campaigns` / `get_reddit_ad_groups` / `get_reddit_ads` | Structure with configured vs effective status, budgets, bids, pixel, targeting, rejection reasons |
+| `get_reddit_performance` | Spend, clicks, CTR, CPC, conversions, CPA, ROAS per account/campaign/ad group/ad, optional breakdown (date, country, community, keyword, placement, …), compact mode with insights |
+| `run_reddit_report` | Raw reports endpoint for any metric (REACH, video, per-event conversions) |
+| `get_reddit_pixels` | Pixels and when each event last fired — flags ad groups optimizing for events the pixel never sent |
+| `search_reddit_targeting` | Communities, interests, geolocations, languages, keyword suggestions for targeting |
+| `pause_reddit_entity` / `enable_reddit_entity` / `remove_reddit_entity` | Status changes through the preview gate (remove = ARCHIVE, irreversible, double-confirmed) |
+| `update_reddit_campaign` / `update_reddit_ad_group` | Budget, bid, schedule and targeting changes with old → new previews, budget cap and bid-increase guards |
+| `draft_reddit_campaign` / `draft_reddit_ad_group` / `draft_reddit_ad` | Create campaign → ad group (pixel + targeting required) → post + ad. Everything is created **PAUSED**. |
+
+> **Setup for Reddit Ads tools** — In Reddit Ads Manager open **Business Manager → Developer Application → Create app** (business admins only; no approval wait). Register the redirect URL exactly as `http://localhost:8765/callback`, then run `adloop init` and complete the Reddit Ads step: it opens Reddit's consent page (scopes `adsread` + `adsedit`, permanent grant), stores the refresh token at `~/.adloop/reddit_token.json`, and lets you pick the default ad account. Reddit rate-limits per user (reporting: 60 requests/min) and requires a descriptive User-Agent, which AdLoop builds from your app id and Reddit username. Reddit has no validate-only mode, so `confirm_and_apply(dry_run=true)` re-reads the target and re-checks the safety caps instead.
 
 ### Planning Tools
 
@@ -420,6 +439,10 @@ All configuration lives in `~/.adloop/config.yaml`. See [`config.yaml.example`](
 | `ads` | `developer_token` | — | Your Google Ads API developer token |
 | `ads` | `customer_id` | — | Default Google Ads customer ID (auto-discovered by `adloop init`) |
 | `ads` | `login_customer_id` | — | Your MCC account ID |
+| `reddit` | `client_id` / `client_secret` | *(empty)* | Your Reddit developer app (Business Manager → Developer Application) |
+| `reddit` | `ad_account_id` | *(empty)* | Default Reddit ad account for every Reddit tool (picked by `adloop init`) |
+| `reddit` | `username` | *(empty)* | Your Reddit username, used only in the User-Agent Reddit requires |
+| `reddit` | `token_path` | `~/.adloop/reddit_token.json` | Where the Reddit refresh token is stored |
 | `safety` | `max_daily_budget` | `50.00` | Maximum allowed daily budget per campaign |
 | `safety` | `require_dry_run` | `true` | Force all writes to dry-run mode |
 | `safety` | `two_phase_apply` | `false` | Refuse real applies until the plan had a dry-run pass |
@@ -442,6 +465,7 @@ Most MCP clients (claude.ai, ChatGPT, Cursor, …) load **every tool schema into
 | `gsc` | Search Console reads |
 | `web` | PageSpeed / Core Web Vitals |
 | `merchant` | Merchant Center feed health |
+| `reddit` | Reddit Ads reads, writes, and planning |
 
 `health_check` and `confirm_and_apply` are always included, whatever you select. Unset = the full catalog; unknown names fail at startup with the valid list. The effect is real: `ads,ga4` drops the session cost to ~13k tokens, and a `ga4`-only client pays ~2k — nearly 90% less. Toolsets are per *client*, not per install: one AdLoop config can serve a trimmed Cursor and a full-catalog Claude Code side by side.
 
@@ -452,7 +476,7 @@ On [AdLoop Cloud](https://getadloop.com), the same feature is per API key: pick 
 ```
 src/adloop/
 ├── __init__.py        # Entry point — routes 'adloop init' to wizard, otherwise starts MCP server
-├── server.py          # FastMCP server — 67 tool registrations with safety annotations
+├── server.py          # FastMCP server — every tool registration with safety annotations and toolset tags
 ├── config.py          # Config loader (~/.adloop/config.yaml)
 ├── auth.py            # OAuth 2.0 flow (user-supplied credentials, headless fallback) + service accounts; GA4 / Ads / GTM scopes
 ├── cli.py             # Interactive 'adloop init' setup wizard
@@ -472,6 +496,11 @@ src/adloop/
 ├── gtm/
 │   ├── client.py      # Google Tag Manager API v2 client
 │   └── read.py        # Live container fetching, tag/trigger/variable parsing, workspace diff, version history
+├── reddit/
+│   ├── auth.py        # Reddit OAuth2 (own app, permanent refresh token, loopback flow for adloop init)
+│   ├── client.py      # Reddit Ads API v3 REST client — bearer refresh, per-user rate limits, pagination
+│   ├── read.py        # Accounts, campaigns, ad groups, ads, performance reports, pixels, targeting lookups
+│   └── write.py       # Draft/preflight/apply for status, budget, bid, targeting, and PAUSED creation
 └── safety/
     ├── guards.py      # Budget caps, bid limits, blocked operations, Broad Match safety
     ├── preview.py     # Change plans and previews

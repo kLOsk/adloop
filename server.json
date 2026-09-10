@@ -3,7 +3,7 @@
   "name": "com.getadloop/adloop",
   "title": "AdLoop",
   "description": "Google Ads, GA4 and Tag Manager in your AI client, with a preview before every change.",
-  "version": "0.13.2",
+  "version": "0.14.0",
   "websiteUrl": "https://getadloop.com",
   "repository": {
     "url": "https://github.com/kLOsk/adloop",

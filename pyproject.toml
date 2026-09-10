@@ -1,14 +1,14 @@
 [project]
 name = "adloop"
-version = "0.13.3"
-description = "The AI command center for Google Ads, GA4, and tracking code."
+version = "0.14.0"
+description = "The AI command center for Google Ads, Reddit Ads, GA4, and tracking code."
 readme = "README.md"
 authors = [
     { name = "Daniel Klose", email = "info@daniel-klose.com" }
 ]
 requires-python = ">=3.11"
 license = { text = "MIT" }
-keywords = ["mcp", "google-ads", "google-analytics", "ga4", "cursor", "marketing"]
+keywords = ["mcp", "google-ads", "reddit-ads", "google-analytics", "ga4", "cursor", "marketing"]
 dependencies = [
     "fastmcp>=3.0.0",
     "google-ads>=31.1.0",
@@ -18,6 +18,9 @@ dependencies = [
     "google-auth-oauthlib>=1.0.0",
     "google-api-python-client>=2.0.0",
     "pyyaml>=6.0",
+    # Reddit Ads has no SDK; the REST client (adloop.reddit.client) and the
+    # PageSpeed helper call requests directly.
+    "requests>=2.31",
 ]
 
 [project.urls]

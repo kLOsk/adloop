@@ -1,6 +1,6 @@
 # AdLoop
 
-MCP server connecting Google Ads + GA4 into one AI-driven feedback loop inside your IDE.
+MCP server connecting Google Ads + Reddit Ads + GA4 into one AI-driven feedback loop inside your IDE.
 
 ## Quick Reference
 
@@ -25,6 +25,7 @@ src/adloop/
 ├── tracking.py        # Tracking validation + code generation
 ├── ga4/               # GA4 Data + Admin API (reports, realtime, events)
 ├── ads/               # Google Ads API (read, write, GAQL, forecasting, PMax, recommendations)
+├── reddit/            # Reddit Ads API v3 (own OAuth app, REST client, reads, PAUSED-creating writes)
 └── safety/            # Guards, previews, audit logging
 ```
 
