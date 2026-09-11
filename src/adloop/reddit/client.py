@@ -77,7 +77,16 @@ def _error_detail(payload: Any) -> str:
         return ""
     err = payload.get("error")
     if isinstance(err, dict):
-        return str(err.get("message") or err.get("detail") or err.get("code") or "")
+        message = str(err.get("message") or err.get("detail") or err.get("code") or "")
+        # Validation errors carry the useful part per field:
+        # {"error": {"message": "Bad Request", "fields": [{"field": ..., "message": ...}]}}
+        fields = err.get("fields")
+        if isinstance(fields, list) and fields:
+            details = "; ".join(
+                f"{f.get('field', '?')}: {f.get('message', '')}" for f in fields[:5] if isinstance(f, dict)
+            )
+            message = f"{message} ({details})" if message else details
+        return message
     if isinstance(err, str) and err:
         return err
     errors = payload.get("errors")
@@ -201,8 +210,10 @@ def reddit_get(config: AdLoopConfig, path: str, params: dict | None = None) -> d
     return reddit_request(config, "GET", path, params=params)
 
 
-def reddit_post(config: AdLoopConfig, path: str, body: dict | None = None) -> dict:
-    return reddit_request(config, "POST", path, json_body=body or {})
+def reddit_post(
+    config: AdLoopConfig, path: str, body: dict | None = None, params: dict | None = None
+) -> dict:
+    return reddit_request(config, "POST", path, params=params, json_body=body or {})
 
 
 def reddit_patch(config: AdLoopConfig, path: str, body: dict | None = None) -> dict:

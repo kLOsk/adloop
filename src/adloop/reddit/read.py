@@ -73,7 +73,9 @@ _MICRO_FIELDS = {"spend", "cpc", "cpv", "ecpm", "key_conversion_ecpa"}
 _MICRO_SUFFIXES = ("_ecpa", "_ecpm")
 _CENT_SUFFIXES = ("_total_value", "_avg_value")
 
-_TARGETING_KINDS = ("communities", "interests", "geolocations", "languages", "keywords")
+_TARGETING_KINDS = (
+    "communities", "interests", "geolocations", "languages", "keywords", "community_suggestions",
+)
 
 _STANDARD_PIXEL_EVENTS = (
     "page_visit",
@@ -866,22 +868,77 @@ def get_reddit_pixels(config: AdLoopConfig, *, ad_account_id: str = "") -> dict:
 # ---------------------------------------------------------------------------
 
 
+def validate_reddit_keywords(config: AdLoopConfig, keywords: list[str]) -> list[str]:
+    """Keywords Reddit refuses as not brand-safe (empty list = all fine)."""
+    cleaned = [str(k).strip() for k in keywords if str(k).strip()]
+    if not cleaned:
+        return []
+    payload = reddit_post(config, "targeting/keyword_validations", {"data": {"keywords": cleaned}})
+    rows = payload.get("data") or []
+    return [str(r.get("keyword")) for r in rows if isinstance(r, dict) and r.get("is_brand_safe") is False]
+
+
+def validate_reddit_geolocations(config: AdLoopConfig, geolocation_ids: list[str]) -> dict[str, str]:
+    """Unknown or invalid geolocation ids → Reddit's error message (empty = all fine)."""
+    cleaned = [str(g).strip() for g in geolocation_ids if str(g).strip()]
+    if not cleaned:
+        return {}
+    payload = reddit_post(
+        config, "targeting/geolocations_validations", {"data": {"geolocation_ids": cleaned}}
+    )
+    problems: dict[str, str] = {}
+    for row in payload.get("data") or []:
+        if not isinstance(row, dict):
+            continue
+        message = str(row.get("error_message") or "")
+        if message:
+            problems[str((row.get("geolocation") or {}).get("id") or "?")] = message
+    return problems
+
+
 def search_reddit_targeting(
     config: AdLoopConfig,
     *,
     kind: str,
     query: str = "",
     country: str = "",
+    website_url: str = "",
     limit: int = 25,
 ) -> dict:
-    """Look up ids for ad-group targeting (communities, interests, geos, languages, keywords)."""
+    """Look up ids for ad-group targeting (communities, interests, geos, languages, keywords,
+    and Reddit's own community suggestions for seed communities or a website)."""
     kind = (kind or "").strip().lower()
     if kind not in _TARGETING_KINDS:
         raise ValueError(f"kind must be one of {list(_TARGETING_KINDS)}, got '{kind}'.")
     limit = max(1, min(int(limit or 25), 100))
     query = (query or "").strip()
 
-    if kind == "communities":
+    if kind == "community_suggestions":
+        website_url = (website_url or "").strip()
+        if not query and not website_url:
+            raise ValueError(
+                "community_suggestions needs query (comma-separated seed communities, e.g. "
+                "'PPC,googleads') and/or website_url."
+            )
+        params: dict = {"page.size": limit}
+        if query:
+            params["names"] = ",".join(
+                c.strip().removeprefix("r/") for c in query.split(",") if c.strip()
+            )
+        if website_url:
+            params["website_url"] = website_url
+        rows = list(reddit_get(config, "targeting/communities/suggestions", params).get("data") or [])
+        items = [
+            {
+                "id": r.get("id"),
+                "name": r.get("name"),
+                "subscribers": r.get("subscriber_count"),
+                "categories": r.get("categories") or [],
+                "description": (r.get("description") or "")[:160],
+            }
+            for r in rows
+        ]
+    elif kind == "communities":
         if not query:
             raise ValueError("query is required for communities (e.g. 'python').")
         rows = list(
@@ -965,7 +1022,232 @@ def search_reddit_targeting(
         "note": (
             "Use the returned ids/names in draft_reddit_ad_group targeting. "
             "Communities target by name, interests by id, geolocations by id "
-            "(e.g. 'DE' or 'DE:2874225'), languages by code (e.g. 'de'). "
-            "Keyword suggestions carry Reddit-wide monthly_views, not search volume."
+            "(e.g. 'DE' or 'DE:2874225'), languages by code (e.g. 'DE'). "
+            "Keyword suggestions carry Reddit-wide monthly_views, not search volume. "
+            "community_suggestions returns Reddit's related-community picks for the "
+            "seed communities (query) or a website_url."
         ),
     }
+
+
+# ---------------------------------------------------------------------------
+# Change history and forecasting
+# ---------------------------------------------------------------------------
+
+_HISTORY_ENTITY_TYPES = {"campaign": "CAMPAIGN", "ad_group": "AD_GROUP", "ad": "AD"}
+
+
+def get_reddit_account_history(
+    config: AdLoopConfig,
+    *,
+    ad_account_id: str = "",
+    date_range_start: str = "",
+    date_range_end: str = "",
+    entity_type: str = "",
+    entity_ids: list[str] | None = None,
+    limit: int = 100,
+) -> dict:
+    """Who changed what in the ad account: field, before/after, member, time."""
+    account = resolve_account(config, ad_account_id)
+    meta = account_meta(config, account)
+    starts_at, ends_at, start_date, end_date = report_window(
+        date_range_start, date_range_end, meta["time_zone_id"]
+    )
+    # The history window is a plain interval (unlike reports): end at the
+    # local midnight after the end day.
+    end_exclusive = _local_hour_utc(
+        _parse_date(end_date, default=date.today()) + timedelta(days=1), meta["time_zone_id"]
+    )
+    data: dict[str, Any] = {"start_time": starts_at, "end_time": end_exclusive}
+    entity_type = (entity_type or "").strip().lower()
+    if entity_type:
+        if entity_type not in _HISTORY_ENTITY_TYPES:
+            raise ValueError(f"entity_type must be one of {sorted(_HISTORY_ENTITY_TYPES)}.")
+        ids = [str(i).strip() for i in (entity_ids or []) if str(i).strip()]
+        if not ids:
+            raise ValueError("entity_ids is required when entity_type is given.")
+        data["entity_id_filters"] = [
+            {"entity_type": _HISTORY_ENTITY_TYPES[entity_type], "entity_ids": ids, "include_child_entities": True}
+        ]
+    limit = max(1, min(int(limit or 100), 500))
+    payload = reddit_post(
+        config, f"ad_accounts/{account}/history", {"data": data}, params={"page.size": min(limit, 100)}
+    )
+    rows = list(payload.get("data") or [])
+    pages = 1
+    while len(rows) < limit and pages < 10:
+        next_url = (payload.get("pagination") or {}).get("next_url")
+        if not next_url:
+            break
+        payload = reddit_request(config, "POST", "", json_body={"data": data}, absolute_url=next_url)
+        rows.extend(payload.get("data") or [])
+        pages += 1
+
+    changes = []
+    for row in rows[:limit]:
+        change = row.get("change") or {}
+        cause = row.get("cause") or {}
+        field = str(change.get("field_name") or "")
+        before, after = change.get("before_value"), change.get("after_value")
+        if field in ("goal_value", "bid_value", "spend_cap") or field.endswith("_value"):
+            before, after = from_micro(before), from_micro(after)
+        changes.append(
+            {
+                "changed_at": cause.get("changed_at"),
+                "by": cause.get("reddit_username") or cause.get("fullname") or cause.get("partner_business_name"),
+                "entity_type": change.get("entity_type"),
+                "entity_id": change.get("entity_id"),
+                "entity_name": change.get("entity_name"),
+                "field": field,
+                "before": before,
+                "after": after,
+            }
+        )
+    changes.sort(key=lambda c: str(c.get("changed_at") or ""), reverse=True)
+    return {
+        "ad_account_id": account,
+        "date_range": {"start": start_date, "end": end_date, "time_zone_id": meta["time_zone_id"]},
+        "changes": changes,
+        "total": len(changes),
+        "note": (
+            "Most recent first. Changes made through AdLoop appear under the connected "
+            "Reddit user, like changes made in Ads Manager."
+        ),
+    }
+
+
+def estimate_reddit_ad_group(
+    config: AdLoopConfig,
+    *,
+    ad_account_id: str = "",
+    objective: str = "CLICKS",
+    daily_budget: float | None = None,
+    lifetime_budget: float | None = None,
+    bid_type: str = "CPC",
+    bid_strategy: str = "",
+    bid_value: float | None = None,
+    optimization_goal: str = "",
+    start_time: str = "",
+    end_time: str = "",
+    targeting: dict | None = None,
+) -> dict:
+    """Audience size, delivery estimates and Reddit's bid suggestion for a planned ad group."""
+    from adloop.reddit.auth import RedditApiError
+
+    account = resolve_account(config, ad_account_id)
+    targeting = {k: v for k, v in (targeting or {}).items() if v not in (None, [], "")}
+    if not any(targeting.get(k) for k in ("geolocations", "communities", "interests", "keywords")):
+        raise ValueError(
+            "targeting needs at least one of geolocations, communities, interests or keywords."
+        )
+    if "languages" in targeting:
+        targeting["languages"] = [str(x).upper() for x in targeting["languages"]]
+    objective = (objective or "CLICKS").strip().upper()
+    bid_type = (bid_type or "CPC").strip().upper()
+    bid_strategy = (bid_strategy or "").strip().upper()
+    if daily_budget is None and lifetime_budget is None:
+        raise ValueError("daily_budget or lifetime_budget is required.")
+    goal_type = "DAILY_SPEND" if daily_budget is not None else "LIFETIME_SPEND"
+    goal_value = daily_budget if daily_budget is not None else lifetime_budget
+    if goal_value is None or float(goal_value) <= 0:
+        raise ValueError("The budget must be positive.")
+    meta = account_meta(config, account)
+
+    now = datetime.now(timezone.utc)
+    start = start_time or (now + timedelta(days=1)).strftime("%Y-%m-%dT00:00:00Z")
+    end = end_time or (now + timedelta(days=31)).strftime("%Y-%m-%dT00:00:00Z")
+
+    from adloop.reddit.client import to_micro
+
+    ad_group_config: dict[str, Any] = {
+        "goal_type": goal_type,
+        "goal_value": to_micro(float(goal_value)),
+        "bid_type": bid_type,
+        "bid_strategy": bid_strategy or "BIDLESS",
+        "start_time": start,
+        "end_time": end,
+        "targeting": targeting,
+    }
+    if bid_value is not None:
+        ad_group_config["bid_value"] = to_micro(float(bid_value))
+    if optimization_goal:
+        ad_group_config["optimization_goal"] = optimization_goal.strip().upper()
+
+    result: dict[str, Any] = {
+        "ad_account_id": account,
+        "currency": meta["currency"],
+        "objective": objective,
+        "budget": {"goal_type": goal_type, "value": float(goal_value)},
+        "schedule": {"start_time": start, "end_time": end},
+        "targeting": targeting,
+    }
+
+    try:
+        estimate = data_of(
+            reddit_post(
+                config,
+                f"ad_accounts/{account}/forecasting/audience_and_delivery_estimates",
+                {"data": {"objective": objective, "ad_group_configs": [ad_group_config]}},
+            )
+        )
+        result["audience"] = {
+            "total_reachable_audience": estimate.get("total_audience_size"),
+            "target_audience_30_days": estimate.get("target_audience_range"),
+        }
+        result["delivery_estimates"] = estimate.get("delivery_estimates") or {}
+    except RedditApiError as exc:
+        result["audience_error"] = str(exc)
+
+    try:
+        bid = data_of(
+            reddit_post(
+                config,
+                "forecasting/bid_suggestions",
+                {
+                    "data": {
+                        "ad_account_id": account,
+                        "currency": meta["currency"],
+                        "campaign_objective": objective,
+                        "bid_type": bid_type,
+                        # Suggestions only make sense for a manual bid.
+                        "bid_strategy": "MANUAL_BIDDING",
+                        "goal_type": goal_type,
+                        "goal_value": to_micro(float(goal_value)),
+                        "targeting": targeting,
+                        "duration": {"start_time": start, "end_time": end},
+                        **({"optimization_goal": optimization_goal.strip().upper()} if optimization_goal else {}),
+                    }
+                },
+            )
+        )
+        result["bid_suggestion"] = {
+            "bid_type": bid_type,
+            "minimum_allowed": from_micro(bid.get("min_bid_value")),
+            "suggested_min": from_micro(bid.get("bid_suggestion_min")),
+            "suggested_median": from_micro(bid.get("bid_suggestion_median")),
+            "suggested_max": from_micro(bid.get("bid_suggestion_max")),
+            "currency": meta["currency"],
+        }
+    except RedditApiError as exc:
+        result["bid_suggestion_error"] = str(exc)
+
+    insights: list[str] = []
+    rng = (result.get("audience") or {}).get("target_audience_30_days") or {}
+    if rng and (rng.get("max") or 0) < 10_000:
+        insights.append(
+            "The targetable audience is under 10,000 people: expect thin delivery and "
+            "noisy learning. Broaden communities or geos."
+        )
+    if bid_value is not None and result.get("bid_suggestion", {}).get("suggested_min"):
+        if float(bid_value) < result["bid_suggestion"]["suggested_min"]:
+            insights.append(
+                f"bid_value {bid_value} is below Reddit's suggested minimum "
+                f"{result['bid_suggestion']['suggested_min']} {meta['currency']}; the ad group may not win auctions."
+            )
+    result["insights"] = insights
+    result["note"] = (
+        "Estimates come from Reddit's forecasting endpoints: the audience range is for a "
+        "fixed 30-day period, delivery estimates for the given schedule. Money is in "
+        "account currency."
+    )
+    return result

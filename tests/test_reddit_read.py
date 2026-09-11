@@ -350,3 +350,81 @@ class TestFundingInstruments:
             result = read.list_reddit_funding_instruments(config)
         assert result["funding_instruments"][0]["credit_limit"] == 100.0
         assert result["profiles"][0]["username"] == "acme_official"
+
+
+class TestHistoryAndForecast:
+    def test_account_history_flattens_and_sorts(self, config):
+        calls, ctx = _fake_api({
+            ("GET", "ad_accounts/a2_acct"): _ACCOUNT,
+            ("POST", "ad_accounts/a2_acct/history"): {"data": [
+                {"change": {"after_value": "ACTIVE", "before_value": "PAUSED", "entity_id": "g1", "entity_name": "DE",
+                            "entity_type": "AD_GROUP", "field_name": "configured_status"},
+                 "cause": {"reddit_username": "daniel", "changed_at": "2026-09-11T05:39:55+00:00"}},
+                {"change": {"after_value": "20000000", "before_value": "10000000", "entity_id": "g1", "entity_name": "DE",
+                            "entity_type": "AD_GROUP", "field_name": "goal_value"},
+                 "cause": {"reddit_username": "daniel", "changed_at": "2026-09-11T06:00:00+00:00"}},
+            ], "pagination": {}},
+        })
+        with ctx:
+            result = read.get_reddit_account_history(
+                config, date_range_start="2026-09-10", date_range_end="2026-09-11", entity_type="ad_group", entity_ids=["g1"],
+            )
+        body = [c for c in calls if c[0] == "POST"][0][3]["data"]
+        assert body["start_time"] == "2026-09-09T22:00:00Z"
+        assert body["end_time"] == "2026-09-11T22:00:00Z"
+        assert body["entity_id_filters"] == [{"entity_type": "AD_GROUP", "entity_ids": ["g1"], "include_child_entities": True}]
+        assert result["total"] == 2
+        assert result["changes"][0]["field"] == "goal_value"
+        assert (result["changes"][0]["before"], result["changes"][0]["after"]) == (10.0, 20.0)
+        assert result["changes"][1]["by"] == "daniel"
+        with pytest.raises(ValueError, match="entity_ids is required"):
+            read.get_reddit_account_history(config, entity_type="campaign")
+
+    def test_estimate_calls_both_forecasting_endpoints(self, config):
+        calls, ctx = _fake_api({
+            ("GET", "ad_accounts/a2_acct"): _ACCOUNT,
+            ("POST", "forecasting/audience_and_delivery_estimates"): {"data": {
+                "total_audience_size": 792880400, "target_audience_range": {"min": 118836, "max": 148546},
+                "delivery_estimates": {"impressions": {"min": 2844, "max": 5283}, "clicks": {"min": 39, "max": 72}},
+            }},
+            ("POST", "forecasting/bid_suggestions"): {"data": {
+                "min_bid_value": 116000, "bid_suggestion_median": 752455, "bid_suggestion_min": 284529, "bid_suggestion_max": 1220382,
+            }},
+        })
+        with ctx:
+            result = read.estimate_reddit_ad_group(
+                config, daily_budget=10, bid_type="cpc", bid_value=0.2,
+                targeting={"communities": ["PPC"], "geolocations": ["DE"], "languages": ["en"], "gender": None},
+            )
+        est_body = [c for c in calls if c[1].endswith("audience_and_delivery_estimates")][0][3]["data"]
+        assert est_body["objective"] == "CLICKS"
+        assert est_body["ad_group_configs"][0]["goal_value"] == 10_000_000
+        assert est_body["ad_group_configs"][0]["targeting"]["languages"] == ["EN"]
+        bid_body = [c for c in calls if c[1].endswith("bid_suggestions")][0][3]["data"]
+        assert bid_body["bid_strategy"] == "MANUAL_BIDDING" and bid_body["currency"] == "EUR"
+        assert result["audience"]["target_audience_30_days"] == {"min": 118836, "max": 148546}
+        assert result["delivery_estimates"]["clicks"] == {"min": 39, "max": 72}
+        assert result["bid_suggestion"]["suggested_median"] == 0.75
+        assert result["bid_suggestion"]["minimum_allowed"] == 0.12
+        assert any("below Reddit's suggested minimum" in i for i in result["insights"])
+
+    def test_estimate_requires_targeting_and_budget(self, config):
+        with pytest.raises(ValueError, match="targeting needs"):
+            read.estimate_reddit_ad_group(config, daily_budget=5, targeting={})
+        with pytest.raises(ValueError, match="daily_budget or lifetime_budget"):
+            read.estimate_reddit_ad_group(config, targeting={"geolocations": ["DE"]})
+
+    def test_community_suggestions_by_names_and_url(self, config):
+        calls, ctx = _fake_api({
+            ("GET", "targeting/communities/suggestions"): {"data": [
+                {"id": "t5_1", "name": "digital_marketing", "subscriber_count": 374657, "categories": ["Education"]},
+            ]},
+        })
+        with ctx:
+            result = read.search_reddit_targeting(
+                config, kind="community_suggestions", query="r/PPC, googleads", website_url="https://getadloop.com", limit=5,
+            )
+        assert calls[0][2] == {"page.size": 5, "names": "PPC,googleads", "website_url": "https://getadloop.com"}
+        assert result["results"][0]["name"] == "digital_marketing"
+        with pytest.raises(ValueError, match="community_suggestions needs"):
+            read.search_reddit_targeting(config, kind="community_suggestions")

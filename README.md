@@ -183,9 +183,11 @@ A second ad platform, same safety model. Reddit is a separate connection: its ow
 | `get_reddit_performance` | Spend, clicks, CTR, CPC, conversions, CPA, ROAS per account/campaign/ad group/ad, optional breakdown (date, country, community, keyword, placement, …), compact mode with insights |
 | `run_reddit_report` | Raw reports endpoint for any metric (REACH, video, per-event conversions) |
 | `get_reddit_pixels` | Pixels and when each event last fired — flags ad groups optimizing for events the pixel never sent |
-| `search_reddit_targeting` | Communities, interests, geolocations, languages, keyword suggestions for targeting |
+| `search_reddit_targeting` | Communities, interests, geolocations, languages, keyword suggestions, and Reddit's related-community suggestions (by seed communities or website) |
+| `get_reddit_account_history` | Who changed what and when: field, before/after, member |
+| `estimate_reddit_ad_group` | Audience size, delivery estimate and suggested bid range for a planned ad group (Reddit's counterpart of `estimate_budget`) |
 | `pause_reddit_entity` / `enable_reddit_entity` / `remove_reddit_entity` | Status changes through the preview gate (remove = ARCHIVE, irreversible, double-confirmed) |
-| `update_reddit_campaign` / `update_reddit_ad_group` | Budget, bid, schedule and targeting changes with old → new previews, budget cap and bid-increase guards |
+| `update_reddit_campaign` / `update_reddit_ad_group` / `update_reddit_ad` | Budget, bid, schedule, targeting (validated with Reddit at draft time), landing URL and comment changes with old → new previews, budget cap and bid-increase guards |
 | `draft_reddit_campaign` / `draft_reddit_ad_group` / `draft_reddit_ad` | Create campaign → ad group (pixel + targeting required) → post + ad. Everything is created **PAUSED**. |
 
 > **Setup for Reddit Ads tools** — In Reddit Ads Manager open **Business Manager → Developer Application → Create app** (business admins only; no approval wait). Register the redirect URL exactly as `http://localhost:8765/callback`, then run `adloop init` and complete the Reddit Ads step: it opens Reddit's consent page (scopes `adsread` + `adsedit`, permanent grant), stores the refresh token at `~/.adloop/reddit_token.json`, and lets you pick the default ad account. Reddit rate-limits per user (reporting: 60 requests/min) and requires a descriptive User-Agent, which AdLoop builds from your app id and Reddit username. Reddit has no validate-only mode, so `confirm_and_apply(dry_run=true)` re-reads the target and re-checks the safety caps instead.

@@ -195,6 +195,56 @@ class TestUpdateDrafts:
         assert "Nothing to change" in result["details"][0]
 
 
+_AD = {"data": {"id": "ad1", "name": "Hero", "configured_status": "ACTIVE", "post_id": "post1",
+                 "click_url": "https://example.com/old", "ad_group_id": "g1"}}
+
+
+class TestUpdateAd:
+    def test_update_ad_previews_url_name_and_comments(self):
+        _, ctx = _fake_api({("GET", "ads/ad1"): _AD})
+        with ctx, patch("adloop.ads.write._validate_urls", return_value=({"https://example.com/new": None}, {})):
+            preview = write.update_reddit_ad(
+                _config(), ad_id="ad1", click_url="https://example.com/new", name="Hero v2", allow_comments=False,
+            )
+        assert preview["operation"] == "reddit_update_ad"
+        assert preview["changes"]["patch"] == {"name": "Hero v2", "click_url": "https://example.com/new"}
+        assert preview["changes"]["post_patch"] == {"allow_comments": False}
+        assert preview["changes"]["display"]["click_url"] == {"from": "https://example.com/old", "to": "https://example.com/new"}
+
+    def test_update_ad_rejects_unreachable_url_and_empty_change(self):
+        with patch("adloop.ads.write._validate_urls", return_value=({"https://example.com/404": "HTTP 404"}, {})):
+            result = write.update_reddit_ad(_config(), ad_id="ad1", click_url="https://example.com/404")
+        assert any("not reachable" in d for d in result["details"])
+        _, ctx = _fake_api({("GET", "ads/ad1"): _AD})
+        with ctx:
+            nothing = write.update_reddit_ad(_config(), ad_id="ad1", name="Hero")
+        assert any("cannot be edited" in d for d in nothing["details"])
+
+    def test_update_ad_apply_patches_ad_then_post(self):
+        from adloop.ads import write as ads_write
+
+        _, ctx = _fake_api({("GET", "ads/ad1"): _AD})
+        with ctx, patch("adloop.ads.write._validate_urls", return_value=({"https://example.com/new": None}, {})):
+            plan_id = write.update_reddit_ad(
+                _config(), ad_id="ad1", click_url="https://example.com/new", allow_comments=False,
+            )["plan_id"]
+        calls, ctx = _fake_api({
+            ("GET", "ads/ad1"): _AD,
+            ("GET", "ad_accounts/a2_acct"): _ACCOUNT,
+            ("PATCH", "ads/ad1"): lambda body: {"data": {"id": "ad1", "name": "Hero", "click_url": body["data"]["click_url"]}},
+            ("PATCH", "posts/post1"): lambda body: {"data": {"id": "post1", "allow_comments": body["data"]["allow_comments"]}},
+        })
+        with ctx, _no_scope_check():
+            dry = ads_write.confirm_and_apply(_config(), plan_id=plan_id, dry_run=True)
+            assert dry["status"] == "DRY_RUN_SUCCESS" and dry["checks"]["post_id"] == "post1"
+            result = ads_write.confirm_and_apply(_config(), plan_id=plan_id, dry_run=False)
+        assert result["status"] == "APPLIED"
+        assert result["result"]["click_url"] == "https://example.com/new"
+        assert result["result"]["allow_comments"] is False
+        assert sorted(result["result"]["updated_fields"]) == ["allow_comments", "click_url"]
+        assert [c[:2] for c in calls if c[0] == "PATCH"] == [("PATCH", "ads/ad1"), ("PATCH", "posts/post1")]
+
+
 class TestCreationDrafts:
     def test_campaign_draft_defaults_to_paused_and_ad_group_budgets(self):
         _, ctx = _fake_api({("GET", "ad_accounts/a2_acct"): _ACCOUNT})
@@ -254,7 +304,11 @@ class TestCreationDrafts:
         assert "Targeting is required" in details
 
     def test_ad_group_draft_builds_paused_payload(self):
-        _, ctx = _fake_api({("GET", "campaigns/c1"): _CAMPAIGN, ("GET", "ad_accounts/a2_acct"): _ACCOUNT})
+        _, ctx = _fake_api({
+            ("GET", "campaigns/c1"): _CAMPAIGN, ("GET", "ad_accounts/a2_acct"): _ACCOUNT,
+            ("POST", "targeting/keyword_validations"): {"data": []},
+            ("POST", "targeting/geolocations_validations"): {"data": [{"geolocation": {"id": "DE"}, "error_message": ""}]},
+        })
         with ctx:
             preview = write.draft_reddit_ad_group(
                 _config(), campaign_id="c1", ad_group_name="DE devs", conversion_pixel_id="px1",
@@ -267,9 +321,41 @@ class TestCreationDrafts:
         assert payload["goal_value"] == 20_000_000
         assert payload["bid_strategy"] == "MAXIMIZE_VOLUME"
         assert payload["optimization_goal"] == "SIGN_UP"
-        assert payload["targeting"]["languages"] == ["de"]
+        assert payload["targeting"]["languages"] == ["DE"]
         assert payload["targeting"]["communities"] == ["r/python"]
         assert not any("No language targeting" in w for w in preview["warnings"])
+        assert not any("pre-validated" in w for w in preview["warnings"])
+
+    def test_ad_group_draft_refuses_unsafe_keywords_and_unknown_geos(self):
+        _, ctx = _fake_api({
+            ("GET", "campaigns/c1"): _CAMPAIGN, ("GET", "ad_accounts/a2_acct"): _ACCOUNT,
+            ("POST", "targeting/keyword_validations"): {"data": [
+                {"keyword": "python", "is_brand_safe": True}, {"keyword": "gore", "is_brand_safe": False},
+            ]},
+            ("POST", "targeting/geolocations_validations"): {"data": [
+                {"geolocation": {"id": "DE"}, "error_message": ""},
+                {"geolocation": {"id": "XX"}, "error_message": "XX is an unknown country code"},
+            ]},
+        })
+        with ctx:
+            result = write.draft_reddit_ad_group(
+                _config(), campaign_id="c1", ad_group_name="X", conversion_pixel_id="px1",
+                daily_budget=5, bid_strategy="MAXIMIZE_VOLUME", bid_type="CPC",
+                geolocations=["DE", "XX"], keywords=["python", "gore"],
+            )
+        assert result["error"] == "Validation failed"
+        assert any("not brand-safe: gore" in d for d in result["details"])
+        assert any("geolocation 'XX': XX is an unknown country code" in d for d in result["details"])
+
+    def test_ad_group_draft_warns_when_validation_is_unavailable(self):
+        _, ctx = _fake_api({("GET", "campaigns/c1"): _CAMPAIGN, ("GET", "ad_accounts/a2_acct"): _ACCOUNT})
+        with ctx:
+            preview = write.draft_reddit_ad_group(
+                _config(), campaign_id="c1", ad_group_name="X", conversion_pixel_id="px1",
+                daily_budget=5, bid_strategy="MAXIMIZE_VOLUME", bid_type="CPC", geolocations=["DE"],
+            )
+        assert preview["status"] == "PENDING_CONFIRMATION"
+        assert any("pre-validated" in w for w in preview["warnings"])
 
     def test_ad_group_draft_on_cbo_campaign_rejects_budget(self):
         _, ctx = _fake_api({("GET", "campaigns/c9"): _CBO_CAMPAIGN, ("GET", "ad_accounts/a2_acct"): _ACCOUNT})
@@ -461,13 +547,13 @@ class TestServerWrappers:
 
         tools = await mcp.list_tools()
         reddit = [t for t in tools if "reddit" in t.name]
-        assert len(reddit) >= 17
+        assert len(reddit) >= 20
         for tool in reddit:
             assert set(tool.tags) == {"reddit"}, tool.name
         writes = {t.name for t in reddit if not t.annotations.readOnlyHint}
         assert writes == {
             "pause_reddit_entity", "enable_reddit_entity", "remove_reddit_entity",
-            "update_reddit_campaign", "update_reddit_ad_group",
+            "update_reddit_campaign", "update_reddit_ad_group", "update_reddit_ad",
             "draft_reddit_campaign", "draft_reddit_ad_group", "draft_reddit_ad",
         }
         destructive = {t.name for t in reddit if t.annotations.destructiveHint}

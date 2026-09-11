@@ -2458,18 +2458,114 @@ def get_reddit_pixels(ad_account_id: str = "") -> dict:
 @mcp.tool(title="Search Reddit targeting", annotations=_READONLY, tags={"reddit"})
 @_safe
 def search_reddit_targeting(
-    kind: str, query: str = "", country: str = "", limit: int = 25
+    kind: str, query: str = "", country: str = "", website_url: str = "", limit: int = 25
 ) -> dict:
     """Look up targeting options for draft_reddit_ad_group.
 
     kind: "communities" (subreddits; query required), "interests" (query
     filters by name), "geolocations" (country ISO code and/or city query),
-    "languages" (ISO 639-1), "keywords" (comma-separated seed terms → suggestions).
+    "languages" (upper-case ISO 639-1 codes), "keywords" (comma-separated seed
+    terms → suggestions with Reddit-wide monthly views), or
+    "community_suggestions" (Reddit's related-community picks for seed
+    communities in query, e.g. "PPC,googleads", and/or a website_url).
     Returns ids/names to pass into the targeting lists.
     """
     from adloop.reddit.read import search_reddit_targeting as _impl
 
-    return _impl(current_config(), kind=kind, query=query, country=country, limit=limit)
+    return _impl(
+        current_config(), kind=kind, query=query, country=country, website_url=website_url, limit=limit
+    )
+
+
+@mcp.tool(title="Reddit account change history", annotations=_READONLY, tags={"reddit"})
+@_safe
+def get_reddit_account_history(
+    ad_account_id: str = "",
+    date_range_start: str = "",
+    date_range_end: str = "",
+    entity_type: str = "",
+    entity_ids: _StrListOpt = None,
+    limit: int = 100,
+) -> dict:
+    """Who changed what in the Reddit ad account: field, before/after, member, time.
+
+    The first thing to check when performance moves. Default window is the
+    last 30 days (account-local days). Optionally filter to one entity_type
+    ("campaign", "ad_group", "ad") with entity_ids; child entities are
+    included. Changes made through AdLoop show under the connected Reddit
+    user, like changes made in Ads Manager. Money fields are in account currency.
+    """
+    from adloop.reddit.read import get_reddit_account_history as _impl
+
+    return _impl(
+        current_config(),
+        ad_account_id=_reddit_account(ad_account_id),
+        date_range_start=date_range_start,
+        date_range_end=date_range_end,
+        entity_type=entity_type,
+        entity_ids=entity_ids,
+        limit=limit,
+    )
+
+
+@mcp.tool(title="Estimate a Reddit ad group", annotations=_READONLY, tags={"reddit"})
+@_safe
+def estimate_reddit_ad_group(
+    daily_budget: float | None = None,
+    lifetime_budget: float | None = None,
+    objective: str = "CLICKS",
+    bid_type: str = "CPC",
+    bid_strategy: str = "",
+    bid_value: float | None = None,
+    optimization_goal: str = "",
+    start_time: str = "",
+    end_time: str = "",
+    geolocations: _StrListOpt = None,
+    excluded_geolocations: _StrListOpt = None,
+    communities: _StrListOpt = None,
+    excluded_communities: _StrListOpt = None,
+    interests: _StrListOpt = None,
+    keywords: _StrListOpt = None,
+    languages: _StrListOpt = None,
+    gender: str = "",
+    platforms: _StrListOpt = None,
+    ad_account_id: str = "",
+) -> dict:
+    """Audience size, delivery estimate and Reddit's suggested bid for a planned ad group — read-only.
+
+    Reddit's counterpart of estimate_budget: run it before draft_reddit_ad_group
+    with the same targeting and budget. Returns the reachable and targetable
+    audience (fixed 30-day basis), estimated impressions/clicks/reach for the
+    schedule (default: tomorrow for 30 days), and the minimum/suggested
+    bid range for bid_type in account currency. Nothing is created.
+    """
+    from adloop.reddit.read import estimate_reddit_ad_group as _impl
+
+    targeting = {
+        "geolocations": geolocations,
+        "excluded_geolocations": excluded_geolocations,
+        "communities": communities,
+        "excluded_communities": excluded_communities,
+        "interests": interests,
+        "keywords": keywords,
+        "languages": languages,
+        "gender": gender.upper() if gender else None,
+        "platforms": platforms,
+    }
+    return _impl(
+        current_config(),
+        ad_account_id=_reddit_account(ad_account_id),
+        objective=objective,
+        daily_budget=daily_budget,
+        lifetime_budget=lifetime_budget,
+        bid_type=bid_type,
+        bid_strategy=bid_strategy,
+        bid_value=bid_value,
+        optimization_goal=optimization_goal,
+        start_time=start_time,
+        end_time=end_time,
+        targeting=targeting,
+    )
 
 
 @mcp.tool(title="Draft pausing a Reddit entity", annotations=_WRITE, tags={"reddit"})
@@ -2630,6 +2726,33 @@ def update_reddit_ad_group(
         gender=gender,
         platforms=platforms,
         expand_targeting=expand_targeting,
+    )
+
+
+@mcp.tool(title="Draft Reddit ad changes", annotations=_WRITE, tags={"reddit"})
+@_safe
+def update_reddit_ad(
+    ad_id: str,
+    ad_account_id: str = "",
+    name: str = "",
+    click_url: str = "",
+    allow_comments: bool | None = None,
+) -> dict:
+    """Draft changes to a Reddit ad — name, landing URL (click_url), comments on/off.
+
+    click_url is verified to be reachable. The headline and body of a live
+    Reddit post cannot be edited; for new copy use draft_reddit_ad and pause
+    the old ad. Preview shows old → new; confirm_and_apply executes.
+    """
+    from adloop.reddit.write import update_reddit_ad as _impl
+
+    return _impl(
+        current_config(),
+        ad_account_id=_reddit_account(ad_account_id),
+        ad_id=ad_id,
+        name=name,
+        click_url=click_url,
+        allow_comments=allow_comments,
     )
 
 

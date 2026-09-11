@@ -141,6 +141,16 @@ class TestRequest:
         assert "insufficient scope" in str(exc.value)
         assert "adsedit" in str(exc.value)
 
+    def test_field_level_validation_errors_are_surfaced(self, config, creds):
+        with patch(
+            "requests.request",
+            return_value=_Resp(400, {"error": {"code": 400, "message": "Bad Request", "fields": [
+                {"field": "data/targeting/languages/0", "message": "'en' is not one of ['EN', 'DE']"},
+            ]}}),
+        ):
+            with pytest.raises(RedditApiError, match="languages/0: 'en' is not one of"):
+                client.reddit_post(config, "ad_accounts/a2_x/ad_groups", {"data": {}})
+
     def test_other_errors_carry_status_url_and_detail(self, config, creds):
         with patch(
             "requests.request",

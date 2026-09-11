@@ -462,7 +462,8 @@ def _targeting_payload(
     if excluded_keywords is not None:
         targeting["excluded_keywords"] = _clean(excluded_keywords)
     if languages is not None:
-        targeting["languages"] = [x.lower() for x in _clean(languages)]
+        # Reddit validates against upper-case ISO 639-1 codes ('EN', 'DE').
+        targeting["languages"] = [x.upper() for x in _clean(languages)]
     if gender:
         gender = gender.strip().upper()
         if gender not in _GENDERS:
@@ -635,6 +636,93 @@ def update_reddit_ad_group(
                 "patch": patch,
                 "display": display,
                 "daily_equivalent": daily_equivalent,
+            },
+        },
+        warnings=warnings,
+    )
+
+
+def update_reddit_ad(
+    config: AdLoopConfig,
+    *,
+    ad_account_id: str = "",
+    ad_id: str = "",
+    name: str = "",
+    click_url: str = "",
+    allow_comments: bool | None = None,
+) -> dict:
+    """Draft ad changes: name, landing URL, comments on/off. Copy cannot change
+    (a live Reddit post's title and body are immutable); draft a new ad for that."""
+    blocked = _guard("update_reddit_ad", config)
+    if blocked:
+        return blocked
+    errors: list[str] = []
+    warnings: list[str] = []
+    ad_id = (ad_id or "").strip()
+    if not ad_id:
+        errors.append("ad_id is required (see get_reddit_ads)")
+    try:
+        account = resolve_account(config, ad_account_id)
+    except ValueError as e:
+        errors.append(str(e))
+        account = ""
+    click_url = (click_url or "").strip()
+    if click_url and not click_url.startswith(("http://", "https://")):
+        errors.append("click_url must start with http:// or https://")
+    if errors:
+        return _validation_error(errors)
+    if click_url:
+        from adloop.ads.write import _validate_urls
+
+        url_errors, url_warnings = _validate_urls([click_url])
+        for url, problem in url_errors.items():
+            if problem:
+                errors.append(f"'{url}' is not reachable: {problem}")
+        warnings.extend(url_warnings.values())
+        if errors:
+            return _validation_error(errors)
+
+    current = _fetch(config, "ad", ad_id)
+    if not current:
+        return {"error": f"Reddit ad '{ad_id}' was not found."}
+
+    patch: dict[str, Any] = {}
+    display: dict[str, Any] = {}
+    if name and name != current.get("name"):
+        patch["name"] = name
+        display["name"] = {"from": current.get("name"), "to": name}
+    if click_url and click_url != current.get("click_url"):
+        patch["click_url"] = click_url
+        display["click_url"] = {"from": current.get("click_url"), "to": click_url}
+    post_patch: dict[str, Any] = {}
+    if allow_comments is not None:
+        if not current.get("post_id"):
+            errors.append("This ad has no post to toggle comments on.")
+        else:
+            post_patch["allow_comments"] = bool(allow_comments)
+            display["allow_comments"] = {"to": bool(allow_comments)}
+    if errors:
+        return _validation_error(errors)
+    if not patch and not post_patch:
+        return _validation_error(
+            ["Nothing to change — pass name, click_url and/or allow_comments. "
+             "Headline and body of a live Reddit post cannot be edited: use draft_reddit_ad for new copy."]
+        )
+    if "click_url" in patch:
+        warnings.append("Changing the landing URL resets nothing on Reddit's side, but check UTM parameters match your analytics.")
+    return _store(
+        {
+            "operation": "reddit_update_ad",
+            "entity_type": "ad",
+            "entity_id": ad_id,
+            "customer_id": account,
+            "changes": {
+                "ad_account_id": account,
+                "ad_name": current.get("name"),
+                "post_id": current.get("post_id"),
+                "patch": patch,
+                "post_patch": post_patch,
+                "display": display,
             },
         },
         warnings=warnings,
@@ -921,6 +1009,28 @@ def draft_reddit_ad_group(
         except SafetyViolation as e:
             return {"error": str(e)}
 
+    # Reddit validates targeting only at apply time; ask it now so the
+    # preview already reflects what would be refused.
+    from adloop.reddit.read import validate_reddit_geolocations, validate_reddit_keywords
+
+    try:
+        unsafe = validate_reddit_keywords(
+            config, list(targeting.get("keywords") or []) + list(targeting.get("excluded_keywords") or [])
+        )
+        if unsafe:
+            errors.append(
+                f"Reddit refuses these keywords as not brand-safe: {', '.join(unsafe)}. Remove them."
+            )
+        bad_geos = validate_reddit_geolocations(
+            config, list(targeting.get("geolocations") or []) + list(targeting.get("excluded_geolocations") or [])
+        )
+        for geo_id, problem in bad_geos.items():
+            errors.append(f"geolocation '{geo_id}': {problem} (use ids from search_reddit_targeting)")
+    except Exception as exc:  # validation endpoints down: warn, don't block
+        warnings.append(f"Targeting could not be pre-validated with Reddit ({exc}); the apply may still refuse it.")
+    if errors:
+        return _validation_error(errors)
+
     payload: dict[str, Any] = {
         "campaign_id": campaign_id,
         "name": ad_group_name,
@@ -1158,6 +1268,12 @@ def preflight(config: AdLoopConfig, plan: ChangePlan) -> dict:
         checks["entity"] = current.get("name")
         checks["configured_status_now"] = current.get("configured_status")
         checks["already_in_target_status"] = current.get("configured_status") == changes.get("target_status")
+    elif plan.operation == "reddit_update_ad":
+        current = _fetch(config, "ad", plan.entity_id)
+        if not current:
+            raise ValueError(f"ad '{plan.entity_id}' no longer exists.")
+        checks["entity"] = current.get("name")
+        checks["post_id"] = current.get("post_id")
     elif plan.operation in ("reddit_update_campaign", "reddit_update_ad_group"):
         current = _fetch(config, plan.entity_type, plan.entity_id)
         if not current:
@@ -1222,6 +1338,21 @@ def apply_plan(config: AdLoopConfig, plan: ChangePlan) -> dict:
             "configured_status": data.get("configured_status", changes["target_status"]),
             "effective_status": data.get("effective_status"),
         }
+
+    if op == "reddit_update_ad":
+        result: dict[str, Any] = {"entity_type": "ad", "entity_id": plan.entity_id, "updated_fields": []}
+        if changes.get("patch"):
+            data = data_of(reddit_patch(config, f"ads/{plan.entity_id}", {"data": changes["patch"]}))
+            result["name"] = data.get("name")
+            result["click_url"] = data.get("click_url")
+            result["updated_fields"] += sorted(changes["patch"].keys())
+        if changes.get("post_patch") and changes.get("post_id"):
+            post = data_of(
+                reddit_patch(config, f"posts/{changes['post_id']}", {"data": changes["post_patch"]})
+            )
+            result["allow_comments"] = post.get("allow_comments", changes["post_patch"].get("allow_comments"))
+            result["updated_fields"].append("allow_comments")
+        return result
 
     if op in ("reddit_update_campaign", "reddit_update_ad_group"):
         collection = _COLLECTIONS[plan.entity_type]
