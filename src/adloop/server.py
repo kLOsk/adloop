@@ -2422,7 +2422,8 @@ def run_reddit_report(
     fields: Reddit report field names, e.g. ["SPEND", "CLICKS", "REACH",
     "VIDEO_STARTED", "CONVERSION_PURCHASE_TOTAL_VALUE", "KEY_CONVERSION_TOTAL_COUNT"].
     breakdowns: up to 3 of DATE, HOUR, CAMPAIGN_ID, AD_GROUP_ID, AD_ID, COUNTRY,
-    REGION, COMMUNITY, KEYWORD, INTEREST, PLACEMENT, GENDER, OS_TYPE.
+    REGION, COMMUNITY, KEYWORD, INTEREST, PLACEMENT, GENDER, OS_TYPE
+    (HOUR and DATE cannot be combined). Dates are account-local days.
     filter: Reddit filter expression (e.g. "campaign_id==abc123").
     Microcurrency fields are converted to currency amounts.
     """

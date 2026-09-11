@@ -144,8 +144,11 @@ class TestPerformance:
             )
         body = [c for c in calls if c[0] == "POST"][0][3]["data"]
         assert body["breakdowns"] == ["CAMPAIGN_ID"]
-        assert body["starts_at"] == "2026-09-01T00:00:00Z"
-        assert body["ends_at"] == "2026-09-08T00:00:00Z"
+        # Account-local days (Europe/Berlin is UTC+2 in September) and
+        # ends_at = local midnight OF the end day: Reddit covers
+        # [starts_at, ends_at + 24h), verified live 2026-09-11.
+        assert body["starts_at"] == "2026-08-31T22:00:00Z"
+        assert body["ends_at"] == "2026-09-06T22:00:00Z"
         assert body["time_zone_id"] == "Europe/Berlin"
         assert "SPEND" in body["fields"] and "KEY_CONVERSION_TOTAL_COUNT" in body["fields"]
 
@@ -220,6 +223,33 @@ class TestPerformance:
             read.run_reddit_report(config, fields=[])
 
 
+class TestReportWindow:
+    def test_local_days_become_utc_hours(self):
+        assert read.report_window("2026-09-08", "2026-09-10", "Europe/Amsterdam") == (
+            "2026-09-07T22:00:00Z", "2026-09-09T22:00:00Z", "2026-09-08", "2026-09-10",
+        )
+
+    def test_single_day_window(self):
+        starts, ends, *_ = read.report_window("2026-09-09", "2026-09-09", "Europe/Amsterdam")
+        assert (starts, ends) == ("2026-09-08T22:00:00Z", "2026-09-08T22:00:00Z")
+
+    def test_utc_and_unknown_zone(self):
+        assert read.report_window("2026-01-05", "2026-01-06", "UTC")[:2] == (
+            "2026-01-05T00:00:00Z", "2026-01-06T00:00:00Z",
+        )
+        assert read.report_window("2026-01-05", "2026-01-06", "Not/AZone")[:2] == (
+            "2026-01-05T00:00:00Z", "2026-01-06T00:00:00Z",
+        )
+
+    def test_half_hour_zone_floors_to_the_hour(self):
+        # Asia/Kolkata is UTC+5:30; Reddit only takes hour-aligned timestamps.
+        assert read.report_window("2026-03-01", "2026-03-01", "Asia/Kolkata")[0] == "2026-02-28T18:00:00Z"
+
+    def test_start_after_end_is_refused(self):
+        with pytest.raises(ValueError, match="must not be after"):
+            read.report_window("2026-09-10", "2026-09-08")
+
+
 class TestPixels:
     def test_pixels_report_last_fired_and_cross_check_ad_groups(self, config):
         _, ctx = _fake_api({
@@ -283,12 +313,23 @@ class TestTargeting:
 
     def test_keyword_suggestions_post_seeds(self, config):
         calls, ctx = _fake_api({
-            ("POST", "targeting/keyword_suggestions"): {"data": [{"keyword": "python hosting", "volume": 10}]},
+            ("POST", "targeting/keyword_suggestions"): {"data": {"keyword_suggestions": [
+                {"keyword": "python hosting", "monthly_views": 10},
+                {"keyword": "django", "monthly_views": 500},
+            ]}},
         })
         with ctx:
             result = read.search_reddit_targeting(config, kind="keywords", query="python, hosting")
         assert calls[0][3] == {"data": {"seed_keywords": ["python", "hosting"]}}
-        assert result["results"][0]["keyword"] == "python hosting"
+        assert [r["keyword"] for r in result["results"]] == ["django", "python hosting"]
+
+    def test_languages_use_code(self, config):
+        _, ctx = _fake_api({
+            ("GET", "targeting/languages"): {"data": [{"code": "DE", "name": "German"}, {"code": "EN", "name": "English"}]},
+        })
+        with ctx:
+            result = read.search_reddit_targeting(config, kind="languages", query="de")
+        assert result["results"] == [{"code": "DE", "name": "German"}]
 
     def test_unknown_kind(self, config):
         with pytest.raises(ValueError, match="kind must be"):

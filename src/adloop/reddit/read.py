@@ -138,19 +138,52 @@ def _parse_date(value: str, *, default: date) -> date:
         ) from exc
 
 
-def report_window(date_range_start: str = "", date_range_end: str = "") -> tuple[str, str, str, str]:
+def _local_hour_utc(day: date, time_zone_id: str, hour: int = 0) -> str:
+    """``hour`` o'clock of ``day`` in the account's time zone, as Reddit's
+    hour-aligned UTC timestamp (``YYYY-MM-DDTHH:00:00Z``).
+
+    Verified live against a Europe/Amsterdam account (2026-09-11):
+    timestamps are UTC, the DATE breakdown follows ``time_zone_id``,
+    ``starts_at`` is hour-exact, and the report covers
+    ``[starts_at, ends_at + 24h)``: a window "ending" at midnight returns
+    the whole following day, and one ending at 23:00 returns 23 hours of
+    the next day. Zones with a non-hour offset are floored to the hour,
+    which is the best Reddit's hourly granularity allows.
+    """
+    from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+
+    try:
+        tz = ZoneInfo(time_zone_id or "UTC")
+    except (ZoneInfoNotFoundError, ValueError):
+        tz = timezone.utc
+    local = datetime(day.year, day.month, day.day, hour, tzinfo=tz)
+    in_utc = local.astimezone(timezone.utc)
+    return in_utc.strftime("%Y-%m-%dT%H:00:00Z")
+
+
+def report_window(
+    date_range_start: str = "", date_range_end: str = "", time_zone_id: str = "UTC"
+) -> tuple[str, str, str, str]:
     """Default last 30 days; returns (starts_at, ends_at, start_date, end_date).
 
-    Reddit wants hour-aligned ISO timestamps. ``ends_at`` is the midnight
-    after the requested end day so the end day is included in full.
+    Days are account-local (``time_zone_id``): ``starts_at`` is local
+    midnight of the start day and ``ends_at`` local midnight OF the end
+    day, both expressed in UTC. Reddit adds a full day to ``ends_at``, so
+    this covers the end day exactly; midnight *after* it would pull in the
+    whole following day.
     """
-    today = datetime.now(timezone.utc).date()
+    from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+
+    try:
+        today = datetime.now(ZoneInfo(time_zone_id or "UTC")).date()
+    except (ZoneInfoNotFoundError, ValueError):
+        today = datetime.now(timezone.utc).date()
     end = _parse_date(date_range_end, default=today)
     start = _parse_date(date_range_start, default=end - timedelta(days=29))
     if start > end:
         raise ValueError("date_range_start must not be after date_range_end.")
-    starts_at = f"{start.isoformat()}T00:00:00Z"
-    ends_at = f"{(end + timedelta(days=1)).isoformat()}T00:00:00Z"
+    starts_at = _local_hour_utc(start, time_zone_id)
+    ends_at = _local_hour_utc(end, time_zone_id)
     return starts_at, ends_at, start.isoformat(), end.isoformat()
 
 
@@ -574,9 +607,11 @@ def get_reddit_performance(
     breakdowns = list(_LEVEL_BREAKDOWNS[level])
     if breakdown:
         breakdowns.append(_EXTRA_BREAKDOWNS[breakdown])
-    starts_at, ends_at, start_date, end_date = report_window(date_range_start, date_range_end)
     meta = account_meta(config, account)
     currency = meta["currency"]
+    starts_at, ends_at, start_date, end_date = report_window(
+        date_range_start, date_range_end, meta["time_zone_id"]
+    )
 
     rows = _run_report(
         config,
@@ -726,8 +761,10 @@ def run_reddit_report(
         )
     if len(breakdowns) > _MAX_BREAKDOWNS + 1:
         raise ValueError("Reddit allows at most 3 breakdowns (4 with COUNTRY and REGION).")
-    starts_at, ends_at, start_date, end_date = report_window(date_range_start, date_range_end)
     meta = account_meta(config, account)
+    starts_at, ends_at, start_date, end_date = report_window(
+        date_range_start, date_range_end, time_zone_id or meta["time_zone_id"]
+    )
     rows = _run_report(
         config,
         account,
@@ -891,11 +928,14 @@ def search_reddit_targeting(
             for r in rows
         ]
     elif kind == "languages":
+        # Live shape: {"code": "DE", "name": "German"}; ad-group targeting
+        # takes the code (lower-cased by _targeting_payload).
         rows = reddit_get_all(config, "targeting/languages")
         q = query.lower()
         items = [
-            r for r in rows
-            if not q or q in str(r.get("name") or "").lower() or q == str(r.get("id") or "").lower()
+            {"code": r.get("code"), "name": r.get("name")}
+            for r in rows
+            if not q or q in str(r.get("name") or "").lower() or q == str(r.get("code") or "").lower()
         ]
     else:  # keywords
         if not query:
@@ -904,12 +944,18 @@ def search_reddit_targeting(
         payload = reddit_post(
             config, "targeting/keyword_suggestions", {"data": {"seed_keywords": seeds}}
         )
+        # Live shape: {"data": {"keyword_suggestions": [{"keyword", "monthly_views"}]}}
         data = payload.get("data")
-        rows = data if isinstance(data, list) else (data or {}).get("keywords") or []
+        if isinstance(data, list):
+            rows = data
+        else:
+            data = data or {}
+            rows = data.get("keyword_suggestions") or data.get("keywords") or []
         items = [
             r if isinstance(r, dict) else {"keyword": r}
             for r in rows
         ]
+        items.sort(key=lambda r: r.get("monthly_views") or 0, reverse=True)
 
     return {
         "kind": kind,
@@ -918,7 +964,8 @@ def search_reddit_targeting(
         "total": len(items),
         "note": (
             "Use the returned ids/names in draft_reddit_ad_group targeting. "
-            "Communities and interests target by name/id, geolocations by id, "
-            "languages by ISO 639-1 code."
+            "Communities target by name, interests by id, geolocations by id "
+            "(e.g. 'DE' or 'DE:2874225'), languages by code (e.g. 'de'). "
+            "Keyword suggestions carry Reddit-wide monthly_views, not search volume."
         ),
     }
