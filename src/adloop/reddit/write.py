@@ -1055,8 +1055,9 @@ def draft_reddit_ad_group(
         payload["optimization_goal"] = optimization_goal
     elif is_cbo and campaign.get("optimization_goal"):
         payload["optimization_goal"] = campaign["optimization_goal"]
-    if start_time:
-        payload["start_time"] = start_time
+    # Reddit requires start_time on ad group creation (the spec marks it
+    # optional; the API answers "Input should be a valid datetime").
+    payload["start_time"] = start_time or datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     if end_time:
         payload["end_time"] = end_time
 
@@ -1145,7 +1146,7 @@ def draft_reddit_ad(
         )
     click_url = (click_url or "").strip()
     if not click_url:
-        errors.append("click_url is required — the landing page users reach on click")
+        errors.append("click_url is required — the landing page users should reach")
     elif not click_url.startswith(("http://", "https://")):
         errors.append("click_url must start with http:// or https://")
     image_url = (image_url or "").strip()
@@ -1153,6 +1154,14 @@ def draft_reddit_ad(
         errors.append("IMAGE posts need image_url (a publicly reachable image)")
     if body and len(body) > _MAX_TEXT_BODY_CHARS:
         errors.append("body is too long")
+    if post_type == "TEXT" and click_url and click_url not in (body or ""):
+        # Free-form (text) ads click through to the post, never to a URL
+        # ("Free form ads cannot have a click url", verified live), so the
+        # landing link must be part of the body or the ad leads nowhere.
+        errors.append(
+            "TEXT ads open the post itself, not click_url: put the full click_url into "
+            "body (e.g. as the last line) so readers can reach the site, or use post_type IMAGE."
+        )
     call_to_action = (call_to_action or "").strip()
     if call_to_action and call_to_action not in _CALL_TO_ACTIONS:
         errors.append(f"call_to_action must be one of {sorted(_CALL_TO_ACTIONS)}")
@@ -1179,19 +1188,23 @@ def draft_reddit_ad(
     if not ad_group:
         return {"error": f"Reddit ad group '{ad_group_id}' was not found."}
 
-    content_item: dict[str, Any] = {"destination_url": click_url}
-    if call_to_action:
-        content_item["call_to_action"] = call_to_action
-    if display_url:
-        content_item["display_url"] = display_url.strip()
-    if post_type == "IMAGE":
-        content_item["media_url"] = image_url
     post_payload: dict[str, Any] = {
         "type": post_type,
         "headline": headline,
         "allow_comments": bool(allow_comments),
-        "content": [content_item],
     }
+    if post_type == "IMAGE":
+        content_item: dict[str, Any] = {"destination_url": click_url, "media_url": image_url}
+        if call_to_action:
+            content_item["call_to_action"] = call_to_action
+        if display_url:
+            content_item["display_url"] = display_url.strip()
+        post_payload["content"] = [content_item]
+    else:
+        # TEXT posts must not carry a content block ("Post content must be
+        # empty for this post type", verified live); the click_url lives on
+        # the ad, and the CTA does not apply.
+        post_payload["content"] = []
     if body:
         post_payload["body"] = body
     ad_payload: dict[str, Any] = {
@@ -1199,8 +1212,14 @@ def draft_reddit_ad(
         "name": (ad_name or headline)[:200],
         "configured_status": "PAUSED",
         "profile_id": profile_id,
-        "click_url": click_url,
     }
+    if post_type == "IMAGE":
+        ad_payload["click_url"] = click_url
+    else:
+        warnings.append(
+            "Text ads open the Reddit post on click; the link in the body is the way to your site. "
+            "Expect post views and comments, not landing-page clicks, in the report."
+        )
     if allow_comments:
         warnings.append(
             "Comments are enabled: Redditors will reply publicly on the ad. "

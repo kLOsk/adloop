@@ -323,6 +323,8 @@ class TestCreationDrafts:
         assert payload["optimization_goal"] == "SIGN_UP"
         assert payload["targeting"]["languages"] == ["DE"]
         assert payload["targeting"]["communities"] == ["r/python"]
+        # Reddit requires it; verified live 2026-09-11.
+        assert payload["start_time"].endswith("Z") and len(payload["start_time"]) == 20
         assert not any("No language targeting" in w for w in preview["warnings"])
         assert not any("pre-validated" in w for w in preview["warnings"])
 
@@ -378,22 +380,44 @@ class TestCreationDrafts:
         with ctx, patch("adloop.ads.write._validate_urls", return_value=({"https://example.com/x": None}, {})):
             preview = write.draft_reddit_ad(
                 _config(), ad_group_id="g1", profile_id="p1", headline="Ship faster",
-                click_url="https://example.com/x", call_to_action="Learn More", body="Try it",
+                click_url="https://example.com/x", call_to_action="Learn More",
+                body="Try it: https://example.com/x",
             )
         changes = preview["changes"]
         assert changes["post"]["type"] == "TEXT"
         assert changes["post"]["headline"] == "Ship faster"
-        assert changes["post"]["content"][0] == {
-            "destination_url": "https://example.com/x", "call_to_action": "Learn More",
-        }
+        assert changes["post"]["content"] == []  # Reddit refuses content on TEXT posts
+        assert changes["post"]["body"] == "Try it: https://example.com/x"
+        assert "click_url" not in changes["ad"]  # free-form ads open the post
+        assert any("open the Reddit post" in w for w in preview["warnings"])
         assert changes["ad"]["configured_status"] == "PAUSED"
-        assert changes["ad"]["profile_id"] == "p1"
-        assert any("PAUSED" in w for w in preview["warnings"])
+
+    def test_text_ad_requires_the_link_in_the_body(self):
+        with patch("adloop.ads.write._validate_urls", return_value=({"https://example.com/x": None}, {})):
+            result = write.draft_reddit_ad(
+                _config(), ad_group_id="g1", profile_id="p1", headline="x",
+                click_url="https://example.com/x", body="no link here",
+            )
+        assert any("put the full click_url into body" in d for d in result["details"])
+
+    def test_image_ad_draft_carries_content_block(self):
+        _, ctx = _fake_api({("GET", "ad_groups/g1"): _AD_GROUP})
+        with ctx, patch("adloop.ads.write._validate_urls", return_value=({"https://example.com/x": None, "https://img.example.com/a.jpg": None}, {})):
+            preview = write.draft_reddit_ad(
+                _config(), ad_group_id="g1", profile_id="p1", headline="Look", post_type="image",
+                click_url="https://example.com/x", image_url="https://img.example.com/a.jpg",
+                call_to_action="Learn More", display_url="example.com",
+            )
+        assert preview["changes"]["post"]["content"] == [{
+            "destination_url": "https://example.com/x", "media_url": "https://img.example.com/a.jpg",
+            "call_to_action": "Learn More", "display_url": "example.com",
+        }]
 
     def test_ad_draft_rejects_unreachable_url(self):
         with patch("adloop.ads.write._validate_urls", return_value=({"https://example.com/404": "HTTP 404"}, {})):
             result = write.draft_reddit_ad(
                 _config(), ad_group_id="g1", profile_id="p1", headline="x", click_url="https://example.com/404",
+                body="see https://example.com/404",
             )
         assert any("not reachable" in d for d in result["details"])
 
@@ -470,6 +494,7 @@ class TestConfirmAndApplyIntegration:
         with ctx, patch("adloop.ads.write._validate_urls", return_value=({"https://example.com": None}, {})):
             plan_id = write.draft_reddit_ad(
                 _config(), ad_group_id="g1", profile_id="p1", headline="x", click_url="https://example.com",
+                body="see https://example.com",
             )["plan_id"]
 
         def failing_ad(body):
