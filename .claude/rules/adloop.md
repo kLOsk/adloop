@@ -143,6 +143,7 @@ Reddit is a second ad platform with its own connection (own OAuth app, no develo
 - **Report data lags up to 6 hours** and a window ending today may be empty or partial. Use `compact=true` for account audits.
 - `conversions` in `get_reddit_performance` is the account's *key conversion event*; use `run_reddit_report` with `CONVERSION_PURCHASE_*` / `CONVERSION_SIGN_UP_*` fields for per-event numbers.
 - **Rate limits are per Reddit user** (reporting 60 requests/min). A `REDDIT_RATE_LIMITED` error carries `reset_seconds`: wait, tell the user, never retry in a loop.
+- **After a status change, trust `configured_status` in the apply result**, not `effective_status`: Reddit's immediate response can still carry the previous effective status for a few seconds. Re-read with `get_reddit_ad_groups` / `get_reddit_ads` if the effective state matters.
 
 ### When user asks about Reddit performance or "how are my Reddit ads doing"
 
