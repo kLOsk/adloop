@@ -1096,6 +1096,131 @@ def detach_shared_set_from_campaigns(
     return plan.to_preview()
 
 
+def draft_conversion_goal_settings(
+    config: AdLoopConfig,
+    *,
+    customer_id: str = "",
+    level: str = "customer",
+    campaign_id: str = "",
+    goals: list[dict] | None = None,
+) -> dict:
+    """Draft biddability changes for conversion goals — returns PREVIEW.
+
+    ``biddable`` decides whether a goal is optimized for or only reported, so
+    this is the lever for "stop bidding on micro conversions" without touching
+    the conversion actions themselves.
+
+    level: "customer" (account-wide default) or "campaign" (override for one
+        campaign — requires campaign_id).
+    goals: list of {"category": "PURCHASE", "origin": "WEBSITE", "biddable": true}.
+        Valid category/origin names are enum members from
+        ConversionActionCategoryEnum and ConversionOriginEnum; the current
+        configuration is read first and shown as before/after.
+
+    Goal resources are update-only — goals exist because conversion actions
+    define them, so nothing is created or deleted here.
+
+    Call ``confirm_and_apply`` with the returned plan_id to execute.
+    """
+    from adloop.ads import conversion_goals as cg
+    from adloop.ads.client import get_ads_client, normalize_customer_id
+    from adloop.safety.guards import SafetyViolation, check_blocked_operation
+    from adloop.safety.preview import ChangePlan, store_plan
+
+    try:
+        check_blocked_operation("update_conversion_goals", config.safety)
+    except SafetyViolation as e:
+        return {"error": str(e)}
+
+    errors: list[str] = []
+    level = (level or cg.CUSTOMER).strip().lower()
+    if level not in cg.LEVELS:
+        errors.append("level must be 'customer' or 'campaign'")
+    campaign_id = str(campaign_id or "").strip()
+    if level == cg.CAMPAIGN:
+        if not campaign_id:
+            errors.append("campaign_id is required for level='campaign'")
+        elif not campaign_id.isdigit():
+            errors.append("campaign_id must be a numeric ID")
+
+    cleaned_goals: list[dict] = []
+    for goal in goals or []:
+        category = str(goal.get("category", "")).strip().upper()
+        origin = str(goal.get("origin", "")).strip().upper()
+        if not category or not origin:
+            errors.append("every goal needs category and origin")
+            continue
+        if "biddable" not in goal:
+            errors.append(f"{category}/{origin} needs biddable (true or false)")
+            continue
+        cleaned_goals.append(
+            {"category": category, "origin": origin, "biddable": bool(goal["biddable"])}
+        )
+    if not cleaned_goals and not errors:
+        errors.append("At least one goal is required")
+    if errors:
+        return {"error": "Validation failed", "details": errors}
+
+    cid = normalize_customer_id(customer_id or config.ads.customer_id)
+    state = cg.read_conversion_goals(
+        get_ads_client(config), cid,
+        campaign_id=campaign_id if level == cg.CAMPAIGN else "",
+    )
+
+    if level == cg.CAMPAIGN:
+        current = []
+        for campaign in state.get("campaigns", []):
+            if campaign["campaign_id"] == campaign_id:
+                current = campaign.get("goals") or []
+                break
+        if not current:
+            return {
+                "error": (
+                    f"No conversion goals found for campaign {campaign_id} — "
+                    "check the ID, or read them first with get_conversion_goals."
+                )
+            }
+    else:
+        current = state.get("customer_goals") or []
+        if not current:
+            return {
+                "error": (
+                    "No customer conversion goals found. Every account has them "
+                    "once conversion actions exist — if this is empty, the read "
+                    "failed; check get_conversion_goals for the raw error."
+                )
+            }
+
+    goal_changes, unknown_pairs = cg.plan_goal_changes(current, cleaned_goals)
+    if unknown_pairs:
+        return {
+            "error": "Validation failed",
+            "details": [
+                "These goals are not part of the current configuration: "
+                + ", ".join(unknown_pairs),
+                "Conversion goals cannot be created here, and the API request "
+                "has no partial failure — one unknown pair would reject the "
+                "whole change. Read the current set with get_conversion_goals.",
+            ],
+        }
+    changes: dict = {
+        "level": level,
+        "goals": goal_changes,
+    }
+    if level == cg.CAMPAIGN:
+        changes["campaign_id"] = campaign_id
+
+    plan = ChangePlan(
+        operation="update_conversion_goals",
+        entity_type="conversion_goals",
+        entity_id=campaign_id or "customer",
+        customer_id=customer_id,
+        changes=changes,
+    )
+    store_plan(plan)
+    return plan.to_preview()
+
+
 def draft_demographic_targeting(
     config: AdLoopConfig,
     *,
@@ -2895,6 +3020,7 @@ def _execute_plan(config: AdLoopConfig, plan: object) -> dict:
         "add_to_negative_keyword_list": _apply_add_to_negative_keyword_list,
         "attach_shared_set_to_campaigns": _apply_attach_shared_set_to_campaigns,
         "detach_shared_set_from_campaigns": _apply_detach_shared_set_from_campaigns,
+        "update_conversion_goals": _apply_conversion_goals,
         "add_demographic_criteria": _apply_add_demographic_criteria,
         "pause_entity": _apply_status_change,
         "enable_entity": _apply_status_change,
@@ -4184,3 +4310,26 @@ def _apply_detach_shared_set_from_campaigns(
             if msg:
                 out["partial_failure_message"] = msg
     return out
+
+
+# ---------------------------------------------------------------------------
+# Brand lists (SharedSets of type BRANDS)
+# ---------------------------------------------------------------------------
+
+
+# ---------------------------------------------------------------------------
+# AI Max controls
+# ---------------------------------------------------------------------------
+
+
+def _apply_conversion_goals(client: object, cid: str, changes: dict) -> dict:
+    """Flip the biddable flag of the planned goals, then read the state back."""
+    from adloop.ads import conversion_goals as cg
+
+    outcome = cg.mutate_conversion_goals(client, cid, changes)
+    outcome["readback"] = cg.read_conversion_goals(
+        client, cid, campaign_id=changes.get("campaign_id", "")
+    )
+    return outcome
+
+

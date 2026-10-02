@@ -105,7 +105,13 @@ The best features come from real workflows. If you're using AdLoop and find your
 | `get_detailed_asset_performance` | Top-performing asset combinations — which headline+description+image combos Google selects most |
 | `get_audience_performance` | Audience segment performance — remarketing, in-market, affinity, demographics |
 | `get_demographic_targeting` | List demographic criteria (age/gender/parental status/income) on an ad group or campaign |
+| `get_conversion_goals` | Conversion goal configuration — account-wide goals with their `biddable` flag, per-campaign overrides, each campaign's goal config and the named goal sets |
 | `run_gaql` | Arbitrary GAQL queries for anything else |
+
+
+
+> **Conversion goals decide what is bid on** — a goal is the pair (category, origin) of your conversion actions, and `biddable` marks whether Google optimizes for it or only reports it. `get_conversion_goals` shows the account-wide defaults, per-campaign overrides and the named goal set in use; `draft_conversion_goal_settings` flips a flag at either level. The resources are update-only (goals come into existence with the conversion actions that define them), and the mutate requests have no partial failure — one unknown pair would reject the whole change, so the draft refuses pairs that are not in the current configuration.
+
 
 > **Compact mode** — `get_campaign_performance`, `get_keyword_performance`, `get_search_terms`, and `get_ad_performance` accept `compact=true`: account totals, breakdowns, top-10 rows, and pre-computed offender lists (zero-conversion spenders, low-QS keywords, negative-keyword candidates, thin RSAs) instead of every row. ~90% smaller responses — built for account audits so raw tables don't flood your AI's context.
 
@@ -219,6 +225,7 @@ All write operations follow a **draft → preview → confirm** workflow. Nothin
 | `draft_key_event` | Mark a GA4 event as a key event (conversion) — the fix for "fires but isn't tracked as a conversion" |
 | `draft_demographic_targeting` | Propose demographic criteria (age, gender, parental status, income) — exclusions by default |
 | `propose_negative_keyword_list` | Draft a shared negative keyword list (SharedSet) and attach it to a campaign — reusable across multiple campaigns |
+| `draft_conversion_goal_settings` | Draft which conversions bid: sets the `biddable` flag of (category, origin) goals, at account level or as a campaign override |
 | `pause_entity` | Pause a campaign, ad group, ad, or keyword |
 | `enable_entity` | Re-enable a paused entity |
 | `remove_entity` | Permanently remove an entity (irreversible — prefers pause). Supports keywords, negative keywords, ads, ad groups, campaigns. |

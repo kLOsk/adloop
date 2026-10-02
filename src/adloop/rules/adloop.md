@@ -44,6 +44,7 @@ You have access to AdLoop MCP tools that connect Google Ads, Reddit Ads and Goog
 | `get_detailed_asset_performance` | Top-performing asset combinations — which headline+description+image combos Google selects most | `campaign_id` (optional) |
 | `get_audience_performance` | Audience segment metrics — remarketing, in-market, affinity, demographics | `date_range_start`, `date_range_end`, `campaign_id` (optional) |
 | `get_demographic_targeting` | List current demographic criteria (age/gender/parental status/income) on an ad group or campaign — returns each criterion's `remove_id` for use with `remove_entity` | exactly one of `ad_group_id` or `campaign_id` |
+| `get_conversion_goals` | Which conversions Google bids on: account-wide goals with their `biddable` flag, per-campaign overrides, each campaign's goal config (`CUSTOMER`/`CAMPAIGN` + named goal set) and the available goal sets | `campaign_id` (optional), `customer_id` |
 | `run_gaql` | Custom queries not covered by other tools | `query`, `format` (table/json/csv) |
 
 **Return format notes:**
@@ -204,6 +205,7 @@ Reddit is a second ad platform with its own connection (own OAuth app, no develo
 | `add_to_negative_keyword_list` | Append keywords to an EXISTING shared negative keyword list (does NOT add) | `shared_set_id` (from `get_negative_keyword_lists`), keyword list, `match_type` |
 | `attach_shared_set_to_campaigns` | Attach an EXISTING shared set (e.g. shared negative keyword list) to one or more campaigns. Use after creating a campaign to inherit pre-built negatives. | `shared_set_id` (from `get_negative_keyword_lists`), `campaign_ids` list |
 | `detach_shared_set_from_campaigns` | Detach a shared set from one or more campaigns. Removes only the linkage; the shared set and its keywords stay intact. | `shared_set_id`, `campaign_ids` list |
+| `draft_conversion_goal_settings` | Decide which conversions count toward bidding: set the `biddable` flag of (category, origin) goals, account-wide or per campaign. Update-only — goals are created by the conversion actions that define them, and there is no partial failure, so unknown pairs are refused at draft time. | `goals` (list of {category, origin, biddable}), `level` ("customer" default or "campaign"), `campaign_id` (required for level="campaign") |
 | `draft_demographic_targeting` | Propose demographic criteria (age, gender, parental status, income range) at ad group or campaign level. Defaults to EXCLUSION (`negative=True`). | exactly one of `ad_group_id` or `campaign_id`, at least one of `age_ranges`/`genders`/`parental_statuses`/`income_ranges`, optional `negative` (default True) |
 | `pause_entity` | Propose pausing campaign/ad group/ad/keyword | `entity_type`, `entity_id` |
 | `enable_entity` | Propose enabling paused entity | `entity_type`, `entity_id` |

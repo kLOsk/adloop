@@ -1816,6 +1816,11 @@ def draft_keywords(
     )
 
 
+@mcp.tool(
+    title="Draft keyword match type changes",
+    annotations=_WRITE,
+    tags={"ads"},
+)
 @mcp.tool(title="Draft negative keywords", annotations=_WRITE, tags={"ads"})
 @_safe
 def add_negative_keywords(
@@ -1993,6 +1998,50 @@ def detach_shared_set_from_campaigns(
         customer_id=customer_id or current_config().ads.customer_id,
         shared_set_id=shared_set_id,
         campaign_ids=campaign_ids,
+    )
+
+
+@mcp.tool(title="Draft conversion goal settings", annotations=_WRITE, tags={"ads"})
+@_safe
+def draft_conversion_goal_settings(
+    goals: _DictList,
+    level: str = "customer",
+    campaign_id: str = "",
+    customer_id: str = "",
+) -> dict:
+    """Draft biddability changes for conversion goals — returns a PREVIEW.
+
+    Use this to decide which conversions Google bids on: a goal is the pair
+    (category, origin), and ``biddable`` marks it as optimized-for. Typical use
+    is turning micro conversions off at account level, or overriding that for a
+    single campaign.
+
+    goals: list of {"category": "PURCHASE", "origin": "WEBSITE", "biddable": true}.
+        Category and origin are the v25 enum names (ConversionActionCategoryEnum,
+        ConversionOriginEnum). The current configuration is read first, so the
+        preview shows before/after per goal.
+    level: "customer" (default) for the account-wide default, or "campaign" for
+        one campaign — the latter needs campaign_id.
+
+    Goal resources are update-only: goals exist because conversion actions
+    define them, so nothing is created or deleted here.
+
+    Call confirm_and_apply with the returned plan_id to execute.
+
+    Args:
+        goals: The category/origin pairs to set, each with the target biddable flag.
+        level: "customer" for the account-wide default, "campaign" for one campaign.
+        campaign_id: Numeric campaign ID — required when level is "campaign".
+        customer_id: Ads account ID. Defaults to the configured account.
+    """
+    from adloop.ads.write import draft_conversion_goal_settings as _impl
+
+    return _impl(
+        current_config(),
+        customer_id=customer_id or current_config().ads.customer_id,
+        level=level,
+        campaign_id=campaign_id,
+        goals=goals,
     )
 
 
@@ -3277,6 +3326,42 @@ def discover_keywords(
         page_size=page_size,
         customer_id=customer_id or current_config().ads.customer_id,
         include_monthly_volumes=include_monthly_volumes,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Google Ads — Brand Tools
+# ---------------------------------------------------------------------------
+
+
+@mcp.tool(title="Conversion goals", annotations=_READONLY, tags={"ads"})
+@_safe
+def get_conversion_goals(
+    campaign_id: str = "",
+    customer_id: str = "",
+) -> dict:
+    """Read the conversion goal configuration — which conversions bid.
+
+    Returns the account-wide goals (category/origin pairs with their
+    ``biddable`` flag), the per-campaign overrides, each campaign's goal
+    configuration (``goal_config_level`` CUSTOMER or CAMPAIGN, plus the named
+    goal set in use) and the available named goal sets.
+
+    ``biddable`` is what decides whether a goal is optimized for or only
+    reported — the lever for "stop bidding on micro conversions" without
+    touching the conversion actions themselves.
+
+    Args:
+        campaign_id: Numeric campaign ID to focus on. Omit for account level
+            plus every campaign that has goal overrides.
+        customer_id: Ads account ID. Defaults to the configured account.
+    """
+    from adloop.ads.conversion_goals import get_conversion_goals as _impl
+
+    return _impl(
+        current_config(),
+        customer_id=customer_id or current_config().ads.customer_id,
+        campaign_id=campaign_id,
     )
 
 
