@@ -1096,6 +1096,187 @@ def detach_shared_set_from_campaigns(
     return plan.to_preview()
 
 
+_AD_GROUP_KEYWORD_QUERY = """
+    SELECT ad_group.id, ad_group.name,
+           ad_group_criterion.criterion_id,
+           ad_group_criterion.keyword.text,
+           ad_group_criterion.keyword.match_type,
+           ad_group_criterion.status
+    FROM ad_group_criterion
+    WHERE ad_group.id = {ad_group_id}
+"""
+
+
+def _keyword_rows(
+    query: str,
+    *,
+    config: AdLoopConfig | None = None,
+    client: object | None = None,
+    customer_id: str = "",
+) -> list[dict]:
+    """Read ad group criteria — via config (draft) or client (readback)."""
+    if client is not None:
+        from adloop.ads.gaql import _extract_field, _parse_select_fields
+
+        service = client.get_service("GoogleAdsService")
+        fields = _parse_select_fields(query)
+        return [
+            {field: _extract_field(row, field) for field in fields}
+            for row in service.search(customer_id=customer_id, query=query)
+        ]
+
+    from adloop.ads.gaql import execute_query
+
+    return execute_query(config, customer_id, query)
+
+
+def _ad_group_keywords(ad_group_id: str, **kwargs) -> list[dict]:
+    """Keywords of one ad group — negatives and other criterion types drop out."""
+    rows = _keyword_rows(
+        _AD_GROUP_KEYWORD_QUERY.format(ad_group_id=ad_group_id), **kwargs
+    )
+    return [row for row in rows if row.get("ad_group_criterion.keyword.text")]
+
+
+def draft_update_keyword_match_types(
+    config: AdLoopConfig,
+    *,
+    customer_id: str = "",
+    ad_group_id: str = "",
+    updates: list[dict] | None = None,
+) -> dict:
+    """Draft match type changes for existing keywords — returns PREVIEW.
+
+    ``updates`` is a list of {"criterion_id": "123456789", "match_type": "PHRASE"}.
+    The keyword itself is read first, so the preview shows its text and the
+    before/after match type instead of only echoing the request.
+
+    One caveat to carry into any live use: Google documents
+    ``AdGroupCriterion.keyword`` as immutable while ``KeywordInfo.match_type``
+    carries no such note, so an in-place match type change is expected to work
+    but is not documented as guaranteed. The apply reports per-keyword
+    success/failure (the mutate request supports partial failure). The fallback
+    would be remove-and-re-add, which loses the keyword's history — that is
+    deliberately not what this tool does.
+
+    Call ``confirm_and_apply`` with the returned plan_id to execute.
+    """
+    from adloop.safety.guards import SafetyViolation, check_blocked_operation
+    from adloop.safety.preview import ChangePlan, store_plan
+
+    try:
+        check_blocked_operation("update_keyword_match_types", config.safety)
+    except SafetyViolation as e:
+        return {"error": str(e)}
+
+    errors: list[str] = []
+    ad_group_id = str(ad_group_id or "").strip()
+    if not ad_group_id:
+        errors.append("ad_group_id is required")
+    elif not ad_group_id.isdigit():
+        errors.append("ad_group_id must be a numeric ID")
+
+    requested: list[dict] = []
+    for update in updates or []:
+        criterion_id = str(update.get("criterion_id", "")).strip()
+        match_type = str(update.get("match_type", "")).strip().upper()
+        if not criterion_id.isdigit():
+            errors.append(
+                f"criterion_id '{criterion_id}' must be the numeric id of a keyword"
+            )
+            continue
+        if match_type not in _VALID_MATCH_TYPES:
+            errors.append(
+                f"criterion_id {criterion_id}: match_type '{match_type}' is invalid "
+                "(must be EXACT, PHRASE, or BROAD)"
+            )
+            continue
+        requested.append({"criterion_id": criterion_id, "match_type": match_type})
+    if not requested and not errors:
+        errors.append("At least one update is required")
+    if errors:
+        return {"error": "Validation failed", "details": errors}
+
+    current_rows = _ad_group_keywords(
+        ad_group_id, config=config, customer_id=customer_id
+    )
+    if not current_rows:
+        return {
+            "error": (
+                f"No keywords found in ad group {ad_group_id} — check the ID, or "
+                "read them first with get_keyword_performance or run_gaql."
+            )
+        }
+    current = {
+        str(row.get("ad_group_criterion.criterion_id")): row for row in current_rows
+    }
+
+    unknown = [u["criterion_id"] for u in requested if u["criterion_id"] not in current]
+    if unknown:
+        return {
+            "error": "Validation failed",
+            "details": [
+                f"These criterion ids are not keywords of ad group {ad_group_id}: "
+                + ", ".join(unknown),
+            ],
+        }
+
+    planned: list[dict] = []
+    warnings: list[str] = []
+    for update in requested:
+        row = current[update["criterion_id"]]
+        before = row.get("ad_group_criterion.keyword.match_type")
+        if before == update["match_type"]:
+            warnings.append(
+                f"{row.get('ad_group_criterion.keyword.text')} already uses "
+                f"{before} — skipped"
+            )
+            continue
+        planned.append(
+            {
+                "criterion_id": update["criterion_id"],
+                "keyword": row.get("ad_group_criterion.keyword.text"),
+                "status": row.get("ad_group_criterion.status"),
+                "match_type_before": before,
+                "match_type": update["match_type"],
+            }
+        )
+
+    if not planned:
+        return {
+            "error": "Nothing to change",
+            "details": warnings
+            or ["Every requested keyword already uses that match type"],
+        }
+
+    warnings.extend(
+        _check_broad_match_safety(
+            config,
+            customer_id,
+            ad_group_id,
+            [
+                {"text": item["keyword"], "match_type": item["match_type"]}
+                for item in planned
+                if item["match_type"] == "BROAD"
+            ],
+        )
+    )
+
+    changes: dict = {"ad_group_id": ad_group_id, "keywords": planned}
+    if warnings:
+        changes["warnings"] = warnings
+
+    plan = ChangePlan(
+        operation="update_keyword_match_types",
+        entity_type="keyword",
+        entity_id=ad_group_id,
+        customer_id=customer_id,
+        changes=changes,
+    )
+    store_plan(plan)
+    return plan.to_preview()
+
+
 def draft_demographic_targeting(
     config: AdLoopConfig,
     *,
@@ -2895,6 +3076,7 @@ def _execute_plan(config: AdLoopConfig, plan: object) -> dict:
         "add_to_negative_keyword_list": _apply_add_to_negative_keyword_list,
         "attach_shared_set_to_campaigns": _apply_attach_shared_set_to_campaigns,
         "detach_shared_set_from_campaigns": _apply_detach_shared_set_from_campaigns,
+        "update_keyword_match_types": _apply_update_keyword_match_types,
         "add_demographic_criteria": _apply_add_demographic_criteria,
         "pause_entity": _apply_status_change,
         "enable_entity": _apply_status_change,
@@ -4183,4 +4365,95 @@ def _apply_detach_shared_set_from_campaigns(
             msg = getattr(pf_error, "message", "")
             if msg:
                 out["partial_failure_message"] = msg
+    return out
+
+
+# ---------------------------------------------------------------------------
+# Brand lists (SharedSets of type BRANDS)
+# ---------------------------------------------------------------------------
+
+
+# ---------------------------------------------------------------------------
+# AI Max controls
+# ---------------------------------------------------------------------------
+
+
+def _apply_update_keyword_match_types(
+    client: object, cid: str, changes: dict
+) -> dict:
+    """Change keyword match types, then read the ad group's keywords back.
+
+    ``partial_failure`` is on, so a keyword Google refuses (the resource field
+    is documented as immutable, the match type itself is not) comes back as its
+    own failure instead of hiding a successful sibling.
+    """
+    from google.protobuf import field_mask_pb2
+
+    ad_group_id = changes["ad_group_id"]
+    keywords = list(changes["keywords"])
+
+    service = client.get_service("AdGroupCriterionService")
+    operations = []
+    for item in keywords:
+        operation = client.get_type("AdGroupCriterionOperation")
+        criterion = operation.update
+        criterion.resource_name = (
+            f"customers/{cid}/adGroupCriteria/"
+            f"{ad_group_id}~{item['criterion_id']}"
+        )
+        criterion.keyword.match_type = getattr(
+            client.enums.KeywordMatchTypeEnum, item["match_type"]
+        )
+        operation.update_mask = field_mask_pb2.FieldMask(
+            paths=["keyword.match_type"]
+        )
+        operations.append(operation)
+
+    request = client.get_type("MutateAdGroupCriteriaRequest")
+    request.customer_id = cid
+    request.operations.extend(operations)
+    request.partial_failure = True
+    response = service.mutate_ad_group_criteria(request=request)
+
+    pf_error = getattr(response, "partial_failure_error", None)
+    per_op_errors = _parse_partial_failure_per_op(client, pf_error)
+
+    updated: list[dict] = []
+    failed: list[dict] = []
+    for index, result in enumerate(response.results):
+        item = keywords[index] if index < len(keywords) else {}
+        entry = {
+            "criterion_id": item.get("criterion_id"),
+            "keyword": item.get("keyword"),
+            "match_type": item.get("match_type"),
+        }
+        if getattr(result, "resource_name", ""):
+            updated.append(entry)
+        else:
+            failed.append(
+                {
+                    **entry,
+                    "operation_index": index,
+                    "error": per_op_errors.get(
+                        index, "Unknown error (see partial_failure_message)"
+                    ),
+                }
+            )
+
+    out: dict = {
+        "ad_group_id": ad_group_id,
+        "updated": updated,
+        "updated_count": len(updated),
+        "failed": failed,
+        "readback": {
+            "keywords": _ad_group_keywords(
+                ad_group_id, client=client, customer_id=cid
+            )
+        },
+    }
+    if failed:
+        out["partial_failure"] = True
+        message = getattr(pf_error, "message", "") if pf_error is not None else ""
+        if message:
+            out["partial_failure_message"] = message
     return out

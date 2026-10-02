@@ -1816,6 +1816,51 @@ def draft_keywords(
     )
 
 
+@mcp.tool(
+    title="Draft keyword match type changes",
+    annotations=_WRITE,
+    tags={"ads"},
+)
+@_safe
+def update_keyword_match_types(
+    ad_group_id: str,
+    updates: _DictList,
+    customer_id: str = "",
+) -> dict:
+    """Change the match type of EXISTING keywords — returns a PREVIEW.
+
+    The in-place alternative to removing and re-adding a keyword, which would
+    lose its history. The keyword is read first, so the preview shows its text
+    and the before/after match type.
+
+    updates: list of {"criterion_id": "123456789", "match_type": "EXACT|PHRASE|BROAD"}.
+        criterion_id comes from get_keyword_performance or a GAQL query on
+        ad_group_criterion for that ad group.
+
+    Google documents AdGroupCriterion.keyword as immutable but places no such
+    restriction on KeywordInfo.match_type, so the in-place change is expected
+    to work without being guaranteed — the apply reports per-keyword success or
+    failure, and a rejection is visible instead of silent. Switching to BROAD
+    on a campaign without Smart Bidding is warned about (the usual wasted-spend
+    trap).
+
+    Call confirm_and_apply with the returned plan_id to execute.
+
+    Args:
+        ad_group_id: Numeric ad group ID that owns the keywords.
+        updates: Keywords to change, each with criterion_id and the new match_type.
+        customer_id: Ads account ID. Defaults to the configured account.
+    """
+    from adloop.ads.write import draft_update_keyword_match_types as _impl
+
+    return _impl(
+        current_config(),
+        customer_id=customer_id or current_config().ads.customer_id,
+        ad_group_id=ad_group_id,
+        updates=updates,
+    )
+
+
 @mcp.tool(title="Draft negative keywords", annotations=_WRITE, tags={"ads"})
 @_safe
 def add_negative_keywords(
@@ -3278,6 +3323,11 @@ def discover_keywords(
         customer_id=customer_id or current_config().ads.customer_id,
         include_monthly_volumes=include_monthly_volumes,
     )
+
+
+# ---------------------------------------------------------------------------
+# Google Ads — Brand Tools
+# ---------------------------------------------------------------------------
 
 
 # ---------------------------------------------------------------------------

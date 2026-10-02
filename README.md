@@ -107,6 +107,11 @@ The best features come from real workflows. If you're using AdLoop and find your
 | `get_demographic_targeting` | List demographic criteria (age/gender/parental status/income) on an ad group or campaign |
 | `run_gaql` | Arbitrary GAQL queries for anything else |
 
+
+
+
+> **Keyword match types can be changed in place** — `update_keyword_match_types` edits the existing criterion instead of removing and re-adding the keyword, which would throw away its history. One honest caveat: Google documents `AdGroupCriterion.keyword` as immutable while `KeywordInfo.match_type` carries no such note, so the in-place change is expected to work but is not documented as guaranteed. The apply reports per keyword, so a rejection is visible rather than silent; the fallback would be remove-and-re-add, which this tool deliberately does not do.
+
 > **Compact mode** — `get_campaign_performance`, `get_keyword_performance`, `get_search_terms`, and `get_ad_performance` accept `compact=true`: account totals, breakdowns, top-10 rows, and pre-computed offender lists (zero-conversion spenders, low-QS keywords, negative-keyword candidates, thin RSAs) instead of every row. ~90% smaller responses — built for account audits so raw tables don't flood your AI's context.
 
 ### Cross-Reference Tools (GA4 + Ads Combined)
@@ -219,6 +224,7 @@ All write operations follow a **draft → preview → confirm** workflow. Nothin
 | `draft_key_event` | Mark a GA4 event as a key event (conversion) — the fix for "fires but isn't tracked as a conversion" |
 | `draft_demographic_targeting` | Propose demographic criteria (age, gender, parental status, income) — exclusions by default |
 | `propose_negative_keyword_list` | Draft a shared negative keyword list (SharedSet) and attach it to a campaign — reusable across multiple campaigns |
+| `update_keyword_match_types` | Change the match type of existing keywords in place (EXACT / PHRASE / BROAD) instead of removing and re-adding them — keeps the keyword's history |
 | `pause_entity` | Pause a campaign, ad group, ad, or keyword |
 | `enable_entity` | Re-enable a paused entity |
 | `remove_entity` | Permanently remove an entity (irreversible — prefers pause). Supports keywords, negative keywords, ads, ad groups, campaigns. |
