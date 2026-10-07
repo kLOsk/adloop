@@ -1809,6 +1809,7 @@ def draft_responsive_search_ad(
     """Draft a Responsive Search Ad — returns a PREVIEW, does NOT create the ad.
 
     Takes 3-15 headlines (max 30 chars each) and 2-4 descriptions (max 90 chars each).
+    Keyword insertion like {KeyWord:Drain Cleaning} counts as its default text.
     The preview shows exactly what will be created; confirm_and_apply executes it.
 
     Each headline/description entry may be either:
@@ -1870,7 +1871,9 @@ def update_responsive_search_ad(
     list fully swaps in for the existing one, and Google's RSA constraints
     apply (3-15 headlines, 2-4 descriptions, 30/90 char limits, pin-slot
     rules). Each entry may be a plain string (unpinned) or
-    ``{"text": "...", "pinned_field": "HEADLINE_1"}``.
+    ``{"text": "...", "pinned_field": "HEADLINE_1"}``. Keyword insertion
+    such as ``{KeyWord:Clogged Drain Service}`` is accepted; only the
+    default text after the colon counts toward the character cap.
 
     Argument semantics:
         - ``headlines`` / ``descriptions``: None or [] -> no change;

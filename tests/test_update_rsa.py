@@ -1224,3 +1224,52 @@ class TestUrlOnlyUpdateRegression:
 
         assert any("learning" in w.lower() or "policy" in w.lower()
                    for w in result.get("warnings", []))
+
+
+class TestInsertionTagLength:
+    """Insertion tags count as their default text toward the 30/90 caps."""
+
+    @staticmethod
+    def _hl(*texts, pin=None):
+        return [{"text": t, "pinned_field": pin} for t in texts]
+
+    @staticmethod
+    def _desc():
+        return [{"text": "Drain cleaning done right.", "pinned_field": None}] * 2
+
+    def test_keyword_insertion_counts_default_text_only(self):
+        assert write._counted_length("{KeyWord:Clogged Drain Service}") == 21
+        assert write._counted_length("{keyword: Drain Cleaning} Pros") == 19
+        assert write._counted_length("Plumber in {LOCATION(City):Sacramento}") == 21
+        errors = write._validate_rsa_assets(
+            self._hl("{KeyWord:Clogged Drain Service}", pin="HEADLINE_1")
+            + self._hl("Same-Day Drain Unclogging", "Licensed Local Plumbers"),
+            self._desc(),
+        )
+        assert errors == []
+
+    def test_default_text_over_the_cap_is_still_rejected(self):
+        errors = write._validate_rsa_assets(
+            self._hl("{KeyWord:Emergency Clogged Drain Service Today}", "A", "B"),
+            self._desc(),
+        )
+        assert any("exceeds 30 chars (37)" in e for e in errors)
+
+    def test_insertion_tag_without_default_text_is_rejected(self):
+        errors = write._validate_rsa_assets(
+            self._hl("{KeyWord} Experts", "A", "B"), self._desc()
+        )
+        assert any("without default text" in e for e in errors)
+
+    def test_update_accepts_an_insertion_headline_over_31_raw_chars(self, config):
+        result = write.update_responsive_search_ad(
+            config,
+            customer_id="1234567890",
+            ad_id="111",
+            headlines=[
+                {"text": "{KeyWord:Clogged Drain Service}", "pinned_field": "HEADLINE_1"},
+                "Same-Day Drain Unclogging",
+                "Licensed Local Plumbers",
+            ],
+        )
+        assert "error" not in result, result

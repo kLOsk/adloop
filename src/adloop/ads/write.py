@@ -7,6 +7,7 @@ Every write tool returns a preview/plan. Nothing executes until
 from __future__ import annotations
 
 import hashlib
+import re
 import struct
 from pathlib import Path, PurePath, PurePosixPath
 from typing import TYPE_CHECKING
@@ -39,6 +40,34 @@ _VALID_IMAGE_MIME_TYPES = {
 
 _VALID_HEADLINE_PINS = {"HEADLINE_1", "HEADLINE_2", "HEADLINE_3"}
 _VALID_DESCRIPTION_PINS = {"DESCRIPTION_1", "DESCRIPTION_2"}
+
+
+# Insertion tags Google expands at serve time. Only the default text after
+# the colon counts toward the 30/90 character caps, e.g.
+# "{KeyWord:Clogged Drain Service}" is 21 characters, not 31.
+_INSERTION_TAG_RE = re.compile(
+    r"\{\s*(keyword|location\([a-z]+\))\s*:\s*([^{}]*)\}", re.IGNORECASE
+)
+_BARE_INSERTION_TAG_RE = re.compile(
+    r"\{\s*(keyword|location\([a-z]+\))\s*\}", re.IGNORECASE
+)
+
+
+def _counted_length(text: str) -> int:
+    """Length Google checks against the cap: insertion tags count as their default text."""
+    return len(_INSERTION_TAG_RE.sub(lambda m: m.group(2), text))
+
+
+def _insertion_tag_errors(label: str, text: str) -> list[str]:
+    """RSA keyword/location insertion needs default text, e.g. {KeyWord:Drain Cleaning}."""
+    if _BARE_INSERTION_TAG_RE.search(text):
+        return [
+            (
+                f"{label} uses an insertion tag without default text: '{text}'. "
+                "Default text after a colon is required, e.g. {KeyWord:Drain Cleaning}"
+            )
+        ]
+    return []
 
 
 def _normalize_rsa_assets(items: list) -> list[dict]:
@@ -3204,9 +3233,10 @@ def _validate_rsa_assets(
     for i, h in enumerate(headlines):
         text = h["text"]
         pin = h["pinned_field"]
-        if len(text) > 30:
+        errors.extend(_insertion_tag_errors(f"Headline {i + 1}", text))
+        if _counted_length(text) > 30:
             errors.append(
-                f"Headline {i + 1} exceeds 30 chars ({len(text)}): '{text}'"
+                f"Headline {i + 1} exceeds 30 chars ({_counted_length(text)}): '{text}'"
             )
         if pin is not None:
             if pin not in _VALID_HEADLINE_PINS:
@@ -3224,9 +3254,10 @@ def _validate_rsa_assets(
     for i, d in enumerate(descriptions):
         text = d["text"]
         pin = d["pinned_field"]
-        if len(text) > 90:
+        errors.extend(_insertion_tag_errors(f"Description {i + 1}", text))
+        if _counted_length(text) > 90:
             errors.append(
-                f"Description {i + 1} exceeds 90 chars ({len(text)}): '{text}'"
+                f"Description {i + 1} exceeds 90 chars ({_counted_length(text)}): '{text}'"
             )
         if pin is not None:
             if pin not in _VALID_DESCRIPTION_PINS:
