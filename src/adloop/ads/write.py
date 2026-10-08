@@ -15,22 +15,6 @@ if TYPE_CHECKING:
     from adloop.config import AdLoopConfig
 
 
-_STRUCTURED_SNIPPET_HEADERS = {
-    "Amenities",
-    "Brands",
-    "Courses",
-    "Degree programs",
-    "Destinations",
-    "Featured Hotels",
-    "Insurance coverage",
-    "Models",
-    "Neighborhoods",
-    "Services",
-    "Shows",
-    "Styles",
-    "Types",
-}
-
 _VALID_IMAGE_MIME_TYPES = {
     "image/gif": "IMAGE_GIF",
     "image/jpeg": "IMAGE_JPEG",
@@ -1988,8 +1972,8 @@ def remove_entity(
     """Draft removing an entity — returns preview.
 
     Supported ``entity_type`` values: ``campaign``, ``ad_group``, ``ad``,
-    ``keyword``, ``negative_keyword``, ``shared_criterion``, ``campaign_asset``,
-    ``asset``, ``customer_asset``.
+    ``keyword``, ``negative_keyword``, ``shared_criterion``, ``ad_group_asset``,
+    ``campaign_asset``, ``asset``, ``customer_asset``.
 
     Composite ``entity_id`` formats:
 
@@ -1998,6 +1982,7 @@ def remove_entity(
       field from ``get_negative_keywords``)
     - ``shared_criterion``: ``sharedSetId~criterionId`` (use the ``resource_id``
       field from ``get_negative_keyword_list_keywords``)
+    - ``ad_group_asset``: ``adGroupId~assetId~fieldType``
     - ``campaign_asset``: ``campaignId~assetId~fieldType``
     - ``customer_asset``: ``assetId~fieldType``
     - ``asset``: bare asset ID
@@ -2026,7 +2011,7 @@ def remove_entity(
         return {"error": "Validation failed", "details": errors}
 
     # Normalize composite IDs: commas → tildes
-    if entity_type in ("campaign_asset", "customer_asset"):
+    if entity_type in ("ad_group_asset", "campaign_asset", "customer_asset"):
         entity_id = entity_id.replace(",", "~")
 
     plan = ChangePlan(
@@ -2378,76 +2363,6 @@ def update_campaign(
             preserved_negative_geos
         )
     return preview
-
-
-def draft_callouts(
-    config: AdLoopConfig,
-    *,
-    customer_id: str = "",
-    campaign_id: str = "",
-    callouts: list[str] | None = None,
-) -> dict:
-    """Draft campaign callout assets."""
-    from adloop.safety.guards import SafetyViolation, check_blocked_operation
-    from adloop.safety.preview import ChangePlan, store_plan
-
-    try:
-        check_blocked_operation("create_callouts", config.safety)
-    except SafetyViolation as e:
-        return {"error": str(e)}
-
-    validated_callouts, errors = _validate_callouts(campaign_id, callouts or [])
-    if errors:
-        return {"error": "Validation failed", "details": errors}
-
-    plan = ChangePlan(
-        operation="create_callouts",
-        entity_type="campaign_asset",
-        entity_id=campaign_id,
-        customer_id=customer_id,
-        changes={
-            "campaign_id": campaign_id,
-            "callouts": validated_callouts,
-        },
-    )
-    store_plan(plan)
-    return plan.to_preview()
-
-
-def draft_structured_snippets(
-    config: AdLoopConfig,
-    *,
-    customer_id: str = "",
-    campaign_id: str = "",
-    snippets: list[dict] | None = None,
-) -> dict:
-    """Draft campaign structured snippet assets."""
-    from adloop.safety.guards import SafetyViolation, check_blocked_operation
-    from adloop.safety.preview import ChangePlan, store_plan
-
-    try:
-        check_blocked_operation("create_structured_snippets", config.safety)
-    except SafetyViolation as e:
-        return {"error": str(e)}
-
-    validated_snippets, errors = _validate_structured_snippets(
-        campaign_id, snippets or []
-    )
-    if errors:
-        return {"error": "Validation failed", "details": errors}
-
-    plan = ChangePlan(
-        operation="create_structured_snippets",
-        entity_type="campaign_asset",
-        entity_id=campaign_id,
-        customer_id=customer_id,
-        changes={
-            "campaign_id": campaign_id,
-            "snippets": validated_snippets,
-        },
-    )
-    store_plan(plan)
-    return plan.to_preview()
 
 
 def draft_image_assets(
@@ -2905,6 +2820,7 @@ _REMOVABLE_ENTITY_TYPES = _VALID_ENTITY_TYPES | {
     "shared_criterion",
     "ad_group_criterion",
     "campaign_criterion",
+    "ad_group_asset",
     "campaign_asset",
     "asset",
     "customer_asset",
@@ -3036,71 +2952,6 @@ def _ad_group_campaign_bidding_strategy(
     if not rows:
         return None
     return rows[0].get("campaign.bidding_strategy_type")
-
-
-def _validate_callouts(
-    campaign_id: str, callouts: list[str]
-) -> tuple[list[str], list[str]]:
-    errors = []
-    validated = []
-
-    if not campaign_id:
-        errors.append("campaign_id is required")
-    if not callouts:
-        errors.append("At least one callout is required")
-
-    for index, callout in enumerate(callouts):
-        text = callout.strip()
-        if not text:
-            errors.append(f"Callout {index + 1}: text is required")
-        elif len(text) > 25:
-            errors.append(
-                f"Callout {index + 1}: '{text}' is {len(text)} chars (max 25)"
-            )
-        else:
-            validated.append(text)
-
-    return validated, errors
-
-
-def _validate_structured_snippets(
-    campaign_id: str, snippets: list[dict]
-) -> tuple[list[dict], list[str]]:
-    errors = []
-    validated = []
-
-    if not campaign_id:
-        errors.append("campaign_id is required")
-    if not snippets:
-        errors.append("At least one structured snippet is required")
-
-    for index, snippet in enumerate(snippets):
-        header = snippet.get("header", "").strip()
-        values = [value.strip() for value in snippet.get("values", [])]
-
-        if header not in _STRUCTURED_SNIPPET_HEADERS:
-            errors.append(
-                f"Structured snippet {index + 1}: header must be one of "
-                f"{sorted(_STRUCTURED_SNIPPET_HEADERS)}"
-            )
-        if len(values) < 3 or len(values) > 10:
-            errors.append(
-                f"Structured snippet {index + 1}: values must contain 3-10 items"
-            )
-        for value_index, value in enumerate(values):
-            if not value:
-                errors.append(
-                    f"Structured snippet {index + 1}: value {value_index + 1} is required"
-                )
-            elif len(value) > 25:
-                errors.append(
-                    f"Structured snippet {index + 1}: value '{value}' is "
-                    f"{len(value)} chars (max 25)"
-                )
-
-        validated.append({"header": header, "values": values})
-
-    return validated, errors
 
 
 def _validate_image_assets(
@@ -3595,6 +3446,7 @@ _MUTATE_RESPONSE_RESULT_FIELDS = [
     "ad_group_criterion_result",
     "campaign_criterion_result",
     "asset_result",
+    "ad_group_asset_result",
     "campaign_asset_result",
     "customer_asset_result",
 ]
@@ -3669,14 +3521,23 @@ def _execute_plan(
 
 def _dispatch_ads_plan(client: object, cid: str, plan: object) -> dict:
     """Run a Google Ads plan against ``client`` (real or validate-only)."""
-    # Conversion-action CRUD lives in its own module; import lazily so the
-    # dispatch table (and this module) don't take the dependency at import time.
+    # Text assets, conversion-action CRUD and custom conversion goals live in
+    # their own modules; import lazily so the dispatch table (and this
+    # module) don't take the dependency at import time.
+    from adloop.ads.assets import (
+        _apply_create_business_name_asset,
+        _apply_create_callouts,
+        _apply_create_structured_snippets,
+        _apply_link_asset_to_customer,
+        _apply_update_callout,
+        _apply_update_sitelink,
+        _apply_update_structured_snippet,
+    )
     from adloop.ads.conversion_actions import (
         _apply_create_conversion_action,
         _apply_remove_conversion_action,
         _apply_update_conversion_action,
     )
-    # Custom conversion goals live in their own module for the same reason.
     from adloop.ads.custom_conversion_goals import (
         _apply_assign_custom_conversion_goal,
         _apply_clear_custom_conversion_goal,
@@ -3716,6 +3577,11 @@ def _dispatch_ads_plan(client: object, cid: str, plan: object) -> dict:
         "create_structured_snippets": _apply_create_structured_snippets,
         "create_image_assets": _apply_create_image_assets,
         "create_sitelinks": _apply_create_sitelinks,
+        "create_business_name_asset": _apply_create_business_name_asset,
+        "link_asset_to_customer": _apply_link_asset_to_customer,
+        "update_callout": _apply_update_callout,
+        "update_sitelink": _apply_update_sitelink,
+        "update_structured_snippet": _apply_update_structured_snippet,
         "create_conversion_action": _apply_create_conversion_action,
         "update_conversion_action": _apply_update_conversion_action,
         "remove_conversion_action": _apply_remove_conversion_action,
@@ -4474,6 +4340,25 @@ def _apply_remove(
             customer_id=cid, operations=[operation]
         )
 
+    elif entity_type == "ad_group_asset":
+        parts = entity_id.split("~")
+        if len(parts) != 3:
+            raise ValueError(
+                f"ad_group_asset entity_id must be "
+                f"'adGroupId~assetId~fieldType', got '{entity_id}'"
+            )
+        resource_name = f"customers/{cid}/adGroupAssets/{entity_id}"
+        ga_service = client.get_service("GoogleAdsService")
+        op = client.get_type("MutateOperation")
+        op.ad_group_asset_operation.remove = resource_name
+        response = ga_service.mutate(
+            customer_id=cid, mutate_operations=[op]
+        )
+        resp_inner = response.mutate_operation_responses[0]
+        if resp_inner.ad_group_asset_result.resource_name:
+            return {"resource_name": resp_inner.ad_group_asset_result.resource_name}
+        return {"resource_name": resource_name, "status": "removed"}
+
     elif entity_type == "campaign_asset":
         parts = entity_id.split("~")
         if len(parts) != 3:
@@ -4590,80 +4475,16 @@ def _apply_campaign_assets(
     populate_asset: object,
 ) -> dict:
     """Create assets and link them to a campaign via CampaignAsset."""
-    asset_service = client.get_service("AssetService")
-    googleads_service = client.get_service("GoogleAdsService")
-    operations = []
+    from adloop.ads.assets import _create_and_link_assets
 
-    for i, payload in enumerate(assets):
-        op = client.get_type("MutateOperation")
-        asset = op.asset_operation.create
-        asset.resource_name = asset_service.asset_path(cid, str(-(i + 1)))
-        populate_asset(asset, payload)
-        operations.append(op)
-
-    for i in range(len(assets)):
-        op = client.get_type("MutateOperation")
-        ca = op.campaign_asset_operation.create
-        ca.asset = asset_service.asset_path(cid, str(-(i + 1)))
-        ca.campaign = googleads_service.campaign_path(cid, campaign_id)
-        ca.field_type = field_type
-        operations.append(op)
-
-    response = googleads_service.mutate(
-        customer_id=cid, mutate_operations=operations
-    )
-
-    results = {"assets": [], "campaign_assets": []}
-    num_assets = len(assets)
-    for i, resp in enumerate(response.mutate_operation_responses):
-        resource = None
-        if resp.asset_result.resource_name:
-            resource = resp.asset_result.resource_name
-        elif resp.campaign_asset_result.resource_name:
-            resource = resp.campaign_asset_result.resource_name
-
-        if resource:
-            if i < num_assets:
-                results["assets"].append(resource)
-            else:
-                results["campaign_assets"].append(resource)
-
-    return results
-
-
-def _apply_create_callouts(client: object, cid: str, changes: dict) -> dict:
-    """Create callout assets and link them to a campaign."""
-
-    def populate(asset: object, payload: dict) -> None:
-        asset.callout_asset.callout_text = payload["callout_text"]
-
-    assets = [{"callout_text": text} for text in changes["callouts"]]
-    return _apply_campaign_assets(
+    return _create_and_link_assets(
         client,
         cid,
-        changes["campaign_id"],
         assets,
-        client.enums.AssetFieldTypeEnum.CALLOUT,
-        populate,
-    )
-
-
-def _apply_create_structured_snippets(
-    client: object, cid: str, changes: dict
-) -> dict:
-    """Create structured snippet assets and link them to a campaign."""
-
-    def populate(asset: object, payload: dict) -> None:
-        asset.structured_snippet_asset.header = payload["header"]
-        asset.structured_snippet_asset.values.extend(payload["values"])
-
-    return _apply_campaign_assets(
-        client,
-        cid,
-        changes["campaign_id"],
-        changes["snippets"],
-        client.enums.AssetFieldTypeEnum.STRUCTURED_SNIPPET,
-        populate,
+        field_type,
+        populate_asset,
+        scope="campaign",
+        campaign_id=campaign_id,
     )
 
 

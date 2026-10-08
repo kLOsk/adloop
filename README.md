@@ -225,8 +225,12 @@ All write operations follow a **draft → preview → confirm** workflow. Nothin
 | `draft_ad_group` | Create a paused SEARCH_STANDARD ad group inside an existing campaign, with optional MANUAL_CPC `max_cpc`. |
 | `update_ad_group` | Update an ad group name and/or MANUAL_CPC `max_cpc`. Use `pause_entity` / `enable_entity` for ad-group status changes. |
 | `draft_responsive_search_ad` | Create RSA preview (3-15 headlines ≤30 chars, 2-4 descriptions ≤90 chars). Warns if headline/description count is below best practice. |
-| `draft_callouts` | Create campaign callout assets from 1-25 character text snippets. |
-| `draft_structured_snippets` | Create campaign structured snippet assets using official header values and 3-10 snippet values. |
+| `draft_callouts` | Create callout assets (1-25 characters) on a campaign, one ad group (`scope="ad_group"`), or the whole account (`scope="account"`, explicit opt-in only). |
+| `draft_structured_snippets` | Create structured snippet assets (official header, 3-10 values) on a campaign, one ad group, or — explicitly — the whole account. |
+| `update_callout` / `update_sitelink` | Edit an existing callout or sitelink in place; the asset keeps its ID and performance history. |
+| `update_structured_snippet` | Replace a structured snippet at one scope: new asset created and linked, old link removed in one atomic request (asks for a second confirmation). |
+| `draft_business_name_asset` | Create a BUSINESS_NAME asset on a campaign or, explicitly, the whole account. |
+| `link_asset_to_customer` | Link existing assets at account level, limited to the field types CustomerAsset accepts. |
 | `draft_image_assets` | Create campaign image assets from local files or public image URLs (PNG, JPEG, or GIF). |
 | `draft_keywords` | Propose keyword additions with match types. Proactively checks bidding strategy — flags BROAD match on campaigns without Smart Bidding as dangerous in the preview. |
 | `add_negative_keywords` | Propose negative keywords directly on a campaign |

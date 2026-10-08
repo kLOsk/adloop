@@ -9,7 +9,7 @@ import pytest
 from google.ads.googleads.client import GoogleAdsClient
 
 from adloop.ads.client import GOOGLE_ADS_API_VERSION
-from adloop.ads import read, write
+from adloop.ads import assets, read, write
 from adloop.config import AdLoopConfig, AdsConfig, SafetyConfig
 from adloop.safety import preview as preview_store
 
@@ -355,7 +355,7 @@ def test_update_campaign_rejects_max_cpc_for_non_target_spend(config, monkeypatc
 
 
 def test_draft_structured_snippets_rejects_invalid_header(config):
-    result = write.draft_structured_snippets(
+    result = assets.draft_structured_snippets(
         config,
         customer_id="123-456-7890",
         campaign_id="1001",
@@ -367,7 +367,7 @@ def test_draft_structured_snippets_rejects_invalid_header(config):
 
 
 def test_draft_callouts_returns_preview(config):
-    result = write.draft_callouts(
+    result = assets.draft_callouts(
         config,
         customer_id="123-456-7890",
         campaign_id="1001",
@@ -816,7 +816,7 @@ def test_apply_campaign_asset_variants_create_asset_and_link_operations(tmp_path
         }
     )
 
-    write._apply_create_callouts(
+    assets._apply_create_callouts(
         client,
         "1234567890",
         {"campaign_id": "1001", "callouts": ["Free Shipping"]},
@@ -825,7 +825,7 @@ def test_apply_campaign_asset_variants_create_asset_and_link_operations(tmp_path
     assert callout_link.field_type == client.enums.AssetFieldTypeEnum.CALLOUT
 
     google_ads_service._responses = responses
-    write._apply_create_structured_snippets(
+    assets._apply_create_structured_snippets(
         client,
         "1234567890",
         {
