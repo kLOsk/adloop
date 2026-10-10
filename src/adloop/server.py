@@ -812,8 +812,10 @@ def analyze_page_speed(url: str, strategy: str = "mobile") -> dict:
 
     Returns the performance score (0-100), lab Core Web Vitals (LCP, CLS,
     TBT, FCP), CrUX field data from real Chrome users where available
-    (p75 LCP/INP/CLS + FAST/AVERAGE/SLOW ratings), and the top improvement
-    opportunities with estimated savings.
+    (p75 LCP/INP/CLS/FCP/TTFB + FAST/AVERAGE/SLOW ratings), and the top
+    improvement opportunities with estimated savings. When the page itself
+    has too little traffic for field data, the origin-wide field data is
+    returned instead, marked field.scope="origin".
 
     Typical input is an ad final_url: slow landing pages depress Quality
     Score and waste paid clicks. Takes 10-30s; that is normal for a

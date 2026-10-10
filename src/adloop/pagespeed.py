@@ -73,7 +73,7 @@ def analyze_page_speed(
         "strategy": strategy,
         "performance_score": round(score * 100) if score is not None else None,
         "lab": _lab_metrics(audits),
-        "field": _field_metrics(payload.get("loadingExperience", {}) or {}),
+        "field": _select_field_data(payload),
         "top_opportunities": _opportunities(audits),
     }
     result["insights"] = _insights(result)
@@ -97,6 +97,43 @@ def _lab_metrics(audits: dict) -> dict:
     }
 
 
+def _select_field_data(payload: dict) -> dict:
+    """URL-level CrUX field data, else the origin-wide data, labelled.
+
+    PSI reports URL-level data in ``loadingExperience`` and origin-level data
+    in ``originLoadingExperience``. When a URL has too little traffic,
+    ``loadingExperience`` is empty or (``origin_fallback: true``) already
+    carries the origin's numbers. Either way the result says which one it is,
+    because origin data averages every page on the site.
+    """
+    url_level = payload.get("loadingExperience", {}) or {}
+    origin_level = payload.get("originLoadingExperience", {}) or {}
+
+    if url_level.get("metrics") and not url_level.get("origin_fallback"):
+        field = _field_metrics(url_level)
+        if field:
+            field["scope"] = "url"
+            return field
+
+    source = (
+        url_level
+        if url_level.get("origin_fallback") and url_level.get("metrics")
+        else origin_level
+    )
+    field = _field_metrics(source)
+    if not field:
+        return {}
+    field["scope"] = "origin"
+    origin = source.get("id") or origin_level.get("id")
+    if origin:
+        field["origin"] = origin
+    field["note"] = (
+        "Origin-wide field data: this URL has too little real-user traffic of "
+        "its own, so these numbers cover all pages on the origin, not this page."
+    )
+    return field
+
+
 def _field_metrics(loading_experience: dict) -> dict:
     """CrUX field data — real Chrome users over the last 28 days.
 
@@ -109,6 +146,8 @@ def _field_metrics(loading_experience: dict) -> dict:
         "LARGEST_CONTENTFUL_PAINT_MS": ("lcp_p75_seconds", lambda v: round(v / 1000, 2)),
         "INTERACTION_TO_NEXT_PAINT": ("inp_p75_ms", lambda v: round(v)),
         "CUMULATIVE_LAYOUT_SHIFT_SCORE": ("cls_p75", lambda v: round(v / 100, 3)),
+        "FIRST_CONTENTFUL_PAINT_MS": ("fcp_p75_seconds", lambda v: round(v / 1000, 2)),
+        "EXPERIMENTAL_TIME_TO_FIRST_BYTE": ("ttfb_p75_ms", lambda v: round(v)),
     }
     for api_name, (key, convert) in mapping.items():
         entry = metrics.get(api_name)
@@ -151,14 +190,23 @@ def _insights(result: dict) -> list[str]:
     field = result.get("field", {})
     if not field:
         insights.append(
-            "No CrUX field data (not enough real-user traffic on this exact "
-            "page) — lab metrics above are simulated and directional only."
+            "No CrUX field data (not enough real-user traffic on this page or "
+            "its origin). The lab metrics above are simulated and directional only."
         )
-    elif field.get("overall_rating") == "SLOW":
-        insights.append(
-            "Real Chrome users experience this page as SLOW (CrUX, last 28 "
-            "days) — this is measured user reality, not a simulation."
-        )
+    else:
+        origin_wide = field.get("scope") == "origin"
+        if origin_wide:
+            insights.append(
+                "Field data is origin-wide (all pages of the site), because this "
+                "page has too little real-user traffic of its own. Treat it as "
+                "the site's typical experience, not this page's."
+            )
+        if field.get("overall_rating") == "SLOW":
+            subject = "pages on this origin" if origin_wide else "this page"
+            insights.append(
+                f"Real Chrome users experience {subject} as SLOW (CrUX, last 28 "
+                "days). This is measured user reality, not a simulation."
+            )
 
     lab = result.get("lab", {})
     if (lab.get("lcp_seconds") or 0) > 2.5:
