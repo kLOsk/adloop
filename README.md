@@ -82,9 +82,11 @@ The best features come from real workflows. If you're using AdLoop and find your
 | Tool | What It Does |
 |------|-------------|
 | `get_account_summaries` | List GA4 accounts and properties |
-| `run_ga4_report` | Custom reports — sessions, users, conversions, page performance |
+| `run_ga4_report` | Custom reports: sessions, users, key events, page performance. Optional dimension and metric filters, ordering, paging, and a comparison period |
 | `run_realtime_report` | Live data — verify tracking fires after deploys |
 | `get_tracking_events` | All configured events and their volume |
+| `list_key_events` | The property's key events (conversions) with counting method, create time and whether they can be deleted |
+| `list_ga4_dimensions_and_metrics` | Every dimension and metric the property can report on, including custom ones, with search |
 
 ### Google Ads Read Tools
 
@@ -252,6 +254,7 @@ All write operations follow a **draft → preview → confirm** workflow. Nothin
 | `add_negative_keywords` | Propose negative keywords directly on a campaign |
 | `add_negative_locations` | Propose negative geo exclusions on a campaign — exclude cities/regions while keeping broader positive targets |
 | `draft_key_event` | Mark a GA4 event as a key event (conversion) — the fix for "fires but isn't tracked as a conversion" |
+| `draft_delete_key_event` | Remove a GA4 key event. The event keeps firing but no longer counts as a conversion, for future data only |
 | `draft_demographic_targeting` | Propose demographic criteria (age, gender, parental status, income) — exclusions by default |
 | `propose_negative_keyword_list` | Draft a shared negative keyword list (SharedSet) and attach it to a campaign — reusable across multiple campaigns |
 | `propose_brand_list` | Draft a brand list (SharedSet of type BRANDS) from Commercial KG MIDs and optionally attach it to campaigns — `negative=true` (default) excludes the brands, `false` restricts targeting to them |

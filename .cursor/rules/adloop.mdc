@@ -25,9 +25,19 @@ You have access to AdLoop MCP tools that connect Google Ads, Reddit Ads and Goog
 | Tool | When to Use | Key Parameters |
 |------|-------------|----------------|
 | `get_account_summaries` | First-time discovery — find which GA4 properties exist | (none — uses config) |
-| `run_ga4_report` | Any analytics question — sessions, users, conversions, page performance | `dimensions`, `metrics`, `date_range_start`, `date_range_end`, `limit` |
+| `run_ga4_report` | Any analytics question: sessions, users, key events, page performance | `dimensions`, `metrics`, `date_range_start`, `date_range_end`, `limit`; optional `dimension_filter` / `metric_filter` (AND list of `{field, op, value}`), `order_by` (`[{field, desc}]`), `offset` (paging, see `next_offset`), `compare_start` + `compare_end` (period comparison) |
 | `run_realtime_report` | After code deploys — verify tracking fires correctly | `dimensions`, `metrics` |
 | `get_tracking_events` | Understanding what events are configured and their volume | `date_range_start`, `date_range_end` |
+| `list_key_events` | Which events count as key events (conversions), their counting method, and whether GA4 lets them be deleted | `property_id` (falls back to config) |
+| `list_ga4_dimensions_and_metrics` | Exact dimension/metric API names for this property, including custom ones, before writing a `run_ga4_report` call | `search` (also matches deprecated names), `kind` (all/dimensions/metrics), `custom_only` |
+
+**`run_ga4_report` options:**
+- Do not guess field names. When unsure of a name, or when looking for a custom dimension such as `customEvent:plan`, call `list_ga4_dimensions_and_metrics` with a `search` first.
+- Request `keyEvents`, not `conversions`. GA4 renamed the metric; the old name is only an alias.
+- `dimension_filter` ops: `EXACT` (default), `BEGINS_WITH`, `ENDS_WITH`, `CONTAINS`, `FULL_REGEXP`, `PARTIAL_REGEXP`, or `IN_LIST` with `values`. Add `"not": true` to exclude, `"case_sensitive": true` to match case. Example: `[{"field": "sessionDefaultChannelGroup", "op": "EXACT", "value": "Paid Search"}]`.
+- `metric_filter` ops: `EQUAL`, `LESS_THAN`, `LESS_THAN_OR_EQUAL`, `GREATER_THAN`, `GREATER_THAN_OR_EQUAL` (or `=`, `<`, `<=`, `>`, `>=`), or `BETWEEN` with `[from, to]`. Metric filters apply after aggregation, like SQL `HAVING`.
+- Every `order_by` field must also be in `dimensions` or `metrics`.
+- With `compare_start`/`compare_end`, each row carries `dateRange`: `"current"` or `"comparison"`. Compare like with like (same length, same weekdays) and present the change per row.
 
 ### Google Ads Read Tools
 
@@ -229,6 +239,7 @@ Reddit is a second ad platform with its own connection (own OAuth app, no develo
 | `add_negative_keywords` | Propose negative keywords directly on a campaign (does NOT add) | `campaign_id`, keyword list, `match_type` |
 | `add_negative_locations` | Propose negative geo exclusions on a campaign (does NOT add) — exclude cities/regions while keeping broader positive targets | `campaign_id`, `geo_target_ids` (numeric geo target constant IDs) |
 | `draft_key_event` | Mark a GA4 event as a key event/conversion (does NOT apply) — closes the tracking loop after attribution_check finds an untracked conversion | `event_name`, `counting_method` (ONCE_PER_EVENT for purchases / ONCE_PER_SESSION for sign-ups), `property_id` (falls back to config) |
+| `draft_delete_key_event` | Remove a GA4 key event (does NOT apply; DESTRUCTIVE). The event keeps firing but stops counting as a conversion, for future data only. Refused for key events GA4 marks as not deletable | `event_name` (as listed by `list_key_events`), `property_id` (falls back to config) |
 | `propose_negative_keyword_list` | Draft a shared negative keyword list and attach it to a campaign (does NOT create) | `campaign_id`, `list_name`, keyword list, `match_type` |
 | `propose_brand_list` | Draft a brand list (SharedSet of type BRANDS) and optionally attach it. Only the Commercial KG MID can be written — resolve names first. | `list_name`, `brand_ids`, optional `campaign_ids`, optional `negative` (default True = exclusion) |
 | `add_to_brand_list` | Append brands to an EXISTING brand list | `shared_set_id`, `brand_ids` |
@@ -451,7 +462,8 @@ Most websites (especially in the EU) use a GDPR cookie consent banner. This has 
 3. Call `validate_tracking` with the extracted event names — it compares codebase events against actual GA4 data and returns matched, missing, and unexpected events
 4. Review the `insights[]` from `validate_tracking` — missing events indicate code not deployed or behind untriggered conditions; unexpected events may come from tag managers
 5. If the user needs to add new tracking, use `generate_tracking_code` to produce the gtag snippet with recommended parameters
-6. If an event FIRES in GA4 but is not marked as a key event (conversion), propose `draft_key_event` — preview → confirm like every write. Remind the user it applies to future data only and Ads needs the GA4 link + conversion import to optimize on it
+6. If an event FIRES in GA4 but is not marked as a key event (conversion), call `list_key_events` first to see what is already a key event, then propose `draft_key_event`. It goes through preview → confirm like every write. Remind the user it applies to future data only and Ads needs the GA4 link + conversion import to optimize on it
+7. To retire a key event (a duplicate, or one that no longer means a conversion), propose `draft_delete_key_event`. Before applying, check whether Google Ads imports it as a conversion action: removing it starves that conversion action and Smart Bidding of new conversions
 
 ### When user asks to add negative keywords
 
