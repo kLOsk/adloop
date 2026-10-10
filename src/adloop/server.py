@@ -882,7 +882,11 @@ def get_campaign_performance(
     """Get campaign-level performance metrics for a date range.
 
     Returns campaign name, status, type, impressions, clicks, cost,
-    conversions, CPA, ROAS, CTR for each campaign.
+    conversions, CPA, ROAS, CTR for each campaign, plus Search impression
+    share and the share lost to budget and to ad rank (fractions with
+    matching *_pct percentages; null for campaigns that do not serve on
+    Search or had no impressions). Insights flag converting campaigns that
+    lose a significant share of impressions to budget.
 
     Args:
         customer_id: Google Ads customer ID, digits with or without dashes
@@ -891,8 +895,9 @@ def get_campaign_performance(
             to apply a range; if either is empty, the last 30 days are used.
         date_range_end: End date as "YYYY-MM-DD" (inclusive).
         compact: When true (for audits/overviews on large accounts), returns
-            account totals, status/type breakdowns, the top-10 spenders, and
-            zero-conversion offenders instead of every row (~90% smaller).
+            account totals, status/type breakdowns, the top-10 spenders,
+            zero-conversion offenders and budget-limited converters instead
+            of every row (~90% smaller).
     """
     from adloop.ads.read import get_campaign_performance as _impl
 
@@ -916,7 +921,9 @@ def get_ad_performance(
     """Get ad-level performance data including headlines, descriptions, and metrics.
 
     Returns ad type, headlines, descriptions, final URL, impressions,
-    clicks, CTR, conversions, cost for each ad.
+    clicks, CTR, conversions, cost for each ad, plus its policy approval
+    status, review status and policy topic names. Disapproved and
+    limited-by-policy ads are listed under policy_issues with their spend.
 
     Args:
         customer_id: Google Ads customer ID, digits with or without dashes
@@ -926,7 +933,8 @@ def get_ad_performance(
         date_range_end: End date as "YYYY-MM-DD" (inclusive).
         compact: When true (for audits/overviews), returns totals, the top-10
             ads with headline/description COUNTS instead of full asset lists,
-            plus incomplete-RSA and single-ad ad-group findings (~90% smaller).
+            plus incomplete-RSA, single-ad ad-group and policy findings with
+            approval-status counts (~90% smaller).
     """
     from adloop.ads.read import get_ad_performance as _impl
 
@@ -1327,6 +1335,59 @@ def get_demographic_targeting(
         customer_id=customer_id or current_config().ads.customer_id,
         ad_group_id=ad_group_id,
         campaign_id=campaign_id,
+    )
+
+
+@_tool(title="Change history", annotations=_READONLY, tags={"ads"})
+@_safe
+def get_change_history(
+    customer_id: str = "",
+    date_range_start: str = "",
+    date_range_end: str = "",
+    campaign_id: str = "",
+    resource_types: _StrListOpt = None,
+    limit: int = 1000,
+) -> dict:
+    """List recent account changes: who changed what, when, and through which tool.
+
+    Answers "what changed before the drop?". Returns each change newest
+    first with its time, the user's email, the client it came through
+    (Google Ads UI, API, Google Ads scripts, Editor, automated rules,
+    auto-applied recommendations, ...), the changed resource type, the
+    operation (CREATE, UPDATE, REMOVE), the changed field paths, and the
+    campaign and ad group names. Also returns counts by resource type,
+    client, user and day, plus insights on auto-applied recommendations
+    and budget or bidding changes. Google Ads keeps change history for 30
+    days, so older start dates are moved to the earliest available day.
+
+    Reads the change_event resource:
+    https://developers.google.com/google-ads/api/docs/change-event
+
+    Args:
+        customer_id: Google Ads customer ID, digits with or without dashes
+            (e.g. "123-456-7890"). Defaults to the configured ads.customer_id.
+        date_range_start: Start date as "YYYY-MM-DD", at most 30 days back.
+            Empty starts at the oldest day Google Ads still keeps.
+        date_range_end: End date as "YYYY-MM-DD" (inclusive). Empty means today.
+        campaign_id: Optional numeric campaign ID; only changes attributed to
+            that campaign are returned.
+        resource_types: Optional filter of ChangeEventResourceType names,
+            e.g. ["CAMPAIGN", "CAMPAIGN_BUDGET", "AD_GROUP_AD",
+            "AD_GROUP_CRITERION"]. Empty = all types.
+        limit: Maximum number of changes returned, newest first (1 to
+            10000; default 1000). The response is marked truncated when
+            the limit is reached.
+    """
+    from adloop.ads.read import get_change_history as _impl
+
+    return _impl(
+        current_config(),
+        customer_id=customer_id or current_config().ads.customer_id,
+        date_range_start=date_range_start,
+        date_range_end=date_range_end,
+        campaign_id=campaign_id,
+        resource_types=resource_types,
+        limit=limit,
     )
 
 

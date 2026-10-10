@@ -34,8 +34,8 @@ You have access to AdLoop MCP tools that connect Google Ads, Reddit Ads and Goog
 | Tool | When to Use | Key Parameters |
 |------|-------------|----------------|
 | `list_accounts` | First-time discovery — find which Ads accounts exist | (none — uses MCC from config) |
-| `get_campaign_performance` | Campaign-level metrics — impressions, clicks, cost, conversions | `date_range_start`, `date_range_end` |
-| `get_ad_performance` | Ad copy analysis — which headlines/descriptions work | `date_range_start`, `date_range_end` |
+| `get_campaign_performance` | Campaign-level metrics: impressions, clicks, cost, conversions, plus Search impression share and the share lost to budget and to rank | `date_range_start`, `date_range_end` |
+| `get_ad_performance` | Ad copy analysis (which headlines/descriptions work) plus each ad's policy approval status, review status and policy topics | `date_range_start`, `date_range_end` |
 | `get_keyword_performance` | Keyword analysis — quality scores, competitive metrics | `date_range_start`, `date_range_end` |
 | `get_search_terms` | Find negative keyword opportunities and understand user intent | `date_range_start`, `date_range_end` |
 | `get_negative_keywords` | List direct campaign-level negative keywords (not inside SharedSets) | `campaign_id` (optional) |
@@ -47,6 +47,7 @@ You have access to AdLoop MCP tools that connect Google Ads, Reddit Ads and Goog
 | `get_pmax_assets` | Per-asset details for PMax — field type, serving status, content. Use with `get_detailed_asset_performance` for quality signals | `campaign_id` (optional) |
 | `get_detailed_asset_performance` | Top-performing asset combinations — which headline+description+image combos Google selects most | `campaign_id` (optional) |
 | `get_audience_performance` | Audience segment metrics — remarketing, in-market, affinity, demographics | `date_range_start`, `date_range_end`, `campaign_id` (optional) |
+| `get_change_history` | What changed in the account and who changed it: time, user email, client (UI, API, scripts, Editor, auto-applied recommendations), resource type, operation, changed fields, campaign/ad group. The first stop for "what changed before the drop?" (30 days of history) | `date_range_start`, `date_range_end`, `campaign_id` (optional), `resource_types` (optional), `limit` (optional, max 10000) |
 | `get_demographic_targeting` | List current demographic criteria (age/gender/parental status/income) on an ad group or campaign — returns each criterion's `remove_id` for use with `remove_entity` | exactly one of `ad_group_id` or `campaign_id` |
 | `suggest_brands` | Resolve one brand name to the brands Google recognizes — brand ID, name, state, URLs. The ID is what brand criteria target, so resolve here before building any brand list | `brand_prefix` (required), `selected_brand_ids` (optional, IDs already picked) |
 | `check_brand_names` | Triage a shortlist of brand names at once: matched vs. unknown, plus each brand's ID | `brand_names` (required, max 25 per call) |
@@ -60,13 +61,15 @@ You have access to AdLoop MCP tools that connect Google Ads, Reddit Ads and Goog
 **Return format notes:**
 - Ads read tools automatically compute `metrics.cost` and `metrics.cpa` from `metrics.cost_micros` — no manual division needed. `metrics.currency` contains the account's currency code (auto-detected).
 - `metrics.average_cpc_amount` is also pre-computed where available.
-- `get_ad_performance` returns full `headlines` and `descriptions` lists for RSAs.
+- `get_ad_performance` returns full `headlines` and `descriptions` lists for RSAs, plus `ad_group_ad.policy_summary.approval_status`, `review_status` and `policy_topics` (topic names only) per ad. Ads that are `DISAPPROVED` (cannot serve) or `APPROVED_LIMITED` (serving restricted) are listed in `policy_issues` with their spend and flagged in `insights[]`; compact mode adds `by_approval_status` counts.
+- `get_campaign_performance` returns `metrics.search_impression_share`, `metrics.search_budget_lost_impression_share` and `metrics.search_rank_lost_impression_share` as fractions (0.25 = 25%) with matching `*_pct` percentages. Google caps the reported values: 0.0999 means below 10% share, 0.9001 means above 90% lost. They are `null` for campaigns that do not serve on Search (Display, Video, PMax, ...) or had no impressions, which means "does not apply", not zero. `budget_limited_converters` and `insights[]` flag converting campaigns losing 20% or more of impressions to budget: those can absorb more budget, rank-lost share instead points at bids, ad relevance and quality.
+- `get_change_history` returns changes newest first with counts `by_resource_type`, `by_client`, `by_user` and `by_day`. Google Ads keeps 30 days of change history, so an older start date is moved forward (see `notes`). `insights[]` flag auto-applied recommendations and budget or bidding changes. `truncated: true` means the limit was hit; narrow the range or filters to see older changes.
 - `get_recommendations` returns `estimated_improvement` per recommendation (potential minus base metrics) and `insights[]` that flag budget-increase recommendations, whose projected gain comes from spending more.
 - PMax tools: `get_pmax_performance` returns `insights[]` flagging weak ad strength and zero-conversion asset groups. `segments.ad_network_type` includes MIXED — a Google catch-all for most PMax traffic. Full channel splits (Search vs YouTube vs Display vs Discover) are not available via the API.
 - `get_pmax_assets` returns `by_status` and `by_field_type` summaries. Note: per-asset performance labels (BEST/GOOD/LOW) are not available for PMax assets in the Google Ads API. Use `get_detailed_asset_performance` for quality signals via top combinations.
 - `get_audience_performance` works for campaigns with explicit audience targeting. PMax audience targeting is automatic and may not appear in this report. When the results include SEARCH campaigns, `insights[]` reminds you that custom segments cannot be attached to them (see the compatibility matrix below) — relay that constraint instead of proposing impossible pairings.
 - `get_demographic_targeting` returns an empty list when no demographics have been excluded or narrowed — that is the DEFAULT state (Google serves to all segments). Each criterion includes a composite `remove_id` (`adGroupId~criterionId` or `campaignId~criterionId`) that can be passed straight to `remove_entity`.
-- **Compact mode for audits**: `get_campaign_performance`, `get_keyword_performance`, `get_search_terms`, and `get_ad_performance` accept `compact=true`, returning account totals, breakdowns, the top-10 rows, and pre-computed offender lists (zero-conversion spenders, low-QS keywords, negative-keyword waste candidates, thin RSAs, single-ad ad groups) instead of every row; compact `get_ad_performance` keeps `final_urls` on its rows and adds `landing_pages` (every final URL across all ads with its ad count), so landing-page checks need no extra GAQL — roughly 90% smaller. Use it for account audits and overviews so raw tables don't flood the context; use the default full mode when you need a specific entity's exact rows before drafting a change. In harnesses with subagents, heavy multi-tool audits can additionally be delegated to a subagent that returns only the summary.
+- **Compact mode for audits**: `get_campaign_performance`, `get_keyword_performance`, `get_search_terms`, and `get_ad_performance` accept `compact=true`, returning account totals, breakdowns, the top-10 rows, and pre-computed offender lists (zero-conversion spenders, budget-limited converters, low-QS keywords, negative-keyword waste candidates, thin RSAs, single-ad ad groups, disapproved or limited ads) instead of every row; compact `get_ad_performance` keeps `final_urls` on its rows and adds `landing_pages` (every final URL across all ads with its ad count), so landing-page checks need no extra GAQL — roughly 90% smaller. Use it for account audits and overviews so raw tables don't flood the context; use the default full mode when you need a specific entity's exact rows before drafting a change. In harnesses with subagents, heavy multi-tool audits can additionally be delegated to a subagent that returns only the summary.
 
 ### Cross-Reference Tools (GA4 + Ads combined)
 
@@ -340,18 +343,20 @@ Most websites (especially in the EU) use a GDPR cookie consent banner. This has 
 3. If they mention conversions, CPA, or "is it worth it", call `analyze_campaign_conversions` instead — it gives Ads + GA4 data in one call with GDPR-aware cost-per-conversion
 4. If they mention specific keywords or search terms, also call `get_keyword_performance` or `get_search_terms`
 5. Present a summary with the key metrics: spend (`metrics.cost`), clicks, conversions, CPA (`metrics.cpa`), CTR
-6. Highlight anything concerning: zero conversions, high CPA, low quality scores, wasteful search terms
-7. Compare against best practices (see Marketing Best Practices section)
-8. If the account has active Google recommendations, mention that `get_recommendations` can surface Google's suggestions for improvement
+6. Highlight anything concerning: zero conversions, high CPA, low quality scores, wasteful search terms, converting campaigns that lose impression share to budget
+7. If performance moved (spend, clicks or conversions up or down sharply), call `get_change_history` for the days before the shift to see who changed budgets, bids, keywords or ads, including auto-applied recommendations. Also check `get_ad_performance` for `DISAPPROVED` or `APPROVED_LIMITED` ads: a disapproval silently stops ads from serving
+8. Compare against best practices (see Marketing Best Practices section)
+9. If the account has active Google recommendations, mention that `get_recommendations` can surface Google's suggestions for improvement
 
 ### When user asks about conversions or conversion drops
 
 1. Call `attribution_check` with relevant date range and `conversion_events` if the user mentions specific events (e.g. sign_up, purchase) — this does the Ads vs GA4 comparison in one call and auto-generates insights
 2. If the discrepancy needs page-level drill-down, call `landing_page_analysis` to see which pages get paid traffic but don't convert
 3. Call `get_search_terms` to see if search intent shifted
-4. **Before concluding tracking is broken:** Check the `insights` from `attribution_check` — it already factors in GDPR consent gaps. Only diagnose a tracking issue if the tool's insights suggest it.
-5. If the user's codebase is accessible (Cursor native), search for recent changes to the affected pages
-6. Present a unified diagnosis combining the cross-reference tool insights with code analysis
+4. Call `get_change_history` covering the days before the drop: budget cuts, bid strategy or target changes, paused keywords or ads, and auto-applied recommendations explain most sudden drops. Check `get_ad_performance` for newly `DISAPPROVED` or `APPROVED_LIMITED` ads in the affected campaigns
+5. **Before concluding tracking is broken:** Check the `insights` from `attribution_check` — it already factors in GDPR consent gaps. Only diagnose a tracking issue if the tool's insights suggest it.
+6. If the user's codebase is accessible (Cursor native), search for recent changes to the affected pages
+7. Present a unified diagnosis combining the cross-reference tool insights with code analysis
 
 ### When user wants to create an ad
 
@@ -660,7 +665,7 @@ LIMIT n
 - `metrics.impressions`, `metrics.clicks`, `metrics.cost_micros`
 - `metrics.conversions`, `metrics.conversions_value`
 - `metrics.ctr`, `metrics.average_cpc`
-- `metrics.search_impression_share`, `metrics.search_rank_lost_impression_share`
+- `metrics.search_impression_share`, `metrics.search_budget_lost_impression_share`, `metrics.search_rank_lost_impression_share` (fractions; Search and Shopping campaigns only)
 
 **Segments (for time-based breakdowns):**
 - `segments.date` — daily breakdown

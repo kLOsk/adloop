@@ -481,6 +481,7 @@ class TestDirectoryReadiness:
             "run_ga4_report": "https://developers.google.com/analytics/devguides/reporting/data/v1/api-schema",
             "run_gsc_report": "https://developers.google.com/webmaster-tools/v1/searchanalytics/query",
             "run_reddit_report": "https://ads-api.reddit.com/docs/v3/",
+            "get_change_history": "https://developers.google.com/google-ads/api/docs/change-event",
         }.items():
             assert docs in tools[name].description, name
 

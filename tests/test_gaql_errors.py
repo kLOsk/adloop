@@ -73,3 +73,24 @@ class TestToPythonNestedMessages:
         assert _to_python("x") == "x"
         assert _to_python(3) == 3
         assert _to_python(None) is None
+
+
+class TestToPythonFieldMask:
+    def test_field_mask_returns_snake_case_paths(self):
+        # change_event.changed_fields is a FieldMask; its JSON form is one
+        # comma-joined camelCase string, which hides the real field paths.
+        from google.ads.googleads.v25.services.types.google_ads_service import (
+            GoogleAdsRow,
+        )
+
+        from adloop.ads.gaql import _extract_field
+
+        row = GoogleAdsRow()
+        row.change_event.changed_fields.paths.extend(
+            ["amount_micros", "maximize_conversions.target_cpa_micros"]
+        )
+
+        assert _extract_field(row, "change_event.changed_fields") == [
+            "amount_micros",
+            "maximize_conversions.target_cpa_micros",
+        ]

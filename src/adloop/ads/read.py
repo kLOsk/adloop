@@ -87,9 +87,34 @@ def get_campaign_performance(
     rows = execute_query(config, customer_id, query)
     currency_code = get_currency_code(config, customer_id)
     _enrich_cost_fields(rows, currency_code)
+    share_error = _attach_impression_share(config, customer_id, rows, date_clause)
+    budget_limited = _budget_limited_converters(rows)
+
+    share_insights: list[str] = []
+    if budget_limited:
+        names = ", ".join(
+            f"{r['name']} ({r['search_budget_lost_impression_share_pct']}% lost to budget)"
+            for r in budget_limited[:5]
+        )
+        share_insights.append(
+            f"{len(budget_limited)} converting campaign(s) lose at least "
+            f"{int(_BUDGET_LOST_FLAG * 100)}% of Search impression share to "
+            f"budget: {names}. They run out of budget while converting; "
+            f"compare their CPA with the account before moving budget to them."
+        )
 
     if not compact:
-        return {"campaigns": rows, "total_campaigns": len(rows)}
+        result: dict = {
+            "campaigns": rows,
+            "total_campaigns": len(rows),
+            "impression_share_note": _IMPRESSION_SHARE_NOTE,
+        }
+        if share_error:
+            result["impression_share_error"] = share_error
+        if share_insights:
+            result["budget_limited_converters"] = budget_limited[:10]
+            result["insights"] = share_insights
+        return result
 
     zero_conv = [
         r for r in rows
@@ -107,9 +132,10 @@ def get_campaign_performance(
             f"ZERO conversions: {names}. Investigate tracking and relevance "
             f"before optimizing anything else."
         )
+    insights.extend(share_insights)
 
     top = rows[:10]
-    return {
+    result = {
         "compact": True,
         "total_campaigns": len(rows),
         "totals": _compact_totals(rows, currency_code),
@@ -125,9 +151,115 @@ def get_campaign_performance(
             }
             for r in zero_conv[:5]
         ],
+        "budget_limited_converters": budget_limited[:5],
         "insights": insights,
+        "impression_share_note": _IMPRESSION_SHARE_NOTE,
         "note": _compact_note(len(top), len(rows), "get_campaign_performance"),
     }
+    if share_error:
+        result["impression_share_error"] = share_error
+    return result
+
+
+# Search impression share only exists for campaigns that serve on the Search
+# Network. For every other channel the API has nothing to report, and a
+# proto3 double that was never set reads back as 0.0, which would look like
+# "zero share" rather than "does not apply".
+_IMPRESSION_SHARE_CHANNELS = ("SEARCH", "SHOPPING")
+_IMPRESSION_SHARE_FIELDS = (
+    "metrics.search_impression_share",
+    "metrics.search_budget_lost_impression_share",
+    "metrics.search_rank_lost_impression_share",
+)
+_BUDGET_LOST_FLAG = 0.2
+_IMPRESSION_SHARE_NOTE = (
+    "Search impression share fields are fractions from the API (0.25 = 25%); "
+    "the matching *_pct fields carry the same value as a percentage. Google "
+    "reports impression share below 10% as 0.0999 and lost share above 90% as "
+    "0.9001, so read those as '<10%' and '>90%'. Null means the metric does "
+    "not apply: the campaign is not a Search or Shopping campaign, or it had "
+    "no impressions in the range."
+)
+
+
+def _attach_impression_share(
+    config: AdLoopConfig, customer_id: str, rows: list[dict], date_clause: str
+) -> str | None:
+    """Merge Search impression share onto campaign rows, null where it does not apply.
+
+    Runs as its own query, restricted to the channels that report it, so the
+    main performance query (and every non-Search campaign in it) stays exactly
+    as it was. A failure here costs the share columns, never the report:
+    the error comes back as a string for the caller to surface.
+    """
+    from adloop.ads.gaql import _parse_gaql_error, execute_query
+
+    channels = ", ".join(f"'{c}'" for c in _IMPRESSION_SHARE_CHANNELS)
+    query = f"""
+        SELECT campaign.id, metrics.impressions,
+               {", ".join(_IMPRESSION_SHARE_FIELDS)}
+        FROM campaign
+        WHERE campaign.status != 'REMOVED'
+          AND campaign.advertising_channel_type IN ({channels})
+          {date_clause}
+    """
+
+    error: str | None = None
+    share_by_id: dict[str, dict] = {}
+    try:
+        for r in execute_query(config, customer_id, query):
+            share_by_id[str(r.get("campaign.id"))] = r
+    except Exception as exc:  # noqa: BLE001 - report it, keep the main rows
+        error = (
+            "Search impression share could not be loaded: "
+            f"{_parse_gaql_error(exc)}"
+        )
+
+    for row in rows:
+        share = share_by_id.get(str(row.get("campaign.id")))
+        applies = (
+            share is not None
+            and str(row.get("campaign.advertising_channel_type"))
+            in _IMPRESSION_SHARE_CHANNELS
+            and (share.get("metrics.impressions") or 0) > 0
+        )
+        for field in _IMPRESSION_SHARE_FIELDS:
+            value = share.get(field) if applies and share else None
+            value = round(float(value), 4) if value is not None else None
+            row[field] = value
+            row[f"{field}_pct"] = round(value * 100, 1) if value is not None else None
+
+    return error
+
+
+def _budget_limited_converters(rows: list[dict]) -> list[dict]:
+    """Converting campaigns that lose a significant share of Search to budget."""
+    limited = [
+        r for r in rows
+        if (r.get("metrics.search_budget_lost_impression_share") or 0)
+        >= _BUDGET_LOST_FLAG
+        and (r.get("metrics.conversions") or 0) > 0
+    ]
+    limited.sort(
+        key=lambda r: r.get("metrics.search_budget_lost_impression_share") or 0,
+        reverse=True,
+    )
+    return [
+        {
+            "name": r.get("campaign.name"),
+            "id": r.get("campaign.id"),
+            "conversions": r.get("metrics.conversions"),
+            "cost": r.get("metrics.cost"),
+            "cpa": r.get("metrics.cpa"),
+            "search_impression_share_pct": r.get(
+                "metrics.search_impression_share_pct"
+            ),
+            "search_budget_lost_impression_share_pct": r.get(
+                "metrics.search_budget_lost_impression_share_pct"
+            ),
+        }
+        for r in limited
+    ]
 
 
 def get_ad_performance(
@@ -150,6 +282,9 @@ def get_ad_performance(
                ad_group_ad.ad.responsive_search_ad.descriptions,
                ad_group_ad.ad.final_urls,
                ad_group_ad.status,
+               ad_group_ad.policy_summary.approval_status,
+               ad_group_ad.policy_summary.review_status,
+               ad_group_ad.policy_summary.policy_topic_entries,
                metrics.impressions, metrics.clicks, metrics.ctr,
                metrics.conversions, metrics.cost_micros
         FROM ad_group_ad
@@ -161,9 +296,32 @@ def get_ad_performance(
     rows = execute_query(config, customer_id, query)
     currency_code = get_currency_code(config, customer_id)
     _enrich_cost_fields(rows, currency_code)
+    for r in rows:
+        _compact_policy_topics(r)
+    policy_issues = _policy_issues(rows)
+
+    policy_insights: list[str] = []
+    for status, label in (
+        ("DISAPPROVED", "are DISAPPROVED and cannot serve"),
+        ("APPROVED_LIMITED", "are APPROVED_LIMITED (serving restricted by policy)"),
+    ):
+        flagged = [p for p in policy_issues if p["approval_status"] == status]
+        if not flagged:
+            continue
+        spend = round(sum(p["cost"] or 0 for p in flagged), 2)
+        topics = sorted({t for p in flagged for t in p["policy_topics"]})
+        topic_text = f" Policy topics: {', '.join(topics[:8])}." if topics else ""
+        policy_insights.append(
+            f"{len(flagged)} ad(s) {label}; they spent {spend} {currency_code} "
+            f"in this range.{topic_text}"
+        )
 
     if not compact:
-        return {"ads": rows, "total_ads": len(rows)}
+        result: dict = {"ads": rows, "total_ads": len(rows)}
+        if policy_issues:
+            result["policy_issues"] = policy_issues
+            result["insights"] = policy_insights
+        return result
 
     def _asset_count(row: dict, field: str) -> int:
         assets = row.get(field) or []
@@ -227,6 +385,7 @@ def get_ad_performance(
             f"{len(single_ad_groups)} ad group(s) have only one enabled ad — "
             f"Google cannot rotate or optimize with a single creative."
         )
+    insights.extend(policy_insights)
 
     # Landing-page work needs every ad's URL, not just the top ten rows'.
     landing_pages: dict[str, int] = {}
@@ -240,6 +399,10 @@ def get_ad_performance(
         "total_ads": len(rows),
         "totals": _compact_totals(rows, currency_code),
         "by_status": _status_counts(rows, "ad_group_ad.status"),
+        "by_approval_status": _status_counts(
+            rows, "ad_group_ad.policy_summary.approval_status"
+        ),
+        "policy_issues": policy_issues[:10],
         "ads_top_spend": top,
         "incomplete_rsas": incomplete_rsas[:10],
         "single_ad_ad_groups": single_ad_groups[:10],
@@ -252,6 +415,45 @@ def get_ad_performance(
         + " Compact rows replace full headline/description lists with counts;"
         " landing_pages lists every final URL across all ads.",
     }
+
+
+_POLICY_TOPICS_RAW = "ad_group_ad.policy_summary.policy_topic_entries"
+_POLICY_TOPICS = "ad_group_ad.policy_summary.policy_topics"
+_FLAGGED_APPROVAL = ("DISAPPROVED", "APPROVED_LIMITED")
+
+
+def _compact_policy_topics(row: dict) -> None:
+    """Replace the raw policy findings with their topic names.
+
+    Each PolicyTopicEntry carries evidences and constraints (country lists,
+    matched text) that can run to kilobytes per ad. The topic name is what
+    a reader needs to know why an ad is restricted.
+    """
+    entries = row.pop(_POLICY_TOPICS_RAW, None) or []
+    topics: list[str] = []
+    for entry in entries if isinstance(entries, list) else []:
+        topic = entry.get("topic") if isinstance(entry, dict) else None
+        if topic and topic not in topics:
+            topics.append(str(topic))
+    row[_POLICY_TOPICS] = topics
+
+
+def _policy_issues(rows: list[dict]) -> list[dict]:
+    """Disapproved and limited ads, highest spend first (rows arrive cost-sorted)."""
+    return [
+        {
+            "ad_id": r.get("ad_group_ad.ad.id"),
+            "campaign": r.get("campaign.name"),
+            "ad_group": r.get("ad_group.name"),
+            "status": r.get("ad_group_ad.status"),
+            "approval_status": str(r.get("ad_group_ad.policy_summary.approval_status")),
+            "review_status": r.get("ad_group_ad.policy_summary.review_status"),
+            "policy_topics": r.get(_POLICY_TOPICS) or [],
+            "cost": r.get("metrics.cost"),
+        }
+        for r in rows
+        if str(r.get("ad_group_ad.policy_summary.approval_status")) in _FLAGGED_APPROVAL
+    ]
 
 
 def get_keyword_performance(
@@ -902,6 +1104,233 @@ def get_demographic_targeting(
         "total_criteria": len(rows),
         "insights": insights,
     }
+
+
+CHANGE_RESOURCE_TYPES = (
+    "AD", "AD_GROUP", "AD_GROUP_AD", "AD_GROUP_ASSET", "AD_GROUP_BID_MODIFIER",
+    "AD_GROUP_CRITERION", "AD_GROUP_FEED", "ASSET", "ASSET_SET",
+    "ASSET_SET_ASSET", "CAMPAIGN", "CAMPAIGN_ASSET", "CAMPAIGN_ASSET_SET",
+    "CAMPAIGN_BUDGET", "CAMPAIGN_CRITERION", "CAMPAIGN_FEED", "CUSTOMER_ASSET",
+    "FEED", "FEED_ITEM",
+)
+
+# ChangeClientType values, as the Google Ads UI's change history names them.
+_CHANGE_CLIENT_LABELS = {
+    "GOOGLE_ADS_WEB_CLIENT": "Google Ads UI",
+    "GOOGLE_ADS_AUTOMATED_RULE": "Automated rule",
+    "GOOGLE_ADS_SCRIPTS": "Google Ads scripts",
+    "GOOGLE_ADS_BULK_UPLOAD": "Bulk upload",
+    "GOOGLE_ADS_API": "Google Ads API",
+    "GOOGLE_ADS_EDITOR": "Google Ads Editor",
+    "GOOGLE_ADS_MOBILE_APP": "Google Ads mobile app",
+    "GOOGLE_ADS_RECOMMENDATIONS": "Applied recommendation",
+    "GOOGLE_ADS_RECOMMENDATIONS_SUBSCRIPTION": "Auto-applied recommendation",
+    "SEARCH_ADS_360_SYNC": "Search Ads 360 sync",
+    "SEARCH_ADS_360_POST": "Search Ads 360 post",
+    "INTERNAL_TOOL": "Google internal tool",
+    "OTHER": "Other",
+}
+
+# change_event keeps 30 days. The window is counted back from today in the
+# server's clock while Google counts in the account's time zone, so one day
+# of margin keeps a "last 30 days" request from tipping over the edge.
+_CHANGE_HISTORY_DAYS = 29
+_CHANGE_HISTORY_MAX_LIMIT = 10_000
+# Substrings of changed field paths that mean a bidding change: strategy
+# type and targets on campaigns, bids on ad groups and keywords.
+_BIDDING_FIELD_MARKERS = (
+    "bidding", "target_cpa", "target_roas", "maximize_", "manual_cpc",
+    "cpc_bid", "bid_modifier",
+)
+
+
+def get_change_history(
+    config: AdLoopConfig,
+    *,
+    customer_id: str = "",
+    date_range_start: str = "",
+    date_range_end: str = "",
+    campaign_id: str = "",
+    resource_types: list[str] | None = None,
+    limit: int = 1000,
+) -> dict:
+    """List account changes (who changed what, where, and how) from change_event."""
+    from datetime import date, timedelta
+
+    from adloop.ads.gaql import execute_query
+
+    today = date.today()
+    earliest = today - timedelta(days=_CHANGE_HISTORY_DAYS)
+
+    def _parse(value: str, name: str) -> date | dict:
+        try:
+            return date.fromisoformat(value)
+        except ValueError:
+            return {"error": f"{name} must be a date as YYYY-MM-DD, got {value!r}"}
+
+    start = earliest
+    if date_range_start:
+        parsed = _parse(date_range_start, "date_range_start")
+        if isinstance(parsed, dict):
+            return parsed
+        start = parsed
+    end = today
+    if date_range_end:
+        parsed = _parse(date_range_end, "date_range_end")
+        if isinstance(parsed, dict):
+            return parsed
+        end = parsed
+
+    notes: list[str] = []
+    if start < earliest:
+        notes.append(
+            f"Google Ads keeps change history for 30 days; the start date "
+            f"{start.isoformat()} was moved to {earliest.isoformat()}."
+        )
+        start = earliest
+    if end > today:
+        end = today
+    if end < start:
+        return {
+            "error": (
+                f"The date range {start.isoformat()} to {end.isoformat()} is "
+                f"empty or lies entirely outside the 30 days of change history "
+                f"Google Ads keeps (from {earliest.isoformat()})."
+            )
+        }
+
+    campaign_filter = ""
+    if campaign_id:
+        if not str(campaign_id).isdigit():
+            return {"error": "campaign_id must be a numeric Google Ads ID"}
+        campaign_filter = f"AND campaign.id = {campaign_id}"
+
+    type_filter = ""
+    if resource_types:
+        wanted = [str(t).strip().upper() for t in resource_types if str(t).strip()]
+        unknown = [t for t in wanted if t not in CHANGE_RESOURCE_TYPES]
+        if unknown:
+            return {
+                "error": (
+                    f"Unknown resource type(s): {', '.join(unknown)}. Valid "
+                    f"types: {', '.join(CHANGE_RESOURCE_TYPES)}"
+                )
+            }
+        if wanted:
+            type_filter = (
+                "AND change_event.change_resource_type IN ("
+                + ", ".join(f"'{t}'" for t in wanted)
+                + ")"
+            )
+
+    limit = max(1, min(int(limit or 1000), _CHANGE_HISTORY_MAX_LIMIT))
+
+    # change_date_time is a timestamp; a bare date compares as its midnight,
+    # so the day after the end date is the bound that keeps the whole end day.
+    query = f"""
+        SELECT change_event.change_date_time,
+               change_event.user_email,
+               change_event.client_type,
+               change_event.change_resource_type,
+               change_event.resource_change_operation,
+               change_event.changed_fields,
+               change_event.change_resource_name,
+               campaign.id, campaign.name,
+               ad_group.id, ad_group.name
+        FROM change_event
+        WHERE change_event.change_date_time >= '{start.isoformat()}'
+          AND change_event.change_date_time <= '{(end + timedelta(days=1)).isoformat()}'
+          {campaign_filter}
+          {type_filter}
+        ORDER BY change_event.change_date_time DESC
+        LIMIT {limit}
+    """
+
+    rows = execute_query(config, customer_id, query)
+
+    changes: list[dict] = []
+    for r in rows:
+        client_type = str(r.get("change_event.client_type") or "UNKNOWN")
+        fields = r.get("change_event.changed_fields") or []
+        if isinstance(fields, str):
+            fields = [f for f in fields.split(",") if f]
+        changes.append({
+            "change_time": r.get("change_event.change_date_time"),
+            "user_email": r.get("change_event.user_email") or None,
+            "client_type": client_type,
+            "client": _CHANGE_CLIENT_LABELS.get(client_type, client_type),
+            "resource_type": r.get("change_event.change_resource_type"),
+            "operation": r.get("change_event.resource_change_operation"),
+            "changed_fields": list(fields),
+            "campaign": r.get("campaign.name") or None,
+            "campaign_id": r.get("campaign.id") or None,
+            "ad_group": r.get("ad_group.name") or None,
+            "ad_group_id": r.get("ad_group.id") or None,
+            "resource_name": r.get("change_event.change_resource_name"),
+        })
+
+    by_day: dict[str, int] = {}
+    for c in changes:
+        day = str(c["change_time"] or "")[:10] or "UNKNOWN"
+        by_day[day] = by_day.get(day, 0) + 1
+
+    insights: list[str] = []
+    if not changes:
+        insights.append(
+            f"No changes recorded between {start.isoformat()} and "
+            f"{end.isoformat()} for this filter."
+        )
+    auto_applied = [
+        c for c in changes
+        if c["client_type"] == "GOOGLE_ADS_RECOMMENDATIONS_SUBSCRIPTION"
+    ]
+    if auto_applied:
+        insights.append(
+            f"{len(auto_applied)} change(s) came from auto-applied "
+            f"recommendations, made by Google without a person approving each one."
+        )
+    budget_or_bidding = [
+        c for c in changes
+        if c["resource_type"] == "CAMPAIGN_BUDGET"
+        or any(
+            marker in f
+            for f in c["changed_fields"]
+            for marker in _BIDDING_FIELD_MARKERS
+        )
+    ]
+    if budget_or_bidding:
+        insights.append(
+            f"{len(budget_or_bidding)} change(s) touched budgets or bidding; "
+            f"those move spend and conversions within days."
+        )
+    if campaign_id:
+        notes.append(
+            "The campaign filter keeps only changes Google attributes to that "
+            "campaign; changes without a campaign (account-level assets, for "
+            "example) are left out."
+        )
+
+    result: dict = {
+        "date_range": {"start": start.isoformat(), "end": end.isoformat()},
+        "changes": changes,
+        "total_changes": len(changes),
+        "by_resource_type": _status_counts(changes, "resource_type"),
+        "by_client": _status_counts(changes, "client"),
+        "by_user": _status_counts(changes, "user_email"),
+        "by_day": dict(sorted(by_day.items(), reverse=True)),
+        "insights": insights,
+    }
+    if len(changes) >= limit:
+        result["truncated"] = True
+        notes.append(
+            f"Reached the limit of {limit} changes (newest first); older "
+            f"changes in the range are not included. A narrower date range, "
+            f"a campaign or resource type filter, or a higher limit (up to "
+            f"{_CHANGE_HISTORY_MAX_LIMIT}) returns the rest."
+        )
+    if notes:
+        result["notes"] = notes
+    return result
 
 
 # ---------------------------------------------------------------------------
