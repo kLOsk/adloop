@@ -150,15 +150,16 @@ These tools read the live GTM container and join it with the codebase + GA4 to f
 | `audit_event_coverage` | **The flagship.** Three-way join: codebase events ↔ GTM tags ↔ GA4 actual fires. For each event name in `expected_events`, returns one of 10 statuses (`ok`, `no_tag_no_fire`, `tag_paused`, `tag_active_but_not_firing`, `gtm_only_firing`, `ga4_only`, etc.) plus auto-generated insights for the gaps. |
 | `list_gtm_accounts` | Discover accessible GTM accounts |
 | `list_gtm_containers` | List containers under an account — returns numeric `container_id` (needed by other tools), public `GTM-XXXXXXX` ID, and usage context (web/iOS/Android/server) |
-| `list_gtm_tags` | Every tag in the live container with parsed event names and resolved firing/blocking trigger names |
+| `list_gtm_tags` | Every tag in the live container with parsed event names and resolved firing/blocking trigger names. Pass `workspace_id` to read a workspace's unpublished state instead, so a just-drafted tag is visible (also on `get_gtm_tag`, `list_gtm_triggers`, `get_gtm_trigger`, `list_gtm_variables`) |
 | `get_gtm_tag` | Full raw config for a single tag — every parameter, firing/blocking triggers with filter conditions, priority, pause status, sampling |
 | `list_gtm_triggers` | Every trigger with filter conditions parsed to readable text (e.g. `{{Page Path}} contains service-promotions`, `{{Form ID}} NOT contains wf-form-...`). Renders the `negate` flag explicitly. |
 | `get_gtm_trigger` | Full trigger config + reverse lookup of every tag that uses it. Includes parsed `element_visibility` block (selector, on-screen ratio, firing frequency) for elementVisibility triggers and `group_member_trigger_ids` for triggerGroup types |
 | `list_gtm_variables` | Custom variables (data layer, constants, JS) plus enabled built-in variables |
 | `list_gtm_workspaces` | List drafts (workspaces) under a container — workspace IDs are needed by `get_gtm_workspace_diff` |
 | `get_gtm_workspace_diff` | Drafted-but-not-published changes — common cause of "I edited a tag but nothing happened". Returns `is_clean: true` when nothing is pending. |
-| `list_gtm_versions` | Publish history with version IDs and entity counts. Use to correlate a metric drop with a recent publish. |
-| `get_gtm_version` | Full metadata + tag/trigger names for a single historical container version |
+| `list_gtm_versions` | Version history, newest first, with version IDs and entity counts. The Tag Manager API returns no timestamps or author for versions. |
+| `get_gtm_version` | Name, notes and tag/trigger names for a single historical container version |
+| `get_gtm_version_diff` | What a publish changed: added, removed and changed tags, triggers and variables with the changed fields, plus built-in variables enabled or disabled. Defaults to the live version against the one before it; two or three API calls. |
 
 #### GTM write tools (opt-in)
 
@@ -170,13 +171,14 @@ Off by default. Set `gtm.write_enabled: true` in `~/.adloop/config.yaml` and res
 | `draft_gtm_trigger` | Create a trigger, or update one by `trigger_id` (type is immutable). `custom_event_name` wires a `customEvent` trigger to a dataLayer event. |
 | `draft_delete_gtm_entity` | Delete a workspace tag or trigger. Triggers still referenced by a tag are refused up front, with the tags listed. |
 | `draft_publish_gtm_workspace` | Publish a workspace live. The preview lists every pending change, including edits other people made in the GTM UI. |
+| `draft_rollback_gtm_version` | Republish an older container version live. The preview is the diff from the live version to the target; the plan pins the live version, so apply refuses if someone publishes in between. Workspaces are left as they are. |
 
 Safety gates specific to GTM:
 - **Custom HTML** runs arbitrary JavaScript on your site, so creating or editing an `html` tag — or publishing a workspace that adds or changes one — is refused unless `gtm.allow_custom_html: true` is also set. Pausing or deleting one is always allowed.
 - **No stale writes.** Updates and deletes pin the entity's fingerprint from the preview, and publish pins the workspace's pending changes; if someone edits the container in between, apply refuses and you re-draft.
 - Publishing stops on merge conflicts or GTM compiler errors. The dry run runs a Tag Manager **quick preview** first (Tag Manager has no validate-only mode), so compiler errors surface before a version is even created. That preview is a POST and stores a preview version in the container — nothing is published and no live tag changes; the rest of the dry run only reads.
-- The publish result names the version it replaced (`previous_live_version_id`), so rolling back is one step: publish that version again in the GTM UI. If the version was created but publishing it failed, the error carries both the created version id and the still-live one.
-- Per-operation names for `safety.blocked_operations`: `gtm_create_tag`, `gtm_update_tag`, `gtm_delete_tag`, `gtm_create_trigger`, `gtm_update_trigger`, `gtm_delete_trigger`, `gtm_publish_workspace`.
+- The publish and rollback results name the version they replaced (`previous_live_version_id`), so rolling back is one step: `draft_rollback_gtm_version` with that id. If the version was created but publishing it failed, the error carries both the created version id and the still-live one.
+- Per-operation names for `safety.blocked_operations`: `gtm_create_tag`, `gtm_update_tag`, `gtm_delete_tag`, `gtm_create_trigger`, `gtm_update_trigger`, `gtm_delete_trigger`, `gtm_publish_workspace`, `gtm_rollback_version`.
 
 The Google account also needs **Edit** permission on the container (and **Publish** to publish) under Admin → User Management.
 
@@ -187,13 +189,13 @@ The Google account also needs **Edit** permission on the container (and **Publis
 | Tool | What It Does |
 |------|-------------|
 | `list_gsc_sites` | List Search Console properties the connected account can access |
-| `run_gsc_report` | Organic search analytics — clicks, impressions, CTR, position by query/page/country/device/date |
+| `run_gsc_report` | Organic search analytics: clicks, impressions, CTR, position by query/page/country/device/date/searchAppearance/hour. Supports fresh data (`data_state="all"`), `aggregation_type`, and paging past 25,000 rows with `start_row` |
 
 ### Web Performance Tools
 
 | Tool | What It Does |
 |------|-------------|
-| `analyze_page_speed` | PageSpeed Insights for landing pages — Lighthouse score, Core Web Vitals, real-user CrUX data, top fixes. No OAuth needed (optional API key). |
+| `analyze_page_speed` | PageSpeed Insights for landing pages: Lighthouse score, Core Web Vitals, real-user CrUX data (falls back to origin-wide data, labelled as such, when the page has too little traffic), top fixes. No OAuth needed (optional API key). |
 
 ### Merchant Center Tools
 
