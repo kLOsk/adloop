@@ -160,6 +160,12 @@ def _to_python(obj: object) -> object:
         if type(obj) is not int and hasattr(obj, "name"):
             return obj.name
         return obj
+    # FieldMask (change_event.changed_fields): its JSON form is one
+    # comma-joined camelCase string, which hides the snake_case paths the
+    # rest of the API uses. Return the paths as they are.
+    descriptor = getattr(obj, "DESCRIPTOR", None)
+    if getattr(descriptor, "full_name", "") == "google.protobuf.FieldMask":
+        return list(obj.paths)
     # Repeated fields (headlines, final_urls, etc.)
     try:
         return [_to_python(item) for item in obj]
