@@ -3886,6 +3886,12 @@ def _execute_plan(
 
 def _dispatch_ads_plan(client: object, cid: str, plan: object) -> dict:
     """Run a Google Ads plan against ``client`` (real or validate-only)."""
+    # Call assets and ad schedules live in adloop.ads.assets.
+    from adloop.ads.assets import (
+        _apply_add_ad_schedule,
+        _apply_create_call_asset,
+        _apply_update_call_asset,
+    )
     # Conversion-action CRUD lives in its own module; import lazily so the
     # dispatch table (and this module) don't take the dependency at import time.
     from adloop.ads.conversion_actions import (
@@ -3935,6 +3941,9 @@ def _dispatch_ads_plan(client: object, cid: str, plan: object) -> dict:
         "create_structured_snippets": _apply_create_structured_snippets,
         "create_image_assets": _apply_create_image_assets,
         "create_sitelinks": _apply_create_sitelinks,
+        "create_call_asset": _apply_create_call_asset,
+        "update_call_asset": _apply_update_call_asset,
+        "add_ad_schedule": _apply_add_ad_schedule,
         "create_conversion_action": _apply_create_conversion_action,
         "update_conversion_action": _apply_update_conversion_action,
         "remove_conversion_action": _apply_remove_conversion_action,

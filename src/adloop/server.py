@@ -3350,6 +3350,148 @@ def draft_sitelinks(
     )
 
 
+@_tool(title="Draft call asset", annotations=_WRITE, tags={"ads"})
+@_safe
+def draft_call_asset(
+    phone_number: str,
+    country_code: str,
+    campaign_id: str = "",
+    ad_group_id: str = "",
+    scope: str = "",
+    call_conversion_action_id: str = "",
+    ad_schedule: _DictList = [],  # noqa: B006 — mutable default required for MCP JSON schema
+    customer_id: str = "",
+) -> dict:
+    """Draft a call asset (phone number shown with ads) and its link — returns a PREVIEW.
+
+    Creates the CallAsset and links it in one request: to a campaign
+    (campaign_id) or to an ad group (ad_group_id). An account-wide link
+    (CustomerAsset) is only built with scope="account"; leaving out both IDs
+    without it is a validation error. Google reviews the number before the
+    asset serves. The returned plan_id is applied with confirm_and_apply.
+
+    Args:
+        phone_number: The number, national ("(916) 555-0142", "020 7946 0958")
+            or E.164 ("+19165550142"). A leading "00" is read as the
+            international prefix. Normalised to E.164.
+        country_code: ISO 3166-1 alpha-2 country of the number ("US", "GB").
+            Required; stored on the asset, used to normalise national numbers
+            and checked against the dialing code of E.164 input.
+        campaign_id: Numeric ID of the campaign to link the asset to.
+        ad_group_id: Numeric ID of the ad group to link the asset to (instead
+            of campaign_id).
+        scope: Optional: "campaign", "ad_group" or "account". Inferred from
+            the ID passed; "account" links the asset account-wide.
+        call_conversion_action_id: Numeric ID of the conversion action that
+            counts calls from this asset. Empty keeps the account-level call
+            conversion setting.
+        ad_schedule: Optional windows when the number shows, each
+            {day_of_week: MONDAY..SUNDAY, start_hour: 0-23, end_hour: 0-24,
+            start_minute/end_minute: 0, 15, 30 or 45}. Hours are in the
+            account time zone.
+        customer_id: Google Ads account ID; defaults to the configured one.
+    """
+    from adloop.ads.assets import draft_call_asset as _impl
+
+    return _impl(
+        current_config(),
+        customer_id=customer_id or current_config().ads.customer_id,
+        phone_number=phone_number,
+        country_code=country_code,
+        scope=scope,
+        campaign_id=campaign_id,
+        ad_group_id=ad_group_id,
+        call_conversion_action_id=call_conversion_action_id,
+        ad_schedule=ad_schedule,
+    )
+
+
+@_tool(title="Draft call asset changes", annotations=_WRITE, tags={"ads"})
+@_safe
+def update_call_asset(
+    asset_id: str,
+    phone_number: str = "",
+    country_code: str = "",
+    call_conversion_action_id: str = "",
+    call_conversion_reporting_state: str = "",
+    ad_schedule: _DictList = [],  # noqa: B006 — mutable default required for MCP JSON schema
+    clear_ad_schedule: bool = False,
+    customer_id: str = "",
+) -> dict:
+    """Draft an in-place update of an existing call asset — returns a PREVIEW.
+
+    Changes only the fields passed; the asset keeps its ID and every link it
+    has, so the update shows wherever the asset is linked. Reads the asset
+    first: the preview carries its current values, and IDs that are not a
+    CALL asset are refused. The returned plan_id is applied with
+    confirm_and_apply.
+
+    Args:
+        asset_id: Numeric ID of the CALL asset.
+        phone_number: New number, national or E.164; normalised to E.164.
+        country_code: ISO 3166-1 alpha-2 country of the new number. Required
+            whenever phone_number is passed (there is no default country) and
+            only accepted together with it.
+        call_conversion_action_id: Numeric ID of the conversion action that
+            counts calls; implies USE_RESOURCE_LEVEL_CALL_CONVERSION_ACTION.
+        call_conversion_reporting_state: DISABLED,
+            USE_ACCOUNT_LEVEL_CALL_CONVERSION_ACTION or
+            USE_RESOURCE_LEVEL_CALL_CONVERSION_ACTION.
+        ad_schedule: Windows that replace the asset's whole schedule (same
+            shape as draft_call_asset). Empty leaves the schedule unchanged.
+        clear_ad_schedule: True removes the schedule so the number shows at
+            all hours.
+        customer_id: Google Ads account ID; defaults to the configured one.
+    """
+    from adloop.ads.assets import update_call_asset as _impl
+
+    return _impl(
+        current_config(),
+        customer_id=customer_id or current_config().ads.customer_id,
+        asset_id=asset_id,
+        phone_number=phone_number,
+        country_code=country_code,
+        call_conversion_action_id=call_conversion_action_id,
+        call_conversion_reporting_state=call_conversion_reporting_state,
+        ad_schedule=ad_schedule,
+        clear_ad_schedule=clear_ad_schedule,
+    )
+
+
+@_tool(title="Draft campaign ad schedule", annotations=_WRITE, tags={"ads"})
+@_safe
+def add_ad_schedule(
+    campaign_id: str,
+    schedule: _DictList,
+    customer_id: str = "",
+) -> dict:
+    """Draft ad schedule windows for a campaign — returns a PREVIEW.
+
+    Adds AD_SCHEDULE campaign criteria; existing windows stay. Reads the
+    campaign first: the preview lists its current windows (each with the
+    remove_id that remove_entity takes for a campaign_criterion) and the
+    account time zone the hours are in. Overlapping windows and more than six
+    per day are refused, as Google refuses them. A campaign without any
+    window serves at all hours, so its first windows restrict it to them.
+    The returned plan_id is applied with confirm_and_apply.
+
+    Args:
+        campaign_id: Numeric ID of the campaign.
+        schedule: Windows to add, each {day_of_week: MONDAY..SUNDAY,
+            start_hour: 0-23, end_hour: 0-24, start_minute/end_minute: 0, 15,
+            30 or 45 (default 0)}. Hours are in the account time zone.
+        customer_id: Google Ads account ID; defaults to the configured one.
+    """
+    from adloop.ads.assets import add_ad_schedule as _impl
+
+    return _impl(
+        current_config(),
+        customer_id=customer_id or current_config().ads.customer_id,
+        campaign_id=campaign_id,
+        schedule=schedule,
+    )
+
+
 @_tool(title="Apply a previewed change", annotations=_DESTRUCTIVE, tags={"core"})
 @_safe
 def confirm_and_apply(
