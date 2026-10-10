@@ -16,18 +16,22 @@ Three gates sit on top of that, all enforced here rather than advised:
   are only requested when it is on (see ``adloop.auth._requested_scopes``).
 * ``gtm.allow_custom_html`` — Custom HTML tags run arbitrary JavaScript on
   every page they fire on. Creating or editing one, or publishing a
-  workspace that adds or changes one, is refused unless this is on. Pausing
+  workspace (or rolling back to a version) that adds or changes one, is
+  refused unless this is on. Pausing
   or deleting one is always allowed (both reduce what runs). The gate matches
   the tag type ``html``: a Custom JavaScript variable or a custom template
   tag (``cvt_…``), which can inject a script, is not covered and has to be
   reviewed in the GTM UI.
 * Concurrency — every update/delete pins the entity fingerprint read at draft
-  time, and publish pins a digest of the workspace's pending changes. If a
-  human edits the container between preview and apply, apply refuses instead
+  time, and publish pins a digest of the workspace's pending changes. A
+  rollback pins the live version it replaces and the target's fingerprint. If
+  a human edits the container between preview and apply, apply refuses instead
   of writing (or publishing) something nobody reviewed.
 
 Tag and trigger edits land in a workspace (a draft) and do nothing on the site
-until the workspace is published with ``draft_publish_gtm_workspace``.
+until the workspace is published with ``draft_publish_gtm_workspace``. A
+rollback (``draft_rollback_gtm_version``) republishes an existing version and
+leaves every workspace untouched.
 """
 
 from __future__ import annotations
@@ -737,8 +741,8 @@ def draft_publish_gtm_workspace(
     if live["version_id"]:
         warnings.append(
             f"This replaces live version {live['version_id']} "
-            f"('{live['version_name']}') — publishing that version again is "
-            "the rollback."
+            f"('{live['version_name']}'); draft_rollback_gtm_version with that "
+            "id is the rollback."
         )
     if html:
         warnings.append(
@@ -746,6 +750,121 @@ def draft_publish_gtm_workspace(
             "gtm.allow_custom_html)."
         )
     return _store("gtm_publish_workspace", "gtm_workspace", ws_id, changes,
+                  warnings=warnings, double_confirm=True)
+
+
+def _custom_html_in_diff(diff: dict) -> list[dict]:
+    """Custom HTML tags a version change would add or change (removals are fine)."""
+    tags = diff.get("tags", {})
+    return [
+        {"tag_id": t.get("id"), "name": t.get("name"), "change_status": status}
+        for status in ("added", "changed")
+        for t in tags.get(status, [])
+        if t.get("type") == CUSTOM_HTML
+    ]
+
+
+def draft_rollback_gtm_version(
+    config: AdLoopConfig,
+    *,
+    account_id: str,
+    container_id: str,
+    version_id: str,
+) -> dict:
+    """Preview republishing an older container version LIVE (a rollback).
+
+    Two API calls: ``versions.live`` (the version being replaced, pinned in
+    the plan) and ``versions.get`` (the target). The preview is the diff from
+    the live version to the target, so it shows exactly what changes on the
+    site.
+    """
+    _require_writes(config)
+    blocked = _blocked("gtm_rollback_version", config)
+    if blocked:
+        return blocked
+    version_id = str(version_id or "").strip()
+    if not version_id:
+        return {"error": "version_id is required (see list_gtm_versions)."}
+
+    from adloop.gtm.read import diff_container_versions
+
+    client = _client(config)
+    versions = client.accounts().containers().versions()
+    base = _container_path(account_id, container_id)
+    try:
+        live = versions.live(parent=base).execute()
+        live = live.get("containerVersion") or live
+        target = versions.get(path=f"{base}/versions/{version_id}").execute()
+    except Exception as exc:
+        raise _translate_http_error(exc) from exc
+
+    live_id = live.get("containerVersionId")
+    if not live_id:
+        return {
+            "error": (
+                f"Container {container_id} has no live version to roll back "
+                "from. Publish a workspace instead (draft_publish_gtm_workspace)."
+            ),
+        }
+    if str(live_id) == version_id:
+        return {"error": f"Version {version_id} is already the live version."}
+    if target.get("deleted"):
+        return {
+            "error": (
+                f"Version {version_id} is archived (deleted). Restore it in the "
+                "GTM UI before rolling back to it."
+            ),
+        }
+    if not target.get("path"):
+        return {"error": f"Tag Manager returned no version {version_id}."}
+
+    diff = diff_container_versions(live, target)
+    html = _custom_html_in_diff(diff)
+    if html and not config.gtm.allow_custom_html:
+        refusal = _custom_html_refusal("rolling back to this version")
+        refusal["custom_html_tags"] = html
+        return refusal
+
+    changes = {
+        "account_id": account_id,
+        "container_id": container_id,
+        "target_version_id": version_id,
+        "target_version_name": target.get("name"),
+        "target_version_path": target["path"],
+        "target_fingerprint": target.get("fingerprint"),
+        "previous_live_version_id": str(live_id),
+        "previous_live_version_name": live.get("name"),
+        "diff_from_live": {
+            "summary": diff["summary"],
+            "tags": diff["tags"],
+            "triggers": diff["triggers"],
+            "variables": diff["variables"],
+            "built_in_variables": diff["built_in_variables"],
+        },
+        "custom_html_tags": html,
+    }
+    warnings = [
+        f"Publishing version {version_id} ('{target.get('name')}') replaces live "
+        f"version {live_id} ('{live.get('name')}') for every visitor. The diff "
+        "lists every tag, trigger and variable that changes on the site.",
+        f"Reversible: rolling back to version {live_id} restores today's state.",
+        "If another version goes live after this preview, apply refuses and you "
+        "must draft the rollback again.",
+        "Workspaces are not changed: they still hold the newer configuration, "
+        "so publishing a workspace later brings the rolled-back changes back "
+        "unless they are reverted there first.",
+    ]
+    if diff["is_identical"]:
+        warnings.append(
+            "No tag, trigger, variable or built-in variable differs from the live "
+            "version; other entity kinds (folders, templates, clients) may."
+        )
+    if html:
+        warnings.append(
+            f"{len(html)} Custom HTML tag(s) will go live (allowed by "
+            "gtm.allow_custom_html)."
+        )
+    return _store("gtm_rollback_version", "gtm_version", version_id, changes,
                   warnings=warnings, double_confirm=True)
 
 
@@ -782,6 +901,50 @@ def _check_workspace_unchanged(client, plan: ChangePlan) -> dict:
     return status
 
 
+def _check_live_unchanged(client, plan: ChangePlan) -> dict:
+    """Refuse a rollback when the live version moved since the preview."""
+    changes = plan.changes
+    live = (
+        client.accounts()
+        .containers()
+        .versions()
+        .live(parent=_container_path(changes["account_id"], changes["container_id"]))
+        .execute()
+    )
+    live = live.get("containerVersion") or live
+    if str(live.get("containerVersionId")) != str(changes["previous_live_version_id"]):
+        raise RuntimeError(
+            f"The live version is now {live.get('containerVersionId')}, not "
+            f"{changes['previous_live_version_id']} as previewed (someone "
+            "published in between); nothing was published. Draft the rollback "
+            "again so the preview shows the current diff."
+        )
+    return live
+
+
+def _check_target_unchanged(client, plan: ChangePlan) -> dict:
+    changes = plan.changes
+    target = (
+        client.accounts()
+        .containers()
+        .versions()
+        .get(path=changes["target_version_path"])
+        .execute()
+    )
+    if target.get("deleted"):
+        raise RuntimeError(
+            f"Version {changes['target_version_id']} was archived after the "
+            "preview; nothing was published."
+        )
+    expected = changes.get("target_fingerprint")
+    if expected and target.get("fingerprint") != expected:
+        raise RuntimeError(
+            f"Version {changes['target_version_id']} was modified after the "
+            "preview; nothing was published. Draft the rollback again."
+        )
+    return target
+
+
 def _entity_api(client, plan: ChangePlan):
     ws = _workspaces(client)
     return ws.tags() if plan.entity_type == "gtm_tag" else ws.triggers()
@@ -799,7 +962,9 @@ def _check_gates(config: AdLoopConfig, plan: ChangePlan) -> None:
         return
     changes = plan.changes
     op = plan.operation
-    if op == "gtm_publish_workspace":
+    if op == "gtm_rollback_version":
+        html = bool(changes.get("custom_html_tags"))
+    elif op == "gtm_publish_workspace":
         # The publish draft checked the live workspace, but the flag can be
         # switched off in between and an apply needs no dry run, so the stored
         # preview is checked here as well.
@@ -812,8 +977,10 @@ def _check_gates(config: AdLoopConfig, plan: ChangePlan) -> None:
     else:
         html = op == "gtm_create_tag" and changes["tag"].get("type") == CUSTOM_HTML
     if html:
-        what = ("publishing this workspace" if op == "gtm_publish_workspace"
-                else "this plan")
+        what = {
+            "gtm_publish_workspace": "publishing this workspace",
+            "gtm_rollback_version": "rolling back to this version",
+        }.get(op, "this plan")
         raise RuntimeError(_custom_html_refusal(what)["error"])
 
 
@@ -862,6 +1029,14 @@ def preflight(config: AdLoopConfig, plan: ChangePlan) -> dict:
             checks["pending_change_count"] = len(changes["pending_changes"])
             checks["quick_preview"] = "compiles"
             checks["previous_live_version_id"] = live["version_id"]
+        elif plan.operation == "gtm_rollback_version":
+            # versions.publish has no validate-only mode either; re-read the
+            # live version (the pin) and the target (archived / modified).
+            _check_live_unchanged(client, plan)
+            _check_target_unchanged(client, plan)
+            checks["live_version_unchanged"] = True
+            checks["target_version_unchanged"] = True
+            checks["previous_live_version_id"] = changes["previous_live_version_id"]
         else:
             current = _check_fingerprint(
                 _entity_api(client, plan), _entity_path(plan),
@@ -981,6 +1156,35 @@ def _apply(config: AdLoopConfig, plan: ChangePlan) -> dict:
             "new_workspace_path": created.get("newWorkspacePath"),
             "previous_live_version_id": live_before["version_id"],
             "previous_live_version_name": live_before["version_name"],
+        }
+
+    if op == "gtm_rollback_version":
+        live_before = _check_live_unchanged(client, plan)
+        kwargs = {"path": changes["target_version_path"]}
+        if changes.get("target_fingerprint"):
+            # versions.publish refuses when the stored version's fingerprint
+            # differs, so the version published is the one previewed.
+            kwargs["fingerprint"] = changes["target_fingerprint"]
+        resp = client.accounts().containers().versions().publish(**kwargs).execute()
+        if resp.get("compilerError"):
+            raise RuntimeError(
+                f"Tag Manager reported compiler errors publishing version "
+                f"{changes['target_version_id']}; the live version is still "
+                f"{live_before.get('containerVersionId')}."
+            )
+        version = resp.get("containerVersion") or {}
+        return {
+            "published": True,
+            "rolled_back": True,
+            "version_id": version.get("containerVersionId")
+            or changes["target_version_id"],
+            "version_name": version.get("name") or changes["target_version_name"],
+            "previous_live_version_id": live_before.get("containerVersionId"),
+            "previous_live_version_name": live_before.get("name"),
+            "undo": (
+                "Draft a rollback to previous_live_version_id to restore the "
+                "state before this rollback."
+            ),
         }
 
     raise ValueError(f"Unknown GTM operation: {op}")

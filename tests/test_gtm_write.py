@@ -55,6 +55,9 @@ class FakeGTM:
             "containerVersionId": "41",
             "name": "live before",
         }
+        # Stored container versions by id (versions.get), for rollbacks.
+        self.version_bodies: dict[str, dict] = {}
+        self.publish_response: dict | None = None
         self.quick_preview_response: dict = {}
         self.publish_error: str = ""
         self.calls: list[tuple] = []
@@ -77,12 +80,27 @@ class _Versions:
     def __init__(self, fake):
         self.f = fake
 
-    def publish(self, path):
+    def publish(self, path, fingerprint=None):
         def run():
-            self.f.calls.append(("publish", path))
+            self.f.calls.append(("publish", path, fingerprint))
             if self.f.publish_error:
                 raise RuntimeError(self.f.publish_error)
+            if self.f.publish_response is not None:
+                return copy.deepcopy(self.f.publish_response)
+            published = self.f.version_bodies.get(path.rsplit("/", 1)[-1])
+            if published is not None:
+                self.f.live_version = copy.deepcopy(published)
+                return {"containerVersion": copy.deepcopy(published)}
             return {"containerVersion": {"path": path}}
+        return _Req(run)
+
+    def get(self, path):
+        def run():
+            self.f.calls.append(("get_version", path))
+            vid = path.rsplit("/", 1)[-1]
+            if vid not in self.f.version_bodies:
+                raise RuntimeError(f"404 {path}")
+            return copy.deepcopy(self.f.version_bodies[vid])
         return _Req(run)
 
     def live(self, parent):
@@ -891,6 +909,197 @@ class TestPublish:
 
 
 # ---------------------------------------------------------------------------
+# Rollback: republish an older version
+# ---------------------------------------------------------------------------
+
+VERSIONS = f"accounts/{ACCOUNT}/containers/{CONTAINER}/versions"
+
+
+def _vtag(tid, name, ttype="gaawe", event=None):
+    params = [{"type": "template", "key": "eventName", "value": event}] if event else []
+    return {"tagId": tid, "name": name, "type": ttype, "parameter": params,
+            "fingerprint": f"fp{tid}"}
+
+
+@pytest.fixture
+def versions(fake):
+    """Live version 41 adds a tag and changes another relative to version 40."""
+    fake.live_version = {
+        "path": f"{VERSIONS}/41", "containerVersionId": "41", "name": "live before",
+        "fingerprint": "v41",
+        "tag": [_vtag("1", "GA4 lead", event="generate_lead"),
+                _vtag("2", "Broken pixel", "img")],
+    }
+    fake.version_bodies["40"] = {
+        "path": f"{VERSIONS}/40", "containerVersionId": "40", "name": "known good",
+        "fingerprint": "v40",
+        "tag": [_vtag("1", "GA4 lead", event="lead")],
+    }
+    fake.version_bodies["41"] = copy.deepcopy(fake.live_version)
+    return fake
+
+
+class TestRollback:
+    def test_refused_when_writes_disabled(self, tmp_path, versions):
+        from adloop.gtm.write import draft_rollback_gtm_version
+
+        with pytest.raises(RuntimeError, match="write_enabled"):
+            draft_rollback_gtm_version(_config(tmp_path, write=False), **_ids(),
+                                       version_id="40")
+        assert versions.calls == []
+
+    def test_blocked_operation_is_respected(self, tmp_path, versions):
+        from adloop.gtm.write import draft_rollback_gtm_version
+
+        cfg = _config(tmp_path, blocked=["gtm_rollback_version"])
+        result = draft_rollback_gtm_version(cfg, **_ids(), version_id="40")
+        assert "blocked" in result["error"]
+        assert versions.calls == []
+
+    def test_preview_diffs_live_against_target_in_two_calls(self, tmp_path, versions):
+        from adloop.gtm.write import draft_rollback_gtm_version
+
+        preview = draft_rollback_gtm_version(_config(tmp_path), **_ids(),
+                                             version_id="40")
+
+        assert preview["requires_double_confirm"] is True
+        assert preview["operation"] == "gtm_rollback_version"
+        changes = preview["changes"]
+        assert changes["previous_live_version_id"] == "41"
+        assert changes["target_version_id"] == "40"
+        diff = changes["diff_from_live"]
+        assert diff["tags"]["removed"] == [
+            {"id": "2", "name": "Broken pixel", "type": "img"}]
+        assert diff["tags"]["changed"][0]["changes"]["parameters"] == {
+            "eventName": {"from": "generate_lead", "to": "lead"}}
+        assert any("Reversible" in w and "41" in w for w in preview["warnings"])
+        assert any("Workspaces are not changed" in w for w in preview["warnings"])
+        assert [c[0] for c in versions.calls] == ["live", "get_version"]
+
+    def test_apply_publishes_the_pinned_target_and_is_reversible(
+        self, tmp_path, versions
+    ):
+        from adloop.gtm.write import draft_rollback_gtm_version
+
+        cfg = _config(tmp_path)
+        preview = draft_rollback_gtm_version(cfg, **_ids(), version_id="40")
+        versions.calls.clear()
+
+        result = _apply(cfg, preview["plan_id"])["result"]
+
+        assert result["published"] is True
+        assert result["version_id"] == "40"
+        assert result["previous_live_version_id"] == "41"
+        assert result["previous_live_version_name"] == "live before"
+        publishes = [c for c in versions.calls if c[0] == "publish"]
+        assert publishes == [("publish", f"{VERSIONS}/40", "v40")]
+        # Apply costs two calls: the live re-check and the publish.
+        assert [c[0] for c in versions.calls] == ["live", "publish"]
+
+    def test_rollback_of_the_rollback_restores_the_previous_live(
+        self, tmp_path, versions
+    ):
+        from adloop.gtm.write import draft_rollback_gtm_version
+
+        cfg = _config(tmp_path)
+        first = draft_rollback_gtm_version(cfg, **_ids(), version_id="40")
+        undo_id = _apply(cfg, first["plan_id"])["result"]["previous_live_version_id"]
+
+        undo = draft_rollback_gtm_version(cfg, **_ids(), version_id=undo_id)
+        assert undo["changes"]["previous_live_version_id"] == "40"
+        assert _apply(cfg, undo["plan_id"])["result"]["version_id"] == "41"
+
+    def test_someone_publishing_in_between_refuses_apply(self, tmp_path, versions):
+        from adloop.gtm.write import draft_rollback_gtm_version
+
+        cfg = _config(tmp_path)
+        preview = draft_rollback_gtm_version(cfg, **_ids(), version_id="40")
+        versions.live_version = {**versions.live_version, "containerVersionId": "43"}
+
+        result = _apply(cfg, preview["plan_id"])
+        assert "live version is now 43" in result["error"]
+        assert not any(c[0] == "publish" for c in versions.calls)
+
+    def test_dry_run_rechecks_live_and_target_and_publishes_nothing(
+        self, tmp_path, versions
+    ):
+        from adloop.gtm.write import draft_rollback_gtm_version
+
+        cfg = _config(tmp_path)
+        preview = draft_rollback_gtm_version(cfg, **_ids(), version_id="40")
+        result = _apply(cfg, preview["plan_id"], dry_run=True)
+
+        assert result["status"] == "DRY_RUN_SUCCESS"
+        assert result["checks"]["live_version_unchanged"] is True
+        assert result["checks"]["target_version_unchanged"] is True
+        assert "quick preview" not in result["note"]
+        assert not any(c[0] == "publish" for c in versions.calls)
+
+    def test_target_modified_after_preview_fails_the_dry_run(self, tmp_path, versions):
+        from adloop.gtm.write import draft_rollback_gtm_version
+
+        cfg = _config(tmp_path)
+        preview = draft_rollback_gtm_version(cfg, **_ids(), version_id="40")
+        versions.version_bodies["40"]["fingerprint"] = "edited"
+
+        result = _apply(cfg, preview["plan_id"], dry_run=True)
+        assert result["status"] == "DRY_RUN_FAILED"
+        assert "modified after the preview" in result["error"]
+
+    def test_already_live_version_is_refused(self, tmp_path, versions):
+        from adloop.gtm.write import draft_rollback_gtm_version
+
+        result = draft_rollback_gtm_version(_config(tmp_path), **_ids(),
+                                            version_id="41")
+        assert "already the live version" in result["error"]
+
+    def test_archived_version_is_refused(self, tmp_path, versions):
+        from adloop.gtm.write import draft_rollback_gtm_version
+
+        versions.version_bodies["40"]["deleted"] = True
+        result = draft_rollback_gtm_version(_config(tmp_path), **_ids(),
+                                            version_id="40")
+        assert "archived" in result["error"]
+
+    def test_compiler_error_reports_the_unchanged_live_version(
+        self, tmp_path, versions
+    ):
+        from adloop.gtm.write import draft_rollback_gtm_version
+
+        cfg = _config(tmp_path)
+        preview = draft_rollback_gtm_version(cfg, **_ids(), version_id="40")
+        versions.publish_response = {"compilerError": True}
+        result = _apply(cfg, preview["plan_id"])
+        assert "compiler errors" in result["error"]
+        assert "still 41" in result["error"]
+
+    def test_custom_html_coming_back_is_gated(self, tmp_path, versions):
+        from adloop.gtm.write import draft_rollback_gtm_version
+
+        versions.version_bodies["40"]["tag"].append(_vtag("9", "Old script", "html"))
+        refused = draft_rollback_gtm_version(_config(tmp_path), **_ids(),
+                                             version_id="40")
+        assert refused["gate"] == "gtm.allow_custom_html"
+        assert refused["custom_html_tags"][0]["name"] == "Old script"
+
+        allowed = draft_rollback_gtm_version(_config(tmp_path, html=True), **_ids(),
+                                             version_id="40")
+        assert allowed["status"] == "PENDING_CONFIRMATION"
+        # The gate is re-checked at apply when the flag is switched off.
+        result = _apply(_config(tmp_path), allowed["plan_id"])
+        assert "Custom HTML" in result["error"]
+        assert not any(c[0] == "publish" for c in versions.calls)
+
+    def test_removing_custom_html_is_not_gated(self, tmp_path, versions):
+        from adloop.gtm.write import draft_rollback_gtm_version
+
+        versions.live_version["tag"].append(_vtag("9", "New script", "html"))
+        preview = draft_rollback_gtm_version(_config(tmp_path), **_ids(),
+                                             version_id="40")
+        assert preview["status"] == "PENDING_CONFIRMATION"
+
+
+# ---------------------------------------------------------------------------
 # confirm_and_apply integration: dry run = preflight, audit, errors
 # ---------------------------------------------------------------------------
 
@@ -961,10 +1170,24 @@ class TestServerRegistration:
 
         tools = {t.name: t for t in await mcp.list_tools()}
         for name in ("draft_gtm_tag", "draft_gtm_trigger",
-                     "draft_delete_gtm_entity", "draft_publish_gtm_workspace"):
+                     "draft_delete_gtm_entity", "draft_publish_gtm_workspace",
+                     "draft_rollback_gtm_version", "get_gtm_version_diff"):
             assert tools[name].tags == {"gtm"}, name
         assert tools["draft_delete_gtm_entity"].annotations.destructiveHint
         assert tools["draft_publish_gtm_workspace"].annotations.destructiveHint
+        assert tools["draft_rollback_gtm_version"].annotations.destructive_hint
+        assert tools["get_gtm_version_diff"].annotations.read_only_hint
+
+    @pytest.mark.asyncio
+    async def test_gtm_reads_take_an_optional_workspace_id(self):
+        from adloop.server import mcp
+
+        tools = {t.name: t for t in await mcp.list_tools()}
+        for name in ("list_gtm_tags", "get_gtm_tag", "list_gtm_triggers",
+                     "get_gtm_trigger", "list_gtm_variables"):
+            props = tools[name].parameters["properties"]
+            assert "workspace_id" in props, name
+            assert "workspace_id" not in tools[name].parameters.get("required", [])
 
     @pytest.mark.asyncio
     async def test_json_string_list_params_are_coerced(self, tmp_path, fake):

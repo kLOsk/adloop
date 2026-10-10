@@ -2185,6 +2185,44 @@ def draft_publish_gtm_workspace(
     )
 
 
+@_tool(title="Draft rolling back Tag Manager to a version", annotations=_DESTRUCTIVE, tags={"gtm"})
+@_safe
+def draft_rollback_gtm_version(
+    version_id: str,
+    gtm_account_id: str = "",
+    gtm_container_id: str = "",
+) -> dict:
+    """Draft republishing an older Tag Manager version LIVE; returns a PREVIEW.
+
+    A rollback publishes an existing container version again. The preview
+    diffs the live version against the target, so it lists every tag,
+    trigger and variable that changes on the site, and it pins the live
+    version: apply refuses when another version went live after the
+    preview, or when the target was modified or archived. Workspaces are not
+    changed. Refused unless gtm.write_enabled is set, and refused when the
+    target adds or changes a Custom HTML tag while gtm.allow_custom_html is
+    off. Returns the diff, previous_live_version_id (the version that
+    restores today's state), the target version and a plan_id.
+
+    Args:
+        version_id: Container version ID to make live again (see
+            list_gtm_versions and get_gtm_version_diff).
+        gtm_account_id: Numeric GTM account ID (see list_gtm_accounts). Empty
+            uses gtm.account_id from the config.
+        gtm_container_id: Numeric GTM container ID (see list_gtm_containers).
+            Empty uses gtm.container_id from the config.
+    """
+    from adloop.gtm.write import draft_rollback_gtm_version as _impl
+
+    gtm_account_id, gtm_container_id = _gtm_defaults(gtm_account_id, gtm_container_id)
+    return _impl(
+        current_config(),
+        account_id=gtm_account_id,
+        container_id=gtm_container_id,
+        version_id=version_id,
+    )
+
+
 @_tool(title="Custom Google Ads query", annotations=_READONLY, tags={"ads"})
 @_safe
 def run_gaql(
