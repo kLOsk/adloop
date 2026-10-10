@@ -2718,11 +2718,15 @@ def confirm_and_apply(
     if config.safety.require_dry_run:
         dry_run = True
 
+    from adloop.ga4.write import GA4_OPERATIONS
+
     is_reddit = plan.operation.startswith("reddit_")
     is_gtm = plan.operation.startswith("gtm_")
+    is_ga4 = plan.operation in GA4_OPERATIONS
     platform_label = (
         "Reddit Ads" if is_reddit
         else "Google Tag Manager" if is_gtm
+        else "Google Analytics" if is_ga4
         else "Google Ads"
     )
     # ``plan.changes`` is the summary a preview may show; upload rows carry raw
@@ -2744,7 +2748,14 @@ def confirm_and_apply(
 
                 preflight = reddit_preflight if is_reddit else gtm_preflight
                 preflight_checks = preflight(config, plan)
-            elif plan.operation != "create_key_event":
+            elif is_ga4:
+                # The GA4 Admin API has no validate-only mode either; a
+                # key-event deletion re-reads its target, a creation has no
+                # checks (preflight returns None).
+                from adloop.ga4.write import preflight as ga4_preflight
+
+                preflight_checks = ga4_preflight(config, plan)
+            else:
                 # Google Ads checks the exact mutates with validate_only=True
                 # and executes nothing.
                 validation = _validate_with_google(config, plan)
@@ -2779,7 +2790,7 @@ def confirm_and_apply(
             )
             checked_against = (
                 f"re-checked the target against {platform_label}"
-                if is_reddit or is_gtm
+                if is_reddit or is_gtm or is_ga4
                 else "sent the change to Google Ads in validate-only mode"
             )
             return {
@@ -3839,10 +3850,12 @@ def _execute_plan(
 
     # GA4 plans dispatch before Ads client construction so they work for
     # GA4-only setups (no Ads credentials/developer token required).
-    if plan.operation == "create_key_event":
-        from adloop.ga4.write import _apply_create_key_event
+    from adloop.ga4.write import GA4_OPERATIONS
 
-        return _apply_create_key_event(config, plan.changes)
+    if plan.operation in GA4_OPERATIONS:
+        from adloop.ga4.write import apply_plan as apply_ga4_plan
+
+        return apply_ga4_plan(config, plan)
 
     try:
         client = get_ads_client(config)

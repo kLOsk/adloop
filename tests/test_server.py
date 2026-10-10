@@ -629,3 +629,67 @@ class TestDirectoryReadiness:
 
         for reference in (".mdc", "CLAUDE.md", "install-rules"):
             assert reference not in mcp.instructions, reference
+
+
+class TestGa4Tools:
+    """The GA4 report options and key-event / metadata tools are registered
+    with the annotations their behavior needs."""
+
+    @pytest.mark.asyncio
+    async def test_new_ga4_tools_are_tagged_and_annotated(self):
+        from adloop.server import mcp
+
+        tools = {t.name: t for t in await mcp.list_tools()}
+        expectations = {
+            "list_key_events": (True, False),
+            "list_ga4_dimensions_and_metrics": (True, False),
+            "draft_delete_key_event": (False, True),
+        }
+        for name, (read_only, destructive) in expectations.items():
+            tool = tools[name]
+            assert tool.tags == {"ga4"}, name
+            assert tool.annotations.read_only_hint is read_only, name
+            assert tool.annotations.destructive_hint is destructive, name
+
+    @pytest.mark.asyncio
+    async def test_run_ga4_report_exposes_the_optional_report_parameters(self):
+        from adloop.server import mcp
+
+        tools = {t.name: t for t in await mcp.list_tools()}
+        schema = tools["run_ga4_report"].parameters
+        for param in ("dimension_filter", "metric_filter", "order_by", "offset",
+                      "compare_start", "compare_end"):
+            assert param in schema["properties"], param
+            assert param not in schema.get("required", []), param
+
+    @pytest.mark.asyncio
+    async def test_run_ga4_report_tool_forwards_the_new_parameters(self, monkeypatch):
+        from adloop import runtime, server
+        from adloop.config import AdLoopConfig, GA4Config
+
+        captured = {}
+
+        def fake_impl(_config, **kwargs):
+            captured.update(kwargs)
+            return {"rows": []}
+
+        monkeypatch.setattr("adloop.ga4.reports.run_ga4_report", fake_impl)
+        runtime.set_default_config(AdLoopConfig(ga4=GA4Config(property_id="properties/1")))
+        try:
+            await server.mcp.call_tool("run_ga4_report", {
+                "metrics": ["sessions"],
+                # JSON-string lists, as some clients send them.
+                "dimension_filter": '[{"field": "country", "value": "Germany"}]',
+                "order_by": [{"field": "sessions", "desc": True}],
+                "offset": 100,
+                "compare_start": "2026-08-01",
+                "compare_end": "2026-08-31",
+            })
+        finally:
+            runtime.set_default_config(None)
+
+        assert captured["property_id"] == "properties/1"
+        assert captured["dimension_filter"] == [{"field": "country", "value": "Germany"}]
+        assert captured["order_by"] == [{"field": "sessions", "desc": True}]
+        assert captured["offset"] == 100
+        assert (captured["compare_start"], captured["compare_end"]) == ("2026-08-01", "2026-08-31")
