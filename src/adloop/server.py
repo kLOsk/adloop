@@ -3350,6 +3350,241 @@ def draft_sitelinks(
     )
 
 
+@_tool(title="Draft a promotion asset", annotations=_WRITE, tags={"ads"})
+@_safe
+def draft_promotion(
+    promotion_target: str,
+    final_url: str,
+    money_off: float = 0,
+    percent_off: float = 0,
+    campaign_id: str = "",
+    ad_group_id: str = "",
+    scope: str = "",
+    currency_code: str = "USD",
+    promotion_code: str = "",
+    orders_over_amount: float = 0,
+    occasion: str = "",
+    discount_modifier: str = "",
+    language_code: str = "en",
+    start_date: str = "",
+    end_date: str = "",
+    redemption_start_date: str = "",
+    redemption_end_date: str = "",
+    customer_id: str = "",
+) -> dict:
+    """Draft a promotion asset (e.g. "$50 off Window Tint") — returns a PREVIEW.
+
+    Creates a PromotionAsset and links it to one ad group, one campaign, or
+    (only with scope="account") the whole account, in a single request.
+    Exactly one of money_off / percent_off is set. The final_url is checked
+    for reachability before the plan is stored.
+
+    Args:
+        promotion_target: What the promotion is for, shown in the ad
+            (max 20 characters).
+        final_url: Landing page of the promotion.
+        money_off: Fixed discount in currency_code (sent as micros).
+            Mutually exclusive with percent_off.
+        percent_off: Percentage discount in (0, 100], e.g. 15.5 for 15.5%.
+            Mutually exclusive with money_off.
+        campaign_id: Numeric campaign ID for a campaign-level link.
+        ad_group_id: Numeric ad group ID for an ad-group-level link (keeps a
+            per-service promotion off sibling ad groups).
+        scope: "account" links the asset at account level (every eligible
+            campaign); it requires campaign_id and ad_group_id to be empty.
+            Otherwise leave empty, the level follows the id given.
+        currency_code: ISO 4217 code for money_off and orders_over_amount.
+        promotion_code: Optional coupon code (max 15 characters). Mutually
+            exclusive with orders_over_amount.
+        orders_over_amount: Optional minimum order value that unlocks the
+            promotion.
+        occasion: Optional PromotionExtensionOccasion value such as
+            BLACK_FRIDAY, CHRISTMAS or SUMMER_SALE.
+        discount_modifier: "UP_TO" renders "Up to $X off"; empty for none.
+        language_code: Language of the promotion (default "en").
+        start_date: First day the promotion shows, YYYY-MM-DD.
+        end_date: Last day the promotion shows, YYYY-MM-DD.
+        redemption_start_date: First day the offer can be redeemed, YYYY-MM-DD.
+        redemption_end_date: Last day the offer can be redeemed, YYYY-MM-DD.
+        customer_id: Ads account ID. Defaults to the configured account.
+
+    The returned plan_id is applied with confirm_and_apply.
+    """
+    from adloop.ads.assets import draft_promotion as _impl
+
+    return _impl(
+        current_config(),
+        customer_id=customer_id or current_config().ads.customer_id,
+        scope=scope,
+        campaign_id=campaign_id,
+        ad_group_id=ad_group_id,
+        promotion_target=promotion_target,
+        final_url=final_url,
+        money_off=money_off,
+        percent_off=percent_off,
+        currency_code=currency_code,
+        promotion_code=promotion_code,
+        orders_over_amount=orders_over_amount,
+        occasion=occasion,
+        discount_modifier=discount_modifier,
+        language_code=language_code,
+        start_date=start_date,
+        end_date=end_date,
+        redemption_start_date=redemption_start_date,
+        redemption_end_date=redemption_end_date,
+    )
+
+
+@_tool(title="Replace a promotion asset", annotations=_DESTRUCTIVE, tags={"ads"})
+@_safe
+def update_promotion(
+    asset_id: str,
+    promotion_target: str,
+    final_url: str,
+    money_off: float = 0,
+    percent_off: float = 0,
+    campaign_id: str = "",
+    ad_group_id: str = "",
+    scope: str = "",
+    currency_code: str = "USD",
+    promotion_code: str = "",
+    orders_over_amount: float = 0,
+    occasion: str = "",
+    discount_modifier: str = "",
+    language_code: str = "en",
+    start_date: str = "",
+    end_date: str = "",
+    redemption_start_date: str = "",
+    redemption_end_date: str = "",
+    customer_id: str = "",
+) -> dict:
+    """Draft replacing a linked promotion asset with new values — returns a PREVIEW.
+
+    A swap in one request: a new PromotionAsset is created, linked where the
+    old one is linked, and the old link is removed. The draft reads the
+    account and refuses when asset_id has no active PROMOTION link at the
+    given level; the apply re-checks and sends nothing if the link is gone
+    by then. The old asset stays in the account unlinked (assets cannot be
+    deleted). The plan carries requires_double_confirm=true because the old
+    link's removal is permanent.
+
+    Args:
+        asset_id: Numeric ID of the PromotionAsset being replaced (asset.id
+            in GAQL, FROM asset WHERE asset.type = 'PROMOTION').
+        promotion_target: What the promotion is for, shown in the ad
+            (max 20 characters).
+        final_url: Landing page of the promotion.
+        money_off: Fixed discount in currency_code (sent as micros).
+            Mutually exclusive with percent_off.
+        percent_off: Percentage discount in (0, 100], e.g. 15.5 for 15.5%.
+            Mutually exclusive with money_off.
+        campaign_id: Numeric campaign ID the old promotion is linked to.
+        ad_group_id: Numeric ad group ID the old promotion is linked to.
+        scope: "account" when the old promotion is an account-level
+            (CustomerAsset) link; it requires campaign_id and ad_group_id to
+            be empty. Otherwise leave empty.
+        currency_code: ISO 4217 code for money_off and orders_over_amount.
+        promotion_code: Optional coupon code (max 15 characters). Mutually
+            exclusive with orders_over_amount.
+        orders_over_amount: Optional minimum order value that unlocks the
+            promotion.
+        occasion: Optional PromotionExtensionOccasion value such as
+            BLACK_FRIDAY, CHRISTMAS or SUMMER_SALE.
+        discount_modifier: "UP_TO" renders "Up to $X off"; empty for none.
+        language_code: Language of the promotion (default "en").
+        start_date: First day the promotion shows, YYYY-MM-DD.
+        end_date: Last day the promotion shows, YYYY-MM-DD.
+        redemption_start_date: First day the offer can be redeemed, YYYY-MM-DD.
+        redemption_end_date: Last day the offer can be redeemed, YYYY-MM-DD.
+        customer_id: Ads account ID. Defaults to the configured account.
+
+    The returned plan_id is applied with confirm_and_apply.
+    """
+    from adloop.ads.assets import update_promotion as _impl
+
+    return _impl(
+        current_config(),
+        customer_id=customer_id or current_config().ads.customer_id,
+        asset_id=asset_id,
+        scope=scope,
+        campaign_id=campaign_id,
+        ad_group_id=ad_group_id,
+        promotion_target=promotion_target,
+        final_url=final_url,
+        money_off=money_off,
+        percent_off=percent_off,
+        currency_code=currency_code,
+        promotion_code=promotion_code,
+        orders_over_amount=orders_over_amount,
+        occasion=occasion,
+        discount_modifier=discount_modifier,
+        language_code=language_code,
+        start_date=start_date,
+        end_date=end_date,
+        redemption_start_date=redemption_start_date,
+        redemption_end_date=redemption_end_date,
+    )
+
+
+@_tool(title="Draft a price asset", annotations=_WRITE, tags={"ads"})
+@_safe
+def draft_price_asset(
+    offerings: _DictList,
+    campaign_id: str = "",
+    ad_group_id: str = "",
+    scope: str = "",
+    price_type: str = "SERVICES",
+    price_qualifier: str = "FROM",
+    language_code: str = "en",
+    currency_code: str = "USD",
+    customer_id: str = "",
+) -> dict:
+    """Draft a price asset (the price carousel under an ad) — returns a PREVIEW.
+
+    Creates a PriceAsset with 3-8 offerings and links it to one ad group,
+    one campaign, or (only with scope="account") the whole account, in a
+    single request. Every offering URL is checked for reachability before the
+    plan is stored. Google disapproves price assets whose prices differ from
+    the landing page.
+
+    Args:
+        offerings: 3-8 objects, each with header (max 25 characters, unique
+            within the asset), description (max 25 characters), price
+            (> 0, in currency_code, sent as micros), final_url, and optional
+            final_mobile_url and unit (PER_HOUR, PER_DAY, PER_WEEK,
+            PER_MONTH, PER_YEAR, PER_NIGHT).
+        campaign_id: Numeric campaign ID for a campaign-level link.
+        ad_group_id: Numeric ad group ID for an ad-group-level link.
+        scope: "account" links the asset at account level (every eligible
+            campaign); it requires campaign_id and ad_group_id to be empty.
+            Otherwise leave empty, the level follows the id given.
+        price_type: SERVICES (default), BRANDS, EVENTS, LOCATIONS,
+            NEIGHBORHOODS, PRODUCT_CATEGORIES, PRODUCT_TIERS,
+            SERVICE_CATEGORIES or SERVICE_TIERS.
+        price_qualifier: FROM (default, "From $X"), UP_TO, AVERAGE, or empty
+            for none.
+        language_code: Language of the asset (default "en").
+        currency_code: ISO 4217 code applied to every offering.
+        customer_id: Ads account ID. Defaults to the configured account.
+
+    The returned plan_id is applied with confirm_and_apply.
+    """
+    from adloop.ads.assets import draft_price_asset as _impl
+
+    return _impl(
+        current_config(),
+        customer_id=customer_id or current_config().ads.customer_id,
+        scope=scope,
+        campaign_id=campaign_id,
+        ad_group_id=ad_group_id,
+        price_type=price_type,
+        price_qualifier=price_qualifier,
+        language_code=language_code,
+        currency_code=currency_code,
+        offerings=offerings,
+    )
+
+
 @_tool(title="Apply a previewed change", annotations=_DESTRUCTIVE, tags={"core"})
 @_safe
 def confirm_and_apply(

@@ -3902,6 +3902,12 @@ def _dispatch_ads_plan(client: object, cid: str, plan: object) -> dict:
         _apply_create_custom_conversion_goal,
         _apply_update_custom_conversion_goal,
     )
+    # Promotion / price assets live in the asset-extension module too.
+    from adloop.ads.assets import (
+        _apply_create_price_asset,
+        _apply_create_promotion,
+        _apply_update_promotion,
+    )
 
     dispatch = {
         "create_campaign": _apply_create_campaign,
@@ -3935,6 +3941,9 @@ def _dispatch_ads_plan(client: object, cid: str, plan: object) -> dict:
         "create_structured_snippets": _apply_create_structured_snippets,
         "create_image_assets": _apply_create_image_assets,
         "create_sitelinks": _apply_create_sitelinks,
+        "create_promotion": _apply_create_promotion,
+        "update_promotion": _apply_update_promotion,
+        "create_price_asset": _apply_create_price_asset,
         "create_conversion_action": _apply_create_conversion_action,
         "update_conversion_action": _apply_update_conversion_action,
         "remove_conversion_action": _apply_remove_conversion_action,

@@ -248,6 +248,9 @@ All write operations follow a **draft → preview → confirm** workflow. Nothin
 | `draft_callouts` | Create campaign callout assets from 1-25 character text snippets. |
 | `draft_structured_snippets` | Create campaign structured snippet assets using official header values and 3-10 snippet values. |
 | `draft_image_assets` | Create campaign image assets from local files or public image URLs (PNG, JPEG, or GIF). |
+| `draft_promotion` | Create a promotion asset (money or percent off, optional code, occasion and dates) linked to one ad group or campaign — or the whole account with an explicit `scope="account"`. |
+| `update_promotion` | Replace a linked promotion in one request: create the new asset, link it at the same level, remove the old link. Refuses when the old link is missing; asks for a second confirmation. |
+| `draft_price_asset` | Create a price asset (3-8 offerings with header, description, price and URL) linked to one ad group or campaign — or the whole account with `scope="account"`. |
 | `draft_keywords` | Propose keyword additions with match types. Proactively checks bidding strategy — flags BROAD match on campaigns without Smart Bidding as dangerous in the preview. |
 | `add_negative_keywords` | Propose negative keywords directly on a campaign |
 | `add_negative_locations` | Propose negative geo exclusions on a campaign — exclude cities/regions while keeping broader positive targets |
