@@ -20,10 +20,12 @@ checkout of the AdLoop repository) and, when that doesn't exist, the file on
 the AdLoop repository's ``main`` branch on GitHub. Pass ``--source`` with a
 path or an https URL to use another copy.
 
-The Cloud rewrite is a fixed list of exact replacements. If the upstream
-wording changes so that a replacement no longer matches, or a new reference to
-the self-hosted install appears, the script stops with an error instead of
-shipping instructions that don't apply to AdLoop Cloud. Standard library only.
+The Cloud rewrite drops the sections for tools AdLoop Cloud doesn't offer,
+then applies a fixed list of exact replacements. If the upstream wording
+changes so that a dropped section or a replacement no longer matches, or a new
+reference to the self-hosted install or a Cloud-unavailable tool appears, the
+script stops with an error instead of shipping instructions that don't apply
+to AdLoop Cloud. Standard library only.
 """
 
 from __future__ import annotations
@@ -81,6 +83,18 @@ CLOUD_NOTE = (
     "maximum daily budget, the dry-run switch and the change log all live in "
     f"{DASHBOARD}. Nothing is configured on the user's machine."
 )
+
+# Sections for tools AdLoop Cloud doesn't offer, matched by the start of their
+# heading line. Each runs until the next heading of the same or a higher level.
+CLOUD_DROPPED_SECTIONS = [
+    "### Google Tag Manager Write Tools",
+]
+
+# Anything matching these after the drop names a tool Cloud doesn't offer.
+CLOUD_UNAVAILABLE_MARKERS = [
+    r"gtm\.write_enabled",
+    r"\bdraft_\w*gtm\w*",
+]
 
 # (old, new) pairs. Every ``old`` must occur in the source at least once.
 CLOUD_REPLACEMENTS: list[tuple[str, str]] = [
@@ -265,7 +279,43 @@ def strip_frontmatter(content: str) -> str:
     return content[end + 4 :].lstrip("\n")
 
 
+def drop_sections(body: str) -> str:
+    lines = body.splitlines(keepends=True)
+    for prefix in CLOUD_DROPPED_SECTIONS:
+        start = next((i for i, line in enumerate(lines) if line.startswith(prefix)), None)
+        if start is None:
+            raise SystemExit(
+                f"The upstream rules no longer have a section starting {prefix!r}. "
+                f"Update CLOUD_DROPPED_SECTIONS in {Path(__file__).name}."
+            )
+        level = len(prefix) - len(prefix.lstrip("#"))
+        end = next(
+            (
+                i
+                for i in range(start + 1, len(lines))
+                if re.match(rf"#{{1,{level}}} ", lines[i])
+            ),
+            len(lines),
+        )
+        del lines[start:end]
+    body = "".join(lines)
+
+    leftovers = [
+        f"  line {number}: {line.strip()[:120]}"
+        for number, line in enumerate(body.splitlines(), start=1)
+        if any(re.search(marker, line) for marker in CLOUD_UNAVAILABLE_MARKERS)
+    ]
+    if leftovers:
+        raise SystemExit(
+            "The upstream rules mention tools AdLoop Cloud doesn't offer outside "
+            "the dropped sections. Extend CLOUD_DROPPED_SECTIONS or rewrite them.\n"
+            + "\n".join(leftovers)
+        )
+    return body
+
+
 def to_cloud(body: str) -> str:
+    body = drop_sections(body)
     missing = [old for old, _ in CLOUD_REPLACEMENTS if old not in body]
     if missing:
         listing = "\n".join(f"  - {old[:100]}" for old in missing)
