@@ -91,8 +91,8 @@ The best features come from real workflows. If you're using AdLoop and find your
 | Tool | What It Does |
 |------|-------------|
 | `list_accounts` | Discover accessible Ads accounts |
-| `get_campaign_performance` | Campaign metrics — impressions, clicks, cost, conversions, CPA |
-| `get_ad_performance` | Ad copy analysis — headlines, descriptions, CTR |
+| `get_campaign_performance` | Campaign metrics: impressions, clicks, cost, conversions, CPA, Search impression share and share lost to budget/rank |
+| `get_ad_performance` | Ad copy analysis: headlines, descriptions, CTR, policy approval status and topics |
 | `get_keyword_performance` | Keywords — quality scores, competitive metrics |
 | `get_search_terms` | What users actually searched before clicking |
 | `get_negative_keywords` | List direct campaign-level negative keywords |
@@ -104,6 +104,7 @@ The best features come from real workflows. If you're using AdLoop and find your
 | `get_pmax_assets` | Per-asset details for PMax — field type, serving status, content |
 | `get_detailed_asset_performance` | Top-performing asset combinations — which headline+description+image combos Google selects most |
 | `get_audience_performance` | Audience segment performance — remarketing, in-market, affinity, demographics |
+| `get_change_history` | What changed before the drop: who changed what and when, through which client (UI, API, scripts, auto-applied recommendations), last 30 days |
 | `get_demographic_targeting` | List demographic criteria (age/gender/parental status/income) on an ad group or campaign |
 | `suggest_brands` | Resolve a brand name to the brands Google recognizes — brand ID, name, state, URLs |
 | `check_brand_names` | Check a shortlist of brand names against Google's brand knowledge graph (max 25 per call) |
