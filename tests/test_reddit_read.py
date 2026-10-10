@@ -109,6 +109,33 @@ class TestStructure:
         assert g1["targeting"]["communities"] == ["r/python"]
         assert any("conversion_pixel_id" in i for i in result["insights"])
 
+    def test_ad_group_targeting_summary_shows_devices_carriers_and_view_modes(self, config):
+        _, ctx = _fake_api({
+            ("GET", "ad_accounts/a2_acct/ad_groups"): {"data": [
+                {"id": "g1", "campaign_id": "c1", "name": "Mobile", "conversion_pixel_id": "px1",
+                 "targeting": {
+                     "geolocations": ["DE"],
+                     "devices": [{"type": "MOBILE", "os": "IOS", "min_version": "16", "max_version": None,
+                                  "label_map": None}],
+                     "carriers": ["O2_DEUTSCHLAND"],
+                     "view_modes": ["CARD"],
+                     "excluded_interests": [{"id": "i2", "name": "Gaming"}],
+                 }},
+                {"id": "g2", "campaign_id": "c1", "name": "Plain", "conversion_pixel_id": "px1",
+                 "targeting": {"geolocations": ["DE"]}},
+            ]},
+            ("GET", "ad_accounts/a2_acct"): _ACCOUNT,
+        })
+        with ctx:
+            result = read.get_reddit_ad_groups(config)
+        t1 = result["ad_groups"][0]["targeting"]
+        assert t1["devices"] == [{"type": "MOBILE", "os": "IOS", "min_version": "16"}]
+        assert t1["carriers"] == ["O2_DEUTSCHLAND"]
+        assert t1["view_modes"] == ["CARD"]
+        assert t1["excluded_interests"] == ["Gaming"]
+        t2 = result["ad_groups"][1]["targeting"]
+        assert (t2["devices"], t2["carriers"], t2["view_modes"], t2["excluded_interests"]) == ([], [], [], [])
+
     def test_ad_groups_name_their_schedule_and_say_silence_is_by_design(self, config):
         _, ctx = _fake_api({
             ("GET", "ad_accounts/a2_acct/ad_groups"): {"data": [
@@ -379,6 +406,54 @@ class TestTargeting:
             result = read.search_reddit_targeting(config, kind="languages", query="de")
         assert result["results"] == [{"code": "DE", "name": "German"}]
 
+    def test_devices_list_make_and_model_filtered_locally(self, config):
+        calls, ctx = _fake_api({
+            ("GET", "targeting/devices"): {"data": [
+                {"make": "Apple", "model": "Iphone 12"},
+                {"make": "Samsung", "model": "Galaxy S10+"},
+            ], "pagination": {}},
+        })
+        with ctx:
+            result = read.search_reddit_targeting(config, kind="devices", query="galaxy")
+        assert calls[0][2] == {"page.size": 100}
+        assert result["results"] == [{"make": "Samsung", "model": "Galaxy S10+"}]
+        assert "label_map" in result["note"]
+
+    def test_devices_follow_pagination(self, config):
+        _, ctx = _fake_api({
+            ("GET", "targeting/devices"): {"data": [{"make": "Apple", "model": "Iphone 12"}],
+                                           "pagination": {"next_url": "https://ads-api.reddit.com/api/v3/targeting/devices?page.token=2"}},
+            ("GET", "devices?page.token=2"): {"data": [{"make": "Google", "model": "Pixel 8"}], "pagination": {}},
+        })
+        with ctx:
+            result = read.search_reddit_targeting(config, kind="devices")
+        assert [r["make"] for r in result["results"]] == ["Apple", "Google"]
+
+    def test_carriers_filter_by_country_and_name(self, config):
+        _, ctx = _fake_api({
+            ("GET", "targeting/carriers"): {"data": [
+                {"id": "O2_DEUTSCHLAND", "name": "O2 Deutschland", "country_code": "DE"},
+                {"id": "VODAFONE_GERMANY", "name": "Vodafone", "country_code": "DE"},
+                {"id": "VODAFONE_UK", "name": "Vodafone UK", "country_code": "GB"},
+            ], "pagination": {}},
+        })
+        with ctx:
+            german = read.search_reddit_targeting(config, kind="carriers", country="de")
+            vodafone_de = read.search_reddit_targeting(config, kind="carriers", country="DE", query="vodafone")
+            all_vodafone = read.search_reddit_targeting(config, kind="carriers", query="vodafone")
+        assert [r["id"] for r in german["results"]] == ["O2_DEUTSCHLAND", "VODAFONE_GERMANY"]
+        assert [r["id"] for r in vodafone_de["results"]] == ["VODAFONE_GERMANY"]
+        assert all_vodafone["total"] == 2
+        assert german["results"][0] == {"id": "O2_DEUTSCHLAND", "name": "O2 Deutschland", "country_code": "DE"}
+
+    def test_validate_carriers_reports_unknown_ids(self, config):
+        _, ctx = _fake_api({
+            ("GET", "targeting/carriers"): {"data": [{"id": "O2_DEUTSCHLAND"}], "pagination": {}},
+        })
+        with ctx:
+            assert read.validate_reddit_carriers(config, ["o2_deutschland", "ACME"]) == ["ACME"]
+        assert read.validate_reddit_carriers(config, [" "]) == []
+
     def test_unknown_kind(self, config):
         with pytest.raises(ValueError, match="kind must be"):
             read.search_reddit_targeting(config, kind="planets")
@@ -455,6 +530,32 @@ class TestHistoryAndForecast:
         assert result["bid_suggestion"]["suggested_median"] == 0.75
         assert result["bid_suggestion"]["minimum_allowed"] == 0.12
         assert any("below Reddit's suggested minimum" in i for i in result["insights"])
+
+    def test_estimate_passes_devices_and_carriers(self, config):
+        calls, ctx = _fake_api({
+            ("GET", "ad_accounts/a2_acct"): _ACCOUNT,
+            ("POST", "forecasting/audience_and_delivery_estimates"): {"data": {}},
+            ("POST", "forecasting/bid_suggestions"): {"data": {}},
+        })
+        with ctx:
+            result = read.estimate_reddit_ad_group(
+                config, daily_budget=10,
+                targeting={"geolocations": ["DE"], "devices": [{"type": "mobile", "os": "android"}],
+                           "carriers": ["o2_deutschland"], "view_modes": None},
+            )
+        est = [c for c in calls if c[1].endswith("audience_and_delivery_estimates")][0][3]["data"]
+        bid = [c for c in calls if c[1].endswith("bid_suggestions")][0][3]["data"]
+        for targeting in (est["ad_group_configs"][0]["targeting"], bid["targeting"]):
+            assert targeting["devices"] == [{"type": "MOBILE", "os": "ANDROID"}]
+            assert targeting["carriers"] == ["O2_DEUTSCHLAND"]
+            assert "view_modes" not in targeting
+        assert result["targeting"]["carriers"] == ["O2_DEUTSCHLAND"]
+
+    def test_estimate_rejects_bad_devices(self, config):
+        with pytest.raises(ValueError, match="devices\\[0\\].type"):
+            read.estimate_reddit_ad_group(
+                config, daily_budget=5, targeting={"geolocations": ["DE"], "devices": [{"os": "IOS"}]},
+            )
 
     def test_estimate_requires_targeting_and_budget(self, config):
         with pytest.raises(ValueError, match="targeting needs"):

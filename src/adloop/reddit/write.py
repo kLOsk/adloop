@@ -62,6 +62,15 @@ _GENDERS = {"FEMALE", "MALE"}
 _PLATFORMS = {"ALL", "DESKTOP", "DESKTOP_LEGACY", "MOBILE_NATIVE", "MOBILE_WEB", "MOBILE_WEB_3X", "SHREDTOP"}
 # Reddit calls placements "locations": the feed, or conversation (comments) pages.
 _LOCATIONS = {"FEED", "COMMENTS_PAGE"}
+# Feed layouts an ad can be placed in (targeting.view_modes).
+_VIEW_MODES = {"ALL", "CARD", "CLASSIC", "COMPACT", "IMMERSIVE"}
+# Device targets (targeting.devices[]): {type, os, min_version, max_version, label_map}.
+_DEVICE_TYPES = {"DESKTOP", "MOBILE"}
+_DEVICE_OS = {"ANDROID", "IOS"}
+_DEVICE_KEYS = {"type", "os", "min_version", "max_version", "label_map"}
+_MIN_IOS_VERSION = 14
+_MAX_DEVICES = 100
+_MAX_CARRIERS = 100
 _CALL_TO_ACTIONS = {
     "Apply Now", "Contact Us", "Download", "Get a Quote", "Get Showtimes",
     "Install", "Learn More", "Order Now", "Play Now", "Pre-order Now",
@@ -465,6 +474,10 @@ def _targeting_payload(
     expand_targeting: bool | None,
     errors: list[str],
     locations: list | None = None,
+    excluded_interests: list | None = None,
+    devices: list | None = None,
+    carriers: list | None = None,
+    view_modes: list | None = None,
 ) -> dict:
     targeting: dict[str, Any] = {}
 
@@ -509,7 +522,118 @@ def _targeting_payload(
         if not cleaned:
             errors.append("locations cannot be empty: an ad needs at least one placement (FEED, COMMENTS_PAGE)")
         targeting["locations"] = cleaned
+    if excluded_interests is not None:
+        targeting["excluded_interests"] = _clean(excluded_interests)
+    if devices is not None:
+        targeting["devices"] = normalize_devices(devices, errors)
+    if carriers is not None:
+        cleaned = [x.upper() for x in _clean(carriers)]
+        if len(cleaned) > _MAX_CARRIERS:
+            errors.append(f"carriers takes at most {_MAX_CARRIERS} entries")
+        targeting["carriers"] = cleaned
+    if view_modes is not None:
+        cleaned = [x.upper() for x in _clean(view_modes)]
+        bad = sorted(set(cleaned) - _VIEW_MODES)
+        if bad:
+            errors.append(f"view_modes contains unsupported values {bad}; use {sorted(_VIEW_MODES)}")
+        targeting["view_modes"] = cleaned
     return targeting
+
+
+_EXCLUDED_INTERESTS_NOTE = (
+    "Reddit marks targeting.excluded_interests as deprecated: it is still "
+    "accepted but may stop having an effect. Excluded communities and "
+    "excluded keywords are the supported exclusions."
+)
+
+
+def _targeting_notes(config: AdLoopConfig, targeting: dict, errors: list[str], warnings: list[str]) -> None:
+    """Checks for the device/carrier/interest-exclusion keys shared by draft and update.
+
+    Carrier ids are checked against Reddit's carrier list (Reddit itself only
+    validates targeting at apply time); a lookup failure warns instead of
+    blocking.
+    """
+    if targeting.get("excluded_interests"):
+        warnings.append(_EXCLUDED_INTERESTS_NOTE)
+    carriers = targeting.get("carriers") or []
+    if carriers:
+        from adloop.reddit.read import validate_reddit_carriers
+
+        try:
+            unknown = validate_reddit_carriers(config, carriers)
+        except Exception as exc:  # taxonomy endpoint down: warn, don't block
+            warnings.append(
+                f"Carriers could not be pre-validated with Reddit ({exc}); the apply may still refuse them."
+            )
+        else:
+            if unknown:
+                errors.append(
+                    f"Unknown carrier ids: {', '.join(unknown)} (use ids from search_reddit_targeting kind \"carriers\")"
+                )
+
+
+def normalize_devices(devices: list | None, errors: list[str]) -> list[dict]:
+    """Validate device targets and normalise enums (upper case) and versions (strings).
+
+    Each entry is ``{"type": "DESKTOP"|"MOBILE", "os": "ANDROID"|"IOS",
+    "min_version": "14", "max_version": "17", "label_map": {make: [models]}}``;
+    only ``type`` is required. Problems are appended to ``errors``.
+    """
+    out: list[dict] = []
+    items = list(devices or [])
+    if len(items) > _MAX_DEVICES:
+        errors.append(f"devices takes at most {_MAX_DEVICES} entries")
+    for i, item in enumerate(items):
+        label = f"devices[{i}]"
+        if not isinstance(item, dict):
+            errors.append(f"{label} must be an object like {{\"type\": \"MOBILE\", \"os\": \"IOS\"}}")
+            continue
+        unknown = sorted(set(item) - _DEVICE_KEYS)
+        if unknown:
+            errors.append(f"{label} has unsupported keys {unknown}; use {sorted(_DEVICE_KEYS)}")
+        device: dict[str, Any] = {}
+        dtype = str(item.get("type") or "").strip().upper()
+        if dtype not in _DEVICE_TYPES:
+            errors.append(f"{label}.type must be one of {sorted(_DEVICE_TYPES)}")
+        device["type"] = dtype
+        os_name = str(item.get("os") or "").strip().upper()
+        if os_name:
+            if os_name not in _DEVICE_OS:
+                errors.append(f"{label}.os must be one of {sorted(_DEVICE_OS)} (or omitted for any)")
+            device["os"] = os_name
+        versions: dict[str, int] = {}
+        for key in ("min_version", "max_version"):
+            raw = item.get(key)
+            if raw is None or str(raw).strip() == "":
+                continue
+            text = str(raw).strip()
+            if not text.isdigit():
+                errors.append(f"{label}.{key} must be a major OS version number like \"14\"")
+                continue
+            versions[key] = int(text)
+            device[key] = text
+        if os_name == "IOS" and versions.get("min_version", _MIN_IOS_VERSION) < _MIN_IOS_VERSION:
+            errors.append(f"{label}.min_version must be at least {_MIN_IOS_VERSION} for iOS devices")
+        if "min_version" in versions and "max_version" in versions and versions["min_version"] > versions["max_version"]:
+            errors.append(f"{label}.min_version cannot be above max_version")
+        label_map = item.get("label_map")
+        if label_map is not None:
+            if not isinstance(label_map, dict) or not all(
+                isinstance(models, list) for models in label_map.values()
+            ):
+                errors.append(
+                    f"{label}.label_map must map a make to a list of models, e.g. "
+                    f"{{\"Samsung\": [\"Galaxy S10+\"]}} (makes/models from search_reddit_targeting kind \"devices\")"
+                )
+            else:
+                device["label_map"] = {
+                    str(make).strip(): [str(m).strip() for m in models if str(m).strip()]
+                    for make, models in label_map.items()
+                    if str(make).strip()
+                }
+        out.append(device)
+    return out
 
 
 def update_reddit_ad_group(
@@ -538,6 +662,10 @@ def update_reddit_ad_group(
     expand_targeting: bool | None = None,
     schedule: list | None = None,
     locations: list | None = None,
+    excluded_interests: list | None = None,
+    devices: list | None = None,
+    carriers: list | None = None,
+    view_modes: list | None = None,
 ) -> dict:
     """Draft ad group changes: budget, bid, run dates, weekly schedule, targeting (lists REPLACE)."""
     blocked = _guard("update_reddit_ad_group", config)
@@ -569,7 +697,13 @@ def update_reddit_ad_group(
         interests=interests, keywords=keywords, excluded_keywords=excluded_keywords,
         languages=languages, gender=gender, platforms=platforms,
         expand_targeting=expand_targeting, errors=errors, locations=locations,
+        excluded_interests=excluded_interests, devices=devices, carriers=carriers,
+        view_modes=view_modes,
     )
+    if errors:
+        return _validation_error(errors)
+    targeting_warnings: list[str] = []
+    _targeting_notes(config, targeting, errors, targeting_warnings)
     if errors:
         return _validation_error(errors)
 
@@ -655,7 +789,7 @@ def update_reddit_ad_group(
     if not patch:
         return _validation_error(["Nothing to change — pass at least one field."])
 
-    warnings: list[str] = []
+    warnings: list[str] = list(targeting_warnings)
     if "goal_value" in patch and display["budget"]["from"]:
         from adloop.safety.guards import requires_double_confirmation
 
@@ -992,6 +1126,10 @@ def draft_reddit_ad_group(
     end_time: str = "",
     schedule: list | None = None,
     locations: list | None = None,
+    excluded_interests: list | None = None,
+    devices: list | None = None,
+    carriers: list | None = None,
+    view_modes: list | None = None,
 ) -> dict:
     """Draft a new ad group (created PAUSED) with budget, bid, pixel, schedule and targeting."""
     blocked = _guard("draft_reddit_ad_group", config)
@@ -1038,6 +1176,8 @@ def draft_reddit_ad_group(
         interests=interests, keywords=keywords, excluded_keywords=excluded_keywords,
         languages=languages, gender=gender, platforms=platforms,
         expand_targeting=expand_targeting, errors=errors, locations=locations,
+        excluded_interests=excluded_interests, devices=devices, carriers=carriers,
+        view_modes=view_modes,
     )
     if not any(targeting.get(k) for k in ("geolocations", "communities", "interests", "keywords")):
         errors.append(
@@ -1107,6 +1247,12 @@ def draft_reddit_ad_group(
             errors.append(f"geolocation '{geo_id}': {problem} (use ids from search_reddit_targeting)")
     except Exception as exc:  # validation endpoints down: warn, don't block
         warnings.append(f"Targeting could not be pre-validated with Reddit ({exc}); the apply may still refuse it.")
+    _targeting_notes(config, targeting, errors, warnings)
+    if campaign.get("objective") == "APP_INSTALLS" and len(targeting.get("devices") or []) != 1:
+        errors.append(
+            "APP_INSTALLS campaigns need exactly one device target (Reddit rule), e.g. "
+            "devices=[{\"type\": \"MOBILE\", \"os\": \"IOS\"}]."
+        )
     if errors:
         return _validation_error(errors)
 

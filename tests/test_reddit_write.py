@@ -261,6 +261,159 @@ class TestUpdateDrafts:
         assert "Nothing to change" in result["details"][0]
 
 
+_CARRIERS = {"data": [
+    {"id": "O2_DEUTSCHLAND", "name": "O2 Deutschland", "country_code": "DE"},
+    {"id": "VODAFONE_GERMANY", "name": "Vodafone", "country_code": "DE"},
+], "pagination": {}}
+
+
+class TestDeviceCarrierTargeting:
+    """devices, carriers, excluded_interests and view_modes on ad group drafts."""
+
+    def test_update_replaces_new_keys_and_preserves_others(self):
+        _, ctx = _fake_api({
+            ("GET", "ad_groups/g1"): _AD_GROUP, ("GET", "ad_accounts/a2_acct"): _ACCOUNT,
+            ("GET", "targeting/carriers"): _CARRIERS,
+        })
+        with ctx:
+            preview = write.update_reddit_ad_group(
+                _config(), ad_group_id="g1",
+                devices=[{"type": "mobile", "os": "ios", "min_version": 16, "label_map": {"Apple": ["Iphone 12"]}}],
+                carriers=["o2_deutschland"], view_modes=["card", "classic"], excluded_interests=["i9"],
+            )
+        targeting = preview["changes"]["patch"]["targeting"]
+        assert targeting["devices"] == [
+            {"type": "MOBILE", "os": "IOS", "min_version": "16", "label_map": {"Apple": ["Iphone 12"]}}
+        ]
+        assert targeting["carriers"] == ["O2_DEUTSCHLAND"]
+        assert targeting["view_modes"] == ["CARD", "CLASSIC"]
+        assert targeting["excluded_interests"] == ["i9"]
+        assert targeting["geolocations"] == ["DE"]
+        assert targeting["communities"] == ["r/python"]
+        assert preview["changes"]["display"]["targeting"]["carriers"] == {"from": None, "to": ["O2_DEUTSCHLAND"]}
+        assert any("deprecated" in w for w in preview["warnings"])
+        assert any("REPLACE" in w for w in preview["warnings"])
+
+    def test_update_empty_lists_clear_the_keys(self):
+        current = {"data": dict(_AD_GROUP["data"], targeting={
+            "geolocations": ["DE"], "devices": [{"type": "MOBILE"}], "carriers": ["O2_DEUTSCHLAND"],
+        })}
+        calls, ctx = _fake_api({("GET", "ad_groups/g1"): current, ("GET", "ad_accounts/a2_acct"): _ACCOUNT})
+        with ctx:
+            preview = write.update_reddit_ad_group(_config(), ad_group_id="g1", devices=[], carriers=[])
+        targeting = preview["changes"]["patch"]["targeting"]
+        assert targeting["devices"] == [] and targeting["carriers"] == []
+        assert targeting["geolocations"] == ["DE"]
+        # Nothing to validate, so the carrier list is not fetched.
+        assert not any(c[1].endswith("targeting/carriers") for c in calls)
+
+    def test_update_refuses_unknown_carriers(self):
+        _, ctx = _fake_api({
+            ("GET", "ad_groups/g1"): _AD_GROUP, ("GET", "ad_accounts/a2_acct"): _ACCOUNT,
+            ("GET", "targeting/carriers"): _CARRIERS,
+        })
+        with ctx:
+            result = write.update_reddit_ad_group(_config(), ad_group_id="g1", carriers=["O2_DEUTSCHLAND", "ACME_MOBILE"])
+        assert result["error"] == "Validation failed"
+        assert any("Unknown carrier ids: ACME_MOBILE" in d for d in result["details"])
+
+    def test_update_warns_when_carrier_lookup_is_unavailable(self):
+        _, ctx = _fake_api({("GET", "ad_groups/g1"): _AD_GROUP, ("GET", "ad_accounts/a2_acct"): _ACCOUNT})
+        with ctx:
+            preview = write.update_reddit_ad_group(_config(), ad_group_id="g1", carriers=["O2_DEUTSCHLAND"])
+        assert preview["status"] == "PENDING_CONFIRMATION"
+        assert any("Carriers could not be pre-validated" in w for w in preview["warnings"])
+
+    @pytest.mark.parametrize(
+        ("devices", "expected"),
+        [
+            ([{"os": "IOS"}], "devices[0].type must be one of"),
+            ([{"type": "TABLET"}], "devices[0].type must be one of"),
+            ([{"type": "MOBILE", "os": "WINDOWS"}], "devices[0].os must be one of"),
+            ([{"type": "MOBILE", "os": "IOS", "min_version": "12"}], "at least 14 for iOS"),
+            ([{"type": "MOBILE", "min_version": "10", "max_version": "9"}], "cannot be above max_version"),
+            ([{"type": "MOBILE", "min_version": "v9"}], "major OS version number"),
+            ([{"type": "MOBILE", "brand": "Apple"}], "unsupported keys ['brand']"),
+            ([{"type": "MOBILE", "label_map": ["Galaxy S9"]}], "label_map must map a make"),
+            (["MOBILE"], "devices[0] must be an object"),
+        ],
+    )
+    def test_device_validation(self, devices, expected):
+        result = write.update_reddit_ad_group(_config(), ad_group_id="g1", devices=devices)
+        assert result["error"] == "Validation failed"
+        assert any(expected in d for d in result["details"]), result["details"]
+
+    def test_view_modes_are_validated(self):
+        result = write.update_reddit_ad_group(_config(), ad_group_id="g1", view_modes=["CARD", "GRID"])
+        assert any("view_modes contains unsupported values ['GRID']" in d for d in result["details"])
+
+    def test_draft_carries_new_keys_and_validates_carriers(self):
+        calls, ctx = _fake_api({
+            ("GET", "campaigns/c1"): _CAMPAIGN, ("GET", "ad_accounts/a2_acct"): _ACCOUNT,
+            ("POST", "targeting/keyword_validations"): {"data": []},
+            ("POST", "targeting/geolocations_validations"): {"data": [{"geolocation": {"id": "DE"}, "error_message": ""}]},
+            ("GET", "targeting/carriers"): _CARRIERS,
+        })
+        with ctx:
+            preview = write.draft_reddit_ad_group(
+                _config(), campaign_id="c1", ad_group_name="DE mobile", conversion_pixel_id="px1",
+                daily_budget=20, bid_strategy="bidless", bid_type="cpc", geolocations=["DE"], languages=["DE"],
+                devices=[{"type": "MOBILE", "os": "ANDROID"}], carriers=["vodafone_germany"], view_modes=["CARD"],
+            )
+        targeting = preview["changes"]["payload"]["targeting"]
+        assert targeting["devices"] == [{"type": "MOBILE", "os": "ANDROID"}]
+        assert targeting["carriers"] == ["VODAFONE_GERMANY"]
+        assert targeting["view_modes"] == ["CARD"]
+        assert preview["changes"]["display"]["targeting"]["carriers"] == ["VODAFONE_GERMANY"]
+        assert any(c[1].endswith("targeting/carriers") for c in calls)
+        assert not any("pre-validated" in w for w in preview["warnings"])
+        assert not any("deprecated" in w for w in preview["warnings"])
+
+    def test_draft_refuses_unknown_carriers_and_warns_on_excluded_interests(self):
+        _, ctx = _fake_api({
+            ("GET", "campaigns/c1"): _CAMPAIGN, ("GET", "ad_accounts/a2_acct"): _ACCOUNT,
+            ("POST", "targeting/keyword_validations"): {"data": []},
+            ("POST", "targeting/geolocations_validations"): {"data": [{"geolocation": {"id": "DE"}, "error_message": ""}]},
+            ("GET", "targeting/carriers"): _CARRIERS,
+        })
+        with ctx:
+            refused = write.draft_reddit_ad_group(
+                _config(), campaign_id="c1", ad_group_name="X", conversion_pixel_id="px1",
+                daily_budget=5, bid_strategy="MAXIMIZE_VOLUME", bid_type="CPC", geolocations=["DE"],
+                carriers=["TELEKOM_MARS"],
+            )
+            preview = write.draft_reddit_ad_group(
+                _config(), campaign_id="c1", ad_group_name="X", conversion_pixel_id="px1",
+                daily_budget=5, bid_strategy="MAXIMIZE_VOLUME", bid_type="CPC", geolocations=["DE"],
+                languages=["DE"], interests=["i1"], excluded_interests=["i2"],
+            )
+        assert any("Unknown carrier ids: TELEKOM_MARS" in d for d in refused["details"])
+        assert preview["changes"]["payload"]["targeting"]["excluded_interests"] == ["i2"]
+        assert any("deprecated" in w for w in preview["warnings"])
+
+    def test_draft_app_installs_needs_exactly_one_device(self):
+        app_campaign = {"data": dict(_CAMPAIGN["data"], objective="APP_INSTALLS")}
+        routes = {
+            ("GET", "campaigns/c1"): app_campaign, ("GET", "ad_accounts/a2_acct"): _ACCOUNT,
+            ("POST", "targeting/keyword_validations"): {"data": []},
+            ("POST", "targeting/geolocations_validations"): {"data": [{"geolocation": {"id": "DE"}, "error_message": ""}]},
+        }
+        common = dict(
+            campaign_id="c1", ad_group_name="App", conversion_pixel_id="px1", daily_budget=5,
+            bid_strategy="MAXIMIZE_VOLUME", bid_type="CPC", geolocations=["DE"], languages=["DE"],
+        )
+        _, ctx = _fake_api(routes)
+        with ctx:
+            none = write.draft_reddit_ad_group(_config(), **common)
+            two = write.draft_reddit_ad_group(
+                _config(), **common, devices=[{"type": "MOBILE", "os": "IOS"}, {"type": "MOBILE", "os": "ANDROID"}],
+            )
+            one = write.draft_reddit_ad_group(_config(), **common, devices=[{"type": "MOBILE", "os": "IOS"}])
+        assert any("exactly one device" in d for d in none["details"])
+        assert any("exactly one device" in d for d in two["details"])
+        assert one["status"] == "PENDING_CONFIRMATION"
+
+
 _AD = {"data": {"id": "ad1", "name": "Hero", "configured_status": "ACTIVE", "post_id": "post1",
                  "click_url": "https://example.com/old", "ad_group_id": "g1"}}
 # The post behind _AD: an image post, so a click_url is legitimate.
@@ -765,6 +918,41 @@ class TestServerWrappers:
         }
         destructive = {t.name for t in reddit if t.annotations.destructiveHint}
         assert destructive == {"remove_reddit_entity"}
+
+    @pytest.mark.asyncio
+    async def test_ad_group_tools_expose_device_and_carrier_targeting(self):
+        from adloop.server import mcp
+
+        tools = {t.name: t for t in await mcp.list_tools()}
+        for name in ("draft_reddit_ad_group", "update_reddit_ad_group"):
+            params = tools[name].parameters["properties"]
+            for key in ("devices", "carriers", "excluded_interests", "view_modes"):
+                assert key in params, f"{name}.{key}"
+        estimate = tools["estimate_reddit_ad_group"].parameters["properties"]
+        assert "devices" in estimate and "carriers" in estimate
+        kind = tools["search_reddit_targeting"].parameters["properties"]["kind"]["description"]
+        assert '"devices"' in kind and '"carriers"' in kind
+
+    @pytest.mark.asyncio
+    async def test_draft_tool_passes_devices_and_carriers_through(self):
+        from adloop.server import mcp
+
+        seen = {}
+
+        def fake_impl(config, **kwargs):
+            seen.update(kwargs)
+            return {"status": "PENDING_CONFIRMATION"}
+
+        with patch("adloop.reddit.write.draft_reddit_ad_group", side_effect=fake_impl):
+            await mcp.call_tool("draft_reddit_ad_group", {
+                "campaign_id": "c1", "ad_group_name": "X", "conversion_pixel_id": "px1",
+                "devices": '[{"type": "MOBILE", "os": "IOS"}]', "carriers": ["O2_DEUTSCHLAND"],
+                "view_modes": ["CARD"], "excluded_interests": ["i2"],
+            })
+        assert seen["devices"] == [{"type": "MOBILE", "os": "IOS"}]
+        assert seen["carriers"] == ["O2_DEUTSCHLAND"]
+        assert seen["view_modes"] == ["CARD"]
+        assert seen["excluded_interests"] == ["i2"]
 
     @pytest.mark.asyncio
     async def test_reddit_tools_never_use_account_id_parameter(self):

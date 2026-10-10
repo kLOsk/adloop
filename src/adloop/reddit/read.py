@@ -76,6 +76,7 @@ _CENT_SUFFIXES = ("_total_value", "_avg_value")
 
 _TARGETING_KINDS = (
     "communities", "interests", "geolocations", "languages", "keywords", "community_suggestions",
+    "devices", "carriers",
 )
 
 _STANDARD_PIXEL_EVENTS = (
@@ -256,6 +257,17 @@ def _campaign_summary(c: dict) -> dict:
     }
 
 
+def _device_summary(devices: Any) -> list:
+    """Device targets without their unset fields (empty list = every device)."""
+    out = []
+    for d in devices or []:
+        if isinstance(d, dict):
+            out.append({k: v for k, v in d.items() if v not in (None, "", [], {})})
+        else:
+            out.append(d)
+    return out
+
+
 def _targeting_summary(t: dict | None) -> dict:
     t = t or {}
 
@@ -280,6 +292,10 @@ def _targeting_summary(t: dict | None) -> dict:
         "gender": t.get("gender"),
         "platforms": list(t.get("platforms") or []),
         "locations": list(t.get("locations") or []),
+        "view_modes": list(t.get("view_modes") or []),
+        "devices": _device_summary(t.get("devices")),
+        "carriers": list(t.get("carriers") or []),
+        "excluded_interests": _names(t.get("excluded_interests")),
         "expand_targeting": t.get("expand_targeting"),
         "custom_audience_ids": list(t.get("custom_audience_ids") or []),
     }
@@ -987,6 +1003,15 @@ def validate_reddit_geolocations(config: AdLoopConfig, geolocation_ids: list[str
     return problems
 
 
+def validate_reddit_carriers(config: AdLoopConfig, carrier_ids: list[str]) -> list[str]:
+    """Carrier ids missing from Reddit's carrier list (empty list = all known)."""
+    cleaned = [str(c).strip().upper() for c in carrier_ids if str(c).strip()]
+    if not cleaned:
+        return []
+    known = {str(r.get("id") or "").upper() for r in reddit_get_all(config, "targeting/carriers")}
+    return [c for c in cleaned if c not in known]
+
+
 def search_reddit_targeting(
     config: AdLoopConfig,
     *,
@@ -997,7 +1022,7 @@ def search_reddit_targeting(
     limit: int = 25,
 ) -> dict:
     """Look up ids for ad-group targeting (communities, interests, geos, languages, keywords,
-    and Reddit's own community suggestions for seed communities or a website)."""
+    devices, carriers, and Reddit's own community suggestions for seed communities or a website)."""
     kind = (kind or "").strip().lower()
     if kind not in _TARGETING_KINDS:
         raise ValueError(f"kind must be one of {list(_TARGETING_KINDS)}, got '{kind}'.")
@@ -1085,6 +1110,27 @@ def search_reddit_targeting(
             for r in rows
             if not q or q in str(r.get("name") or "").lower() or q == str(r.get("code") or "").lower()
         ]
+    elif kind == "devices":
+        # Spec shape: {"make": "Apple", "model": "Iphone 12"}. Device targets
+        # name models per make in devices[].label_map.
+        rows = reddit_get_all(config, "targeting/devices")
+        q = query.lower()
+        items = [
+            {"make": r.get("make"), "model": r.get("model")}
+            for r in rows
+            if not q or q in str(r.get("make") or "").lower() or q in str(r.get("model") or "").lower()
+        ]
+    elif kind == "carriers":
+        # Spec shape: {"id": "ATT_WIRELESS_US", "name": "AT&T Wireless", "country_code": "US"}.
+        rows = reddit_get_all(config, "targeting/carriers")
+        q = query.lower()
+        cc = (country or "").strip().upper()
+        items = [
+            {"id": r.get("id"), "name": r.get("name"), "country_code": r.get("country_code")}
+            for r in rows
+            if (not cc or str(r.get("country_code") or "").upper() == cc)
+            and (not q or q in str(r.get("name") or "").lower() or q in str(r.get("id") or "").lower())
+        ]
     else:  # keywords
         if not query:
             raise ValueError("query is required for keywords (comma-separated seed terms).")
@@ -1113,7 +1159,9 @@ def search_reddit_targeting(
         "note": (
             "Use the returned ids/names in draft_reddit_ad_group targeting. "
             "Communities target by name, interests by id, geolocations by id "
-            "(e.g. 'DE' or 'DE:2874225'), languages by code (e.g. 'DE'). "
+            "(e.g. 'DE' or 'DE:2874225'), languages by code (e.g. 'DE'), "
+            "carriers by id (e.g. 'O2_DEUTSCHLAND'). Devices list make/model pairs for "
+            "devices[].label_map ({make: [models]}) next to type MOBILE/DESKTOP and os IOS/ANDROID. "
             "Keyword suggestions carry Reddit-wide monthly_views, not search volume. "
             "community_suggestions returns Reddit's related-community picks for the "
             "seed communities (query) or a website_url."
@@ -1233,6 +1281,15 @@ def estimate_reddit_ad_group(
         )
     if "languages" in targeting:
         targeting["languages"] = [str(x).upper() for x in targeting["languages"]]
+    if "carriers" in targeting:
+        targeting["carriers"] = [str(x).strip().upper() for x in targeting["carriers"] if str(x).strip()]
+    if "devices" in targeting:
+        from adloop.reddit.write import normalize_devices
+
+        problems: list[str] = []
+        targeting["devices"] = normalize_devices(targeting["devices"], problems)
+        if problems:
+            raise ValueError("; ".join(problems))
     objective = (objective or "CLICKS").strip().upper()
     bid_type = (bid_type or "CPC").strip().upper()
     bid_strategy = (bid_strategy or "").strip().upper()
