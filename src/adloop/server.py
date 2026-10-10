@@ -3673,23 +3673,28 @@ def search_reddit_targeting(
     Returns ids/names to pass into the targeting lists, with the kind, the
     query and the total number of matches. Communities target by name,
     interests by id, geolocations by id (e.g. "DE" or "DE:2874225"),
-    languages by code (e.g. "DE"). Keyword suggestions carry Reddit-wide
-    monthly views, not search volume.
+    languages by code (e.g. "DE"), carriers by id (e.g. "O2_DEUTSCHLAND").
+    Devices come back as make/model pairs for the label_map of a device
+    target. Keyword suggestions carry Reddit-wide monthly views, not search
+    volume.
 
     Args:
         kind: What to look up: "communities" (subreddits; query required),
             "interests" (query filters by name), "geolocations" (country ISO
             code and/or city query), "languages" (upper-case ISO 639-1
             codes), "keywords" (comma-separated seed terms → suggestions with
-            Reddit-wide monthly views), or "community_suggestions" (Reddit's
+            Reddit-wide monthly views), "community_suggestions" (Reddit's
             related-community picks for seed communities in query and/or a
-            website_url).
+            website_url), "devices" (device makes and models; query filters
+            by make or model) or "carriers" (mobile carrier ids; query
+            filters by name, country by country code).
         query: Search text for the chosen kind: a community search term, an
             interest or language name filter, a city name, comma-separated
-            seed keywords, or comma-separated seed communities for
-            community_suggestions (e.g. "PPC,googleads").
-        country: Country ISO code (e.g. "DE") for kind "geolocations"; ignored
-            for other kinds.
+            seed keywords, comma-separated seed communities for
+            community_suggestions (e.g. "PPC,googleads"), a device make or
+            model filter, or a carrier name filter.
+        country: Country ISO code (e.g. "DE") for kinds "geolocations" and
+            "carriers"; ignored for other kinds.
         website_url: Website for kind "community_suggestions"; ignored for
             other kinds.
         limit: Maximum number of results, clamped to 1-100.
@@ -3767,6 +3772,8 @@ def estimate_reddit_ad_group(
     languages: _StrListOpt = None,
     gender: str = "",
     platforms: _StrListOpt = None,
+    devices: _DictListOpt = None,
+    carriers: _StrListOpt = None,
     ad_account_id: str = "",
 ) -> dict:
     """Audience size, delivery estimate and Reddit's suggested bid for a planned ad group — read-only.
@@ -3814,6 +3821,13 @@ def estimate_reddit_ad_group(
         gender: FEMALE or MALE; empty means all genders.
         platforms: Platforms to target, e.g. ALL, DESKTOP, MOBILE_NATIVE,
             MOBILE_WEB. Empty means no platform restriction.
+        devices: Device targets, objects like {"type": "MOBILE", "os":
+            "IOS", "min_version": "16"} (type DESKTOP or MOBILE; optional os
+            ANDROID or IOS, major OS versions, and label_map {make: [models]}
+            with makes/models from search_reddit_targeting kind "devices").
+            Empty means every device.
+        carriers: Mobile carrier ids (from search_reddit_targeting kind
+            "carriers", e.g. "O2_DEUTSCHLAND"). Empty means every carrier.
         ad_account_id: Reddit ad account id (from list_reddit_accounts).
             Empty uses reddit.ad_account_id from the config.
     """
@@ -3829,6 +3843,8 @@ def estimate_reddit_ad_group(
         "languages": languages,
         "gender": gender.upper() if gender else None,
         "platforms": platforms,
+        "devices": devices,
+        "carriers": carriers,
     }
     return _impl(
         current_config(),
@@ -4029,6 +4045,10 @@ def update_reddit_ad_group(
     expand_targeting: bool | None = None,
     schedule: _DictListOpt = None,
     locations: _StrListOpt = None,
+    excluded_interests: _StrListOpt = None,
+    devices: _DictListOpt = None,
+    carriers: _StrListOpt = None,
+    view_modes: _StrListOpt = None,
 ) -> dict:
     """Draft changes to a Reddit ad group — budget, bid, run dates, weekly schedule, targeting.
 
@@ -4081,6 +4101,19 @@ def update_reddit_ad_group(
             each viewer's local time, not the account time zone.
         locations: Placements, FEED and/or COMMENTS_PAGE (conversation
             pages); cannot be an empty list.
+        excluded_interests: Full list of interest ids to exclude (Reddit
+            marks this field deprecated). [] clears it.
+        devices: Full list of device targets, objects like {"type":
+            "MOBILE", "os": "IOS", "min_version": "16"} (type DESKTOP or
+            MOBILE; optional os ANDROID or IOS, major OS versions with iOS at
+            least 14, and label_map {make: [models]} with makes/models from
+            search_reddit_targeting kind "devices"). [] clears it (every
+            device).
+        carriers: Full list of mobile carrier ids (from
+            search_reddit_targeting kind "carriers", e.g. "O2_DEUTSCHLAND"),
+            checked against Reddit's carrier list. [] clears it.
+        view_modes: Full list of feed layouts: ALL, CARD, CLASSIC, COMPACT
+            or IMMERSIVE. [] clears it.
     """
     from adloop.reddit.write import update_reddit_ad_group as _impl
 
@@ -4109,6 +4142,10 @@ def update_reddit_ad_group(
         expand_targeting=expand_targeting,
         schedule=schedule,
         locations=locations,
+        excluded_interests=excluded_interests,
+        devices=devices,
+        carriers=carriers,
+        view_modes=view_modes,
     )
 
 
@@ -4270,6 +4307,10 @@ def draft_reddit_ad_group(
     end_time: str = "",
     schedule: _DictListOpt = None,
     locations: _StrListOpt = None,
+    excluded_interests: _StrListOpt = None,
+    devices: _DictListOpt = None,
+    carriers: _StrListOpt = None,
+    view_modes: _StrListOpt = None,
 ) -> dict:
     """Draft a new Reddit ad group (created PAUSED) — returns a PREVIEW.
 
@@ -4330,6 +4371,19 @@ def draft_reddit_ad_group(
             in CBO campaigns, whose schedule overrides every ad group.
         locations: Placements, FEED and/or COMMENTS_PAGE (conversation
             pages); cannot be an empty list.
+        excluded_interests: Interest ids to exclude (Reddit marks this field
+            deprecated).
+        devices: Device targets, objects like {"type": "MOBILE", "os":
+            "IOS", "min_version": "16"} (type DESKTOP or MOBILE; optional os
+            ANDROID or IOS, major OS versions with iOS at least 14, and
+            label_map {make: [models]} with makes/models from
+            search_reddit_targeting kind "devices"). Omitted means every
+            device; APP_INSTALLS campaigns take exactly one.
+        carriers: Mobile carrier ids (from search_reddit_targeting kind
+            "carriers", e.g. "O2_DEUTSCHLAND"), checked against Reddit's
+            carrier list. Omitted means every carrier.
+        view_modes: Feed layouts: ALL, CARD, CLASSIC, COMPACT or IMMERSIVE.
+            Omitted uses Reddit's default.
     """
     from adloop.reddit.write import draft_reddit_ad_group as _impl
 
@@ -4360,6 +4414,10 @@ def draft_reddit_ad_group(
         end_time=end_time,
         schedule=schedule,
         locations=locations,
+        excluded_interests=excluded_interests,
+        devices=devices,
+        carriers=carriers,
+        view_modes=view_modes,
     )
 
 
