@@ -39,7 +39,7 @@ Both versions run the same tools with the same safety model. The difference is w
 | **Works with** | claude.ai, ChatGPT, Claude Code, Cursor, Gemini | Claude Code, Cursor, Claude Desktop, any local MCP client |
 | **Where your data flows** | EU servers (Germany), GDPR-first, DPA included | 100% your machine — nothing leaves it |
 | **Updates** | Automatic | `pip install -U adloop` |
-| **Price** | Free plan, no card; [paid plans](https://getadloop.com/preise) for more accounts and volume | Free forever (MIT) |
+| **Price** | Free plan, no card; [paid plans](https://getadloop.com/pricing) for more accounts and volume | Free forever (MIT) |
 
 **Not sure? [Start with Cloud](https://getadloop.com)** — it's the fastest way to see what AdLoop can do, and it's the only way to use AdLoop from claude.ai or ChatGPT. Self-host when you want everything on your own machine or need to modify the code. And if you're here to hack on AdLoop itself: welcome, keep scrolling.
 
@@ -586,7 +586,7 @@ MIT — see [LICENSE](LICENSE).
 
 ## Privacy
 
-The open-source version runs entirely on your machine. No data is collected, stored, or transmitted to any server. See [PRIVACY.md](PRIVACY.md) for the full privacy policy. AdLoop Cloud has its own [privacy policy](https://getadloop.com/datenschutz) and [DPA](https://getadloop.com/avv).
+The open-source version runs entirely on your machine. No data is collected, stored, or transmitted to any server. See [PRIVACY.md](PRIVACY.md) for the full privacy policy. AdLoop Cloud has its own [privacy policy](https://getadloop.com/privacy) and [DPA](https://getadloop.com/avv).
 
 ---
 
