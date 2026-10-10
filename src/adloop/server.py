@@ -1579,12 +1579,16 @@ def list_gtm_containers(gtm_account_id: str = "") -> dict:
 
 @_tool(title="List Tag Manager tags", annotations=_READONLY, tags={"gtm"})
 @_safe
-def list_gtm_tags(gtm_account_id: str = "", gtm_container_id: str = "") -> dict:
-    """List every tag in the LIVE GTM container.
+def list_gtm_tags(
+    gtm_account_id: str = "", gtm_container_id: str = "", workspace_id: str = ""
+) -> dict:
+    """List every tag in the LIVE GTM container, or in one workspace.
 
     Each tag includes type, status, parsed parameters, the GA4 event name
     (for GA4 event tags), and resolved firing/blocking trigger names.
-    Complements audit_event_coverage for inspecting specific tags.
+    Complements audit_event_coverage for inspecting specific tags. With
+    workspace_id the list shows that workspace's unpublished state, so a
+    just-drafted tag is visible; `source` says which state was read.
 
     Args:
         gtm_account_id: Numeric GTM account ID (see list_gtm_accounts). Empty
@@ -1592,6 +1596,9 @@ def list_gtm_tags(gtm_account_id: str = "", gtm_container_id: str = "") -> dict:
         gtm_container_id: Numeric GTM container ID (see list_gtm_containers),
             not the GTM-XXXXXXX public ID. Empty uses gtm.container_id from
             the config.
+        workspace_id: Workspace to read (see list_gtm_workspaces), which
+            includes drafted changes that are not published yet. Empty reads
+            the live (published) container version.
     """
     from adloop.gtm.read import list_tags as _impl
 
@@ -1600,14 +1607,20 @@ def list_gtm_tags(gtm_account_id: str = "", gtm_container_id: str = "") -> dict:
     )
 
     return _impl(
-        current_config(), account_id=gtm_account_id, container_id=gtm_container_id
+        current_config(),
+        account_id=gtm_account_id,
+        container_id=gtm_container_id,
+        workspace_id=workspace_id,
     )
 
 
 @_tool(title="Tag Manager tag details", annotations=_READONLY, tags={"gtm"})
 @_safe
 def get_gtm_tag(
-    tag_id: str, gtm_account_id: str = "", gtm_container_id: str = ""
+    tag_id: str,
+    gtm_account_id: str = "",
+    gtm_container_id: str = "",
+    workspace_id: str = "",
 ) -> dict:
     """Get the full RAW configuration for a single GTM tag.
 
@@ -1615,7 +1628,8 @@ def get_gtm_tag(
     conditions resolved to text), priority, pause status, sampling, and
     monitoring metadata. Suited to inspecting a tag flagged by
     audit_event_coverage. An unknown tag_id returns an error with the
-    available tag IDs.
+    available tag IDs. Reads the live container, or a workspace's
+    unpublished state when workspace_id is set.
 
     Args:
         tag_id: Numeric GTM tag ID, as listed by list_gtm_tags.
@@ -1623,6 +1637,9 @@ def get_gtm_tag(
             uses gtm.account_id from the config.
         gtm_container_id: Numeric GTM container ID (see list_gtm_containers).
             Empty uses gtm.container_id from the config.
+        workspace_id: Workspace to read (see list_gtm_workspaces), which
+            includes drafted changes that are not published yet. Empty reads
+            the live (published) container version.
     """
     from adloop.gtm.read import get_tag as _impl
 
@@ -1635,23 +1652,30 @@ def get_gtm_tag(
         account_id=gtm_account_id,
         container_id=gtm_container_id,
         tag_id=tag_id,
+        workspace_id=workspace_id,
     )
 
 
 @_tool(title="List Tag Manager triggers", annotations=_READONLY, tags={"gtm"})
 @_safe
-def list_gtm_triggers(gtm_account_id: str = "", gtm_container_id: str = "") -> dict:
-    """List every trigger in the LIVE GTM container.
+def list_gtm_triggers(
+    gtm_account_id: str = "", gtm_container_id: str = "", workspace_id: str = ""
+) -> dict:
+    """List every trigger in the LIVE GTM container, or in one workspace.
 
     Each trigger has its filter conditions parsed to readable text
     (e.g. "{{Page Path}} matches RegExp ^/service-promotions/"). Helps
-    diagnose why a tag fires or doesn't fire on specific pages.
+    diagnose why a tag fires or doesn't fire on specific pages. With
+    workspace_id the list shows that workspace's unpublished state.
 
     Args:
         gtm_account_id: Numeric GTM account ID (see list_gtm_accounts). Empty
             uses gtm.account_id from the config.
         gtm_container_id: Numeric GTM container ID (see list_gtm_containers).
             Empty uses gtm.container_id from the config.
+        workspace_id: Workspace to read (see list_gtm_workspaces), which
+            includes drafted changes that are not published yet. Empty reads
+            the live (published) container version.
     """
     from adloop.gtm.read import list_triggers as _impl
 
@@ -1660,14 +1684,20 @@ def list_gtm_triggers(gtm_account_id: str = "", gtm_container_id: str = "") -> d
     )
 
     return _impl(
-        current_config(), account_id=gtm_account_id, container_id=gtm_container_id
+        current_config(),
+        account_id=gtm_account_id,
+        container_id=gtm_container_id,
+        workspace_id=workspace_id,
     )
 
 
 @_tool(title="Tag Manager trigger details", annotations=_READONLY, tags={"gtm"})
 @_safe
 def get_gtm_trigger(
-    trigger_id: str, gtm_account_id: str = "", gtm_container_id: str = ""
+    trigger_id: str,
+    gtm_account_id: str = "",
+    gtm_container_id: str = "",
+    workspace_id: str = "",
 ) -> dict:
     """Get the full RAW configuration for a single GTM trigger.
 
@@ -1675,6 +1705,8 @@ def get_gtm_trigger(
     settings, and a list of every tag that uses this trigger. Helps
     diagnose why a tag with a specific trigger ID does or doesn't fire. An
     unknown trigger_id returns an error with the available trigger IDs.
+    Reads the live container, or a workspace's unpublished state when
+    workspace_id is set.
 
     Args:
         trigger_id: Numeric GTM trigger ID, as listed by list_gtm_triggers or
@@ -1683,6 +1715,9 @@ def get_gtm_trigger(
             uses gtm.account_id from the config.
         gtm_container_id: Numeric GTM container ID (see list_gtm_containers).
             Empty uses gtm.container_id from the config.
+        workspace_id: Workspace to read (see list_gtm_workspaces), which
+            includes drafted changes that are not published yet. Empty reads
+            the live (published) container version.
     """
     from adloop.gtm.read import get_trigger as _impl
 
@@ -1695,25 +1730,32 @@ def get_gtm_trigger(
         account_id=gtm_account_id,
         container_id=gtm_container_id,
         trigger_id=trigger_id,
+        workspace_id=workspace_id,
     )
 
 
 @_tool(title="List Tag Manager variables", annotations=_READONLY, tags={"gtm"})
 @_safe
-def list_gtm_variables(gtm_account_id: str = "", gtm_container_id: str = "") -> dict:
+def list_gtm_variables(
+    gtm_account_id: str = "", gtm_container_id: str = "", workspace_id: str = ""
+) -> dict:
     """List GTM variables — both custom and enabled built-in.
 
-    Custom variables come from the live container. Built-in variables
-    (Page URL, Click Element, Form ID, etc.) come from the workspace's
-    enabled-built-ins list. Variables matter because triggers reference
-    them — if a trigger uses {{Form ID}} but Form ID isn't enabled, the
-    trigger never matches.
+    Without workspace_id both come from the live container version (the
+    Default Workspace supplies the built-ins only when the live version lists
+    none; built_in_source names where they came from). With workspace_id both
+    come from that workspace's unpublished state. Variables matter because
+    triggers reference them: if a trigger uses {{Form ID}} but Form ID isn't
+    enabled, the trigger never matches.
 
     Args:
         gtm_account_id: Numeric GTM account ID (see list_gtm_accounts). Empty
             uses gtm.account_id from the config.
         gtm_container_id: Numeric GTM container ID (see list_gtm_containers).
             Empty uses gtm.container_id from the config.
+        workspace_id: Workspace to read (see list_gtm_workspaces), which
+            includes drafted changes that are not published yet. Empty reads
+            the live (published) container version.
     """
     from adloop.gtm.read import list_variables as _impl
 
@@ -1722,7 +1764,10 @@ def list_gtm_variables(gtm_account_id: str = "", gtm_container_id: str = "") -> 
     )
 
     return _impl(
-        current_config(), account_id=gtm_account_id, container_id=gtm_container_id
+        current_config(),
+        account_id=gtm_account_id,
+        container_id=gtm_container_id,
+        workspace_id=workspace_id,
     )
 
 
@@ -1791,12 +1836,13 @@ def get_gtm_workspace_diff(
 def list_gtm_versions(
     gtm_account_id: str = "", gtm_container_id: str = "", page_size: int = 50
 ) -> dict:
-    """List published GTM version history (newest first).
+    """List GTM container version headers (newest first).
 
-    Version headers include version_id, name, and entity counts. Supports
-    correlating a metric drop with a recent publish: a version with
-    timestamps near the drop date has its full content + author info in
-    get_gtm_version.
+    Version headers include version_id, name, archived flag and entity
+    counts. The Tag Manager API returns no creation or publish time and no
+    author for a version, and does not mark which versions were published;
+    get_gtm_version returns a version's notes and get_gtm_version_diff what
+    changed between two versions.
 
     Args:
         gtm_account_id: Numeric GTM account ID (see list_gtm_accounts). Empty
@@ -1824,11 +1870,11 @@ def list_gtm_versions(
 def get_gtm_version(
     container_version_id: str, gtm_account_id: str = "", gtm_container_id: str = ""
 ) -> dict:
-    """Get full metadata + entity counts for a single GTM container version.
+    """Get metadata + entity counts for a single GTM container version.
 
-    Returns name, description, fingerprint, and lists of tag/trigger/
-    variable names at that point in time. Follows list_gtm_versions
-    when correlating a metric drop with a specific publish.
+    Returns name, description (the version notes), fingerprint, and lists of
+    tag/trigger/variable names at that point in time. The API returns no
+    timestamps or author for a version.
 
     Args:
         container_version_id: Numeric container version ID from
@@ -1849,6 +1895,49 @@ def get_gtm_version(
         account_id=gtm_account_id,
         container_id=gtm_container_id,
         container_version_id=container_version_id,
+    )
+
+
+@_tool(title="Tag Manager version diff", annotations=_READONLY, tags={"gtm"})
+@_safe
+def get_gtm_version_diff(
+    from_version_id: str = "",
+    to_version_id: str = "",
+    gtm_account_id: str = "",
+    gtm_container_id: str = "",
+) -> dict:
+    """Compare two GTM container versions: what a publish changed.
+
+    Returns added, removed and changed tags, triggers and variables (with
+    names, types and the changed fields; parameters and trigger conditions
+    are diffed key by key), plus built-in variables enabled or disabled. By
+    default compares the live version with the version created before it.
+    The Tag Manager API does not mark which versions were published, so that
+    default "before" version may never have been live. Makes two or three
+    Tag Manager API calls.
+
+    Args:
+        from_version_id: Older version ID (see list_gtm_versions). Empty uses
+            the newest non-archived version created before to_version_id.
+        to_version_id: Newer version ID. Empty uses the live (published)
+            version.
+        gtm_account_id: Numeric GTM account ID (see list_gtm_accounts). Empty
+            uses gtm.account_id from the config.
+        gtm_container_id: Numeric GTM container ID (see list_gtm_containers).
+            Empty uses gtm.container_id from the config.
+    """
+    from adloop.gtm.read import diff_versions as _impl
+
+    gtm_account_id, gtm_container_id = _gtm_defaults(
+        gtm_account_id, gtm_container_id
+    )
+
+    return _impl(
+        current_config(),
+        account_id=gtm_account_id,
+        container_id=gtm_container_id,
+        from_version_id=from_version_id,
+        to_version_id=to_version_id,
     )
 
 

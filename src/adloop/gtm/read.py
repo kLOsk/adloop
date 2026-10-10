@@ -213,38 +213,9 @@ def list_containers(config: AdLoopConfig, *, account_id: str) -> dict:
     return {"account_id": account_id, "containers": containers, "count": len(containers)}
 
 
-def get_live_container(
-    config: AdLoopConfig,
-    *,
-    account_id: str,
-    container_id: str,
-) -> dict:
-    """Fetch the LIVE (published) container version with parsed tags + triggers.
-
-    Returns a normalized dict — each tag has its event name extracted (for GA4
-    event tags), firing triggers resolved to names + types, and pause status
-    surfaced. Custom HTML tags are flagged separately because their event
-    semantics can't be inferred without parsing the JS body.
-    """
-    from adloop.gtm.client import get_gtm_client
-
-    client = get_gtm_client(config)
-    parent = f"accounts/{account_id}/containers/{container_id}"
-
-    live = (
-        client.accounts()
-        .containers()
-        .versions()
-        .live(parent=parent)
-        .execute()
-    )
-
-    tags = live.get("tag", [])
-    triggers = live.get("trigger", [])
-    variables = live.get("variable", [])
-
+def _parse_tags(tags: list[dict], triggers: list[dict]) -> list[dict]:
+    """Normalize tags: GA4 event name, resolved firing triggers, pause state."""
     trigger_by_id = {t.get("triggerId"): t for t in triggers}
-
     parsed_tags = []
     for tag in tags:
         params = _params_dict(tag)
@@ -267,6 +238,30 @@ def get_live_container(
             "blocking_triggers": tag.get("blockingTriggerId", []),
             "parameters": params,
         })
+    return parsed_tags
+
+
+def get_live_container(
+    config: AdLoopConfig,
+    *,
+    account_id: str,
+    container_id: str,
+) -> dict:
+    """Fetch the LIVE (published) container version with parsed tags + triggers.
+
+    Returns a normalized dict: each tag has its event name extracted (for GA4
+    event tags), firing triggers resolved to names + types, and pause status
+    surfaced. Custom HTML tags are flagged separately because their event
+    semantics can't be inferred without parsing the JS body.
+    """
+    from adloop.gtm.client import get_gtm_client
+
+    client = get_gtm_client(config)
+    live = _fetch_live(client, account_id, container_id)
+
+    tags = live.get("tag", [])
+    triggers = live.get("trigger", [])
+    variables = live.get("variable", [])
 
     return {
         "account_id": account_id,
@@ -274,15 +269,20 @@ def get_live_container(
         "container_version_id": live.get("containerVersionId"),
         "container_version_name": live.get("name"),
         "fingerprint": live.get("fingerprint"),
-        "tags": parsed_tags,
+        "tags": _parse_tags(tags, triggers),
         "trigger_count": len(triggers),
         "variable_count": len(variables),
     }
 
 
 # ---------------------------------------------------------------------------
-# Per-resource read helpers — operate on the LIVE container by default
+# Per-resource read helpers: LIVE container by default, or one workspace
 # ---------------------------------------------------------------------------
+#
+# Tag Manager allows 25 requests per 100 seconds per Google Cloud project, so
+# every read here makes as few calls as it can: the live version carries every
+# entity in ONE call, and a workspace read lists only the kinds it needs (a
+# list returns full entities, so there are no per-entity follow-up calls).
 
 
 def _fetch_live(client, account_id: str, container_id: str) -> dict:
@@ -296,22 +296,95 @@ def _fetch_live(client, account_id: str, container_id: str) -> dict:
     )
 
 
+def _workspace_path(account_id: str, container_id: str, workspace_id: str) -> str:
+    return f"accounts/{account_id}/containers/{container_id}/workspaces/{workspace_id}"
+
+
+def _list_all(list_method, parent: str, key: str) -> list[dict]:
+    """Collect every page of a Tag Manager list call (usually one page)."""
+    items: list[dict] = []
+    token = None
+    while True:
+        kwargs = {"parent": parent}
+        if token:
+            kwargs["pageToken"] = token
+        resp = list_method(**kwargs).execute() or {}
+        items.extend(resp.get(key, []) or [])
+        token = resp.get("nextPageToken")
+        if not token:
+            return items
+
+
+def _fetch_entities(
+    client,
+    account_id: str,
+    container_id: str,
+    workspace_id: str,
+    kinds: tuple[str, ...],
+) -> dict:
+    """Entities of the given kinds from the live version or a workspace.
+
+    Returns ``{"tag": [...], "trigger": [...], "variable": [...],
+    "builtInVariable": [...] (live only), "source": {...}}``. The live path is
+    one ``versions.live`` call whatever ``kinds`` asks for; the workspace path
+    is one list call per kind.
+    """
+    if not workspace_id:
+        live = _fetch_live(client, account_id, container_id)
+        out = {k: live.get(k, []) or [] for k in kinds}
+        out["builtInVariable"] = live.get("builtInVariable", []) or []
+        out["source"] = {
+            "source": "live",
+            "container_version_id": live.get("containerVersionId"),
+        }
+        return out
+
+    ws = client.accounts().containers().workspaces()
+    parent = _workspace_path(account_id, container_id, workspace_id)
+    apis = {"tag": ws.tags, "trigger": ws.triggers, "variable": ws.variables}
+    out = {k: _list_all(apis[k]().list, parent, k) for k in kinds}
+    out["source"] = {
+        "source": "workspace",
+        "workspace_id": str(workspace_id),
+        "container_version_id": None,
+        "note": (
+            "Workspace state: includes drafted changes that are not published, "
+            "so it can differ from what runs on the site."
+        ),
+    }
+    return out
+
+
+def _where(account_id: str, container_id: str, workspace_id: str) -> str:
+    if workspace_id:
+        return f"workspace {workspace_id} of container {container_id}"
+    return f"live container {container_id}"
+
+
 def list_tags(
     config: AdLoopConfig,
     *,
     account_id: str,
     container_id: str,
+    workspace_id: str = "",
 ) -> dict:
-    """List every tag in the LIVE container with parsed event names + triggers."""
-    container = get_live_container(
-        config, account_id=account_id, container_id=container_id
+    """List every tag (live container, or one workspace) with parsed triggers.
+
+    Live: 1 API call. Workspace: 2 (tags + triggers, for trigger names).
+    """
+    from adloop.gtm.client import get_gtm_client
+
+    client = get_gtm_client(config)
+    data = _fetch_entities(
+        client, account_id, container_id, workspace_id, ("tag", "trigger")
     )
+    tags = _parse_tags(data["tag"], data["trigger"])
     return {
         "account_id": account_id,
         "container_id": container_id,
-        "container_version_id": container["container_version_id"],
-        "tags": container["tags"],
-        "count": len(container["tags"]),
+        **data["source"],
+        "tags": tags,
+        "count": len(tags),
     }
 
 
@@ -321,23 +394,28 @@ def get_tag(
     account_id: str,
     container_id: str,
     tag_id: str,
+    workspace_id: str = "",
 ) -> dict:
-    """Return the full RAW config for a single tag from the live container.
+    """Return the full RAW config for a single tag (live, or one workspace).
 
     Includes every parameter, firing/blocking trigger references, priority,
     pause status, and tag-specific settings (sampling, monitoring, etc.).
     Use after audit_event_coverage flags a tag for inspection.
+    Live: 1 API call. Workspace: 2 (tags + triggers lists).
     """
     from adloop.gtm.client import get_gtm_client
 
     client = get_gtm_client(config)
-    live = _fetch_live(client, account_id, container_id)
-    triggers_by_id = {t.get("triggerId"): t for t in live.get("trigger", [])}
+    data = _fetch_entities(
+        client, account_id, container_id, workspace_id, ("tag", "trigger")
+    )
+    triggers_by_id = {t.get("triggerId"): t for t in data["trigger"]}
 
-    for tag in live.get("tag", []):
+    for tag in data["tag"]:
         if str(tag.get("tagId")) == str(tag_id):
             params = _params_dict(tag)
             return {
+                **data["source"],
                 "tag_id": tag.get("tagId"),
                 "name": tag.get("name"),
                 "type": tag.get("type"),
@@ -365,8 +443,11 @@ def get_tag(
             }
 
     return {
-        "error": f"Tag {tag_id} not found in live container {container_id}",
-        "available_tag_ids": [t.get("tagId") for t in live.get("tag", [])],
+        "error": (
+            f"Tag {tag_id} not found in "
+            f"{_where(account_id, container_id, workspace_id)}"
+        ),
+        "available_tag_ids": [t.get("tagId") for t in data["tag"]],
     }
 
 
@@ -375,17 +456,21 @@ def list_triggers(
     *,
     account_id: str,
     container_id: str,
+    workspace_id: str = "",
 ) -> dict:
-    """List every trigger in the LIVE container with filters parsed to text."""
+    """List every trigger (live, or one workspace) with filters parsed to text.
+
+    1 API call either way.
+    """
     from adloop.gtm.client import get_gtm_client
 
     client = get_gtm_client(config)
-    live = _fetch_live(client, account_id, container_id)
-    triggers = [_parse_trigger(t) for t in live.get("trigger", [])]
+    data = _fetch_entities(client, account_id, container_id, workspace_id, ("trigger",))
+    triggers = [_parse_trigger(t) for t in data["trigger"]]
     return {
         "account_id": account_id,
         "container_id": container_id,
-        "container_version_id": live.get("containerVersionId"),
+        **data["source"],
         "triggers": triggers,
         "count": len(triggers),
     }
@@ -397,29 +482,53 @@ def get_trigger(
     account_id: str,
     container_id: str,
     trigger_id: str,
+    workspace_id: str = "",
 ) -> dict:
-    """Return the full RAW config for a single trigger from the live container."""
+    """Return the full RAW config for a single trigger (live, or one workspace).
+
+    Live: 1 API call. Workspace: 2 (triggers + tags, for ``used_by_tags``).
+    """
     from adloop.gtm.client import get_gtm_client
 
     client = get_gtm_client(config)
-    live = _fetch_live(client, account_id, container_id)
+    data = _fetch_entities(
+        client, account_id, container_id, workspace_id, ("trigger", "tag")
+    )
 
-    for trigger in live.get("trigger", []):
+    for trigger in data["trigger"]:
         if str(trigger.get("triggerId")) == str(trigger_id):
-            parsed = _parse_trigger(trigger)
+            parsed = {**data["source"], **_parse_trigger(trigger)}
             parsed["raw"] = trigger
             tags_using = [
                 {"tag_id": t.get("tagId"), "name": t.get("name")}
-                for t in live.get("tag", [])
+                for t in data["tag"]
                 if str(trigger_id) in [str(x) for x in t.get("firingTriggerId", [])]
             ]
             parsed["used_by_tags"] = tags_using
             return parsed
 
     return {
-        "error": f"Trigger {trigger_id} not found in live container {container_id}",
-        "available_trigger_ids": [t.get("triggerId") for t in live.get("trigger", [])],
+        "error": (
+            f"Trigger {trigger_id} not found in "
+            f"{_where(account_id, container_id, workspace_id)}"
+        ),
+        "available_trigger_ids": [t.get("triggerId") for t in data["trigger"]],
     }
+
+
+def _default_workspace_id(client, account_id: str, container_id: str) -> str:
+    """The Default Workspace (or the only one); empty when ambiguous or none."""
+    workspaces = _list_all(
+        client.accounts().containers().workspaces().list,
+        f"accounts/{account_id}/containers/{container_id}",
+        "workspace",
+    )
+    for w in workspaces:
+        if w.get("name") == "Default Workspace":
+            return str(w.get("workspaceId"))
+    if len(workspaces) == 1:
+        return str(workspaces[0].get("workspaceId"))
+    return ""
 
 
 def list_variables(
@@ -427,57 +536,55 @@ def list_variables(
     *,
     account_id: str,
     container_id: str,
+    workspace_id: str = "",
 ) -> dict:
-    """List custom variables in the LIVE container plus enabled built-in variables.
+    """List custom variables plus enabled built-in variables.
 
-    Custom variables come from the live container version. Built-in variables
-    (Page URL, Click Element, etc.) come from a separate API endpoint and are
-    listed under `built_in`.
+    Live (no ``workspace_id``): both come from the live version itself, one
+    API call. Only when the live version carries no built-in list are the
+    built-ins read from the Default Workspace (two more calls), and the
+    result says so. With ``workspace_id``: custom variables and built-ins of
+    that workspace, two calls.
     """
     from adloop.gtm.client import get_gtm_client
 
     client = get_gtm_client(config)
-    live = _fetch_live(client, account_id, container_id)
+    data = _fetch_entities(client, account_id, container_id, workspace_id, ("variable",))
+    custom = [_parse_variable(v) for v in data["variable"]]
 
-    custom = [_parse_variable(v) for v in live.get("variable", [])]
-
-    built_in: list[dict] = []
-    workspaces = (
-        client.accounts()
-        .containers()
-        .workspaces()
-        .list(parent=f"accounts/{account_id}/containers/{container_id}")
-        .execute()
-        .get("workspace", [])
-    )
-    if workspaces:
-        wid = workspaces[0].get("workspaceId")
+    built_in_source = "live_version" if not workspace_id else f"workspace {workspace_id}"
+    raw_built_in = data.get("builtInVariable") or []
+    built_in_ws = workspace_id
+    if not workspace_id and not raw_built_in:
+        built_in_ws = _default_workspace_id(client, account_id, container_id)
+        built_in_source = (
+            f"workspace {built_in_ws} (Default Workspace; the live version "
+            "listed no built-in variables)"
+            if built_in_ws
+            else "unavailable (no Default Workspace to read built-ins from)"
+        )
+    if built_in_ws:
         try:
-            biv = (
-                client.accounts()
-                .containers()
-                .workspaces()
-                .built_in_variables()
-                .list(
-                    parent=f"accounts/{account_id}/containers/{container_id}/workspaces/{wid}"
-                )
-                .execute()
-                .get("builtInVariable", [])
+            raw_built_in = _list_all(
+                client.accounts().containers().workspaces().built_in_variables().list,
+                _workspace_path(account_id, container_id, built_in_ws),
+                "builtInVariable",
             )
-            built_in = [
-                {"name": v.get("name"), "type": v.get("type")} for v in biv
-            ]
-        except Exception:
-            built_in = []
+        except Exception:  # noqa: BLE001 (built-ins are supplementary)
+            raw_built_in = []
+            built_in_source = f"unavailable (reading workspace {built_in_ws} failed)"
+
+    built_in = [{"name": v.get("name"), "type": v.get("type")} for v in raw_built_in]
 
     return {
         "account_id": account_id,
         "container_id": container_id,
-        "container_version_id": live.get("containerVersionId"),
+        **data["source"],
         "custom_variables": custom,
         "custom_count": len(custom),
         "built_in": built_in,
         "built_in_count": len(built_in),
+        "built_in_source": built_in_source,
     }
 
 
@@ -580,6 +687,24 @@ def get_workspace_diff(
     }
 
 
+def _version_headers(client, account_id: str, container_id: str) -> list[dict]:
+    """Every non-archived version header, newest (highest id) first."""
+    headers = _list_all(
+        client.accounts().containers().version_headers().list,
+        f"accounts/{account_id}/containers/{container_id}",
+        "containerVersionHeader",
+    )
+    return sorted(headers, key=lambda h: _version_number(h.get("containerVersionId")),
+                  reverse=True)
+
+
+def _version_number(version_id) -> int:
+    try:
+        return int(version_id)
+    except (TypeError, ValueError):
+        return -1
+
+
 def list_versions(
     config: AdLoopConfig,
     *,
@@ -587,24 +712,19 @@ def list_versions(
     container_id: str,
     page_size: int = 50,
 ) -> dict:
-    """List published version history (newest first) with author + notes.
+    """List container version headers (newest first) with entity counts.
 
-    Use this to correlate a metric drop with a recent publish — fetch the
-    last few versions, look at created/updated timestamps and notes, and
-    cross-reference with the date the conversion / session drop began.
+    Each header carries the version id, name, archived flag and entity
+    counts. The Tag Manager API returns no creation time, publish time or
+    author for a version, and no flag for which versions were ever
+    published; only the live one is identifiable (``versions.live``). To
+    correlate a metric drop with a change, compare version names and notes
+    (get_version returns the notes) or diff two versions with diff_versions.
     """
     from adloop.gtm.client import get_gtm_client
 
     client = get_gtm_client(config)
-    parent = f"accounts/{account_id}/containers/{container_id}"
-    resp = (
-        client.accounts()
-        .containers()
-        .version_headers()
-        .list(parent=parent)
-        .execute()
-    )
-    headers = resp.get("containerVersionHeader", [])[:page_size]
+    headers = _version_headers(client, account_id, container_id)[:page_size]
     versions = []
     for v in headers:
         versions.append({
@@ -623,8 +743,10 @@ def list_versions(
         "versions": versions,
         "count": len(versions),
         "note": (
-            "Version headers do not include createdAt/author. Call "
-            "get_gtm_version on a specific version_id for full metadata."
+            "The Tag Manager API exposes no creation/publish time and no author "
+            "for container versions, and does not mark which versions were "
+            "published. get_gtm_version returns a version's notes; "
+            "get_gtm_version_diff shows what changed between two versions."
         ),
     }
 
@@ -636,11 +758,11 @@ def get_version(
     container_id: str,
     container_version_id: str,
 ) -> dict:
-    """Get full metadata + content for a single container version.
+    """Get metadata + content for a single container version.
 
-    Includes created/updated timestamps, fingerprint, full tag/trigger/variable
-    lists at that point in time. Useful for correlating a metric drop with
-    what changed in a specific publish.
+    Includes the name, notes (description), fingerprint and the
+    tag/trigger/variable names at that point in time. The API returns no
+    timestamps or author for a version.
     """
     from adloop.gtm.client import get_gtm_client
 
@@ -662,3 +784,194 @@ def get_version(
         "tag_names": [t.get("name") for t in v.get("tag", [])],
         "trigger_names": [t.get("name") for t in v.get("trigger", [])],
     }
+
+
+# ---------------------------------------------------------------------------
+# Version diff: what changed between two container versions
+# ---------------------------------------------------------------------------
+
+# Fields that differ between two copies of the same entity without meaning a
+# configuration change: storage fingerprints, paths and URLs.
+_VOLATILE_FIELDS = frozenset({
+    "fingerprint", "path", "tagManagerUrl", "accountId", "containerId",
+    "workspaceId",
+})
+
+_DIFF_KINDS = (
+    # (version field, id field, output key)
+    ("tag", "tagId", "tags"),
+    ("trigger", "triggerId", "triggers"),
+    ("variable", "variableId", "variables"),
+)
+
+# Trigger condition lists, rendered as text in a diff ("{{Page Path}} contains
+# /thanks") rather than as raw nested parameter dicts.
+_CONDITION_FIELDS = frozenset({"filter", "customEventFilter", "autoEventFilter"})
+
+
+def _diff_field(field: str, old, new) -> dict:
+    if field == "parameter":
+        old_params = _params_dict({"parameter": old or []})
+        new_params = _params_dict({"parameter": new or []})
+        keys = sorted(set(old_params) | set(new_params))
+        return {
+            "parameters": {
+                k: {"from": old_params.get(k), "to": new_params.get(k)}
+                for k in keys
+                if old_params.get(k) != new_params.get(k)
+            }
+        }
+    if field in _CONDITION_FIELDS:
+        return {
+            field: {
+                "from": [_summarize_filter(f) for f in old or []],
+                "to": [_summarize_filter(f) for f in new or []],
+            }
+        }
+    return {field: {"from": old, "to": new}}
+
+
+def _entity_changes(old: dict, new: dict) -> tuple[list[str], dict]:
+    fields = sorted(
+        (set(old) | set(new)) - _VOLATILE_FIELDS,
+    )
+    changed = [f for f in fields if old.get(f) != new.get(f)]
+    details: dict = {}
+    for f in changed:
+        details.update(_diff_field(f, old.get(f), new.get(f)))
+    return changed, details
+
+
+def _brief(entity: dict, id_field: str) -> dict:
+    return {
+        "id": entity.get(id_field),
+        "name": entity.get("name"),
+        "type": entity.get("type"),
+    }
+
+
+def diff_container_versions(old: dict, new: dict) -> dict:
+    """Compare two ContainerVersion bodies; pure, no API calls.
+
+    Entities are matched by id. Returns added / removed / changed per kind
+    (tags, triggers, variables) with names, types and the changed fields,
+    plus built-in variables enabled or disabled between the two.
+    """
+    out: dict = {}
+    summary: dict = {}
+    for kind, id_field, key in _DIFF_KINDS:
+        old_by_id = {str(e.get(id_field)): e for e in old.get(kind, []) or []}
+        new_by_id = {str(e.get(id_field)): e for e in new.get(kind, []) or []}
+        added = [_brief(new_by_id[i], id_field) for i in new_by_id if i not in old_by_id]
+        removed = [_brief(old_by_id[i], id_field) for i in old_by_id if i not in new_by_id]
+        changed = []
+        for i in new_by_id:
+            if i not in old_by_id:
+                continue
+            fields, details = _entity_changes(old_by_id[i], new_by_id[i])
+            if fields:
+                entry = _brief(new_by_id[i], id_field)
+                if old_by_id[i].get("name") != new_by_id[i].get("name"):
+                    entry["previous_name"] = old_by_id[i].get("name")
+                entry["changed_fields"] = fields
+                entry["changes"] = details
+                changed.append(entry)
+        out[key] = {"added": added, "removed": removed, "changed": changed}
+        summary[key] = {
+            "added": len(added), "removed": len(removed), "changed": len(changed),
+        }
+
+    old_bi = {b.get("type") or b.get("name") for b in old.get("builtInVariable", []) or []}
+    new_bi = {b.get("type") or b.get("name") for b in new.get("builtInVariable", []) or []}
+    out["built_in_variables"] = {
+        "enabled": sorted(t for t in new_bi - old_bi if t),
+        "disabled": sorted(t for t in old_bi - new_bi if t),
+    }
+    out["summary"] = summary
+    out["is_identical"] = not any(
+        any(counts.values()) for counts in summary.values()
+    ) and not (new_bi ^ old_bi)
+    return out
+
+
+def _version_ref(version: dict, *, live_id: str | None = None) -> dict:
+    vid = version.get("containerVersionId")
+    ref = {"container_version_id": vid, "name": version.get("name")}
+    if live_id is not None:
+        ref["is_live"] = str(vid) == str(live_id)
+    return ref
+
+
+def diff_versions(
+    config: AdLoopConfig,
+    *,
+    account_id: str,
+    container_id: str,
+    from_version_id: str = "",
+    to_version_id: str = "",
+) -> dict:
+    """Diff two container versions (default: the one before live → live).
+
+    API calls: 2 when both ids are given (two ``versions.get``) or only
+    ``from_version_id`` (live + one get); 3 when ``from_version_id`` is empty
+    (one ``version_headers.list`` to find the version before the target).
+    """
+    from adloop.gtm.client import get_gtm_client
+
+    client = get_gtm_client(config)
+    versions = client.accounts().containers().versions()
+    base = f"accounts/{account_id}/containers/{container_id}"
+    calls = 0
+
+    def _get(vid: str) -> dict:
+        nonlocal calls
+        calls += 1
+        return versions.get(path=f"{base}/versions/{vid}").execute()
+
+    live_id = None
+    if to_version_id:
+        new = _get(to_version_id)
+    else:
+        calls += 1
+        new = _fetch_live(client, account_id, container_id)
+        live_id = new.get("containerVersionId")
+        if not live_id:
+            return {"error": f"Container {container_id} has no live (published) version."}
+
+    note = None
+    if from_version_id:
+        old = _get(from_version_id)
+    else:
+        calls += 1
+        target = _version_number(new.get("containerVersionId"))
+        older = [
+            h for h in _version_headers(client, account_id, container_id)
+            if not h.get("deleted")
+            and 0 <= _version_number(h.get("containerVersionId")) < target
+        ]
+        if not older:
+            return {
+                "error": (
+                    f"No version older than {new.get('containerVersionId')} "
+                    "exists to compare against."
+                ),
+            }
+        old = _get(older[0]["containerVersionId"])
+        note = (
+            "from_version is the newest version created before to_version. The "
+            "Tag Manager API does not mark which versions were published, so it "
+            "may be a version that was never live."
+        )
+
+    diff = diff_container_versions(old, new)
+    result = {
+        "account_id": account_id,
+        "container_id": container_id,
+        "from_version": _version_ref(old, live_id=live_id),
+        "to_version": _version_ref(new, live_id=live_id),
+        **diff,
+        "api_calls": calls,
+    }
+    if note:
+        result["note"] = note
+    return result
