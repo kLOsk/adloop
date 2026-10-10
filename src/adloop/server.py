@@ -739,12 +739,18 @@ def run_gsc_report(
     limit: int = 100,
     search_type: str = "web",
     dimension_filter_groups: _DictListOpt = None,
+    data_state: str = "final",
+    aggregation_type: str = "auto",
+    start_row: int = 0,
 ) -> dict:
     """Run a Google Search Console search analytics report.
 
     Returns clicks, impressions, CTR, and average position broken down by
     the requested dimensions. Useful for diagnosing organic traffic drops,
     finding keyword opportunities, and cross-referencing with GA4 and Ads data.
+    One request returns at most 25,000 rows; a full page carries
+    next_start_row for the following request. With data_state "all" the
+    response metadata names the first date whose data is still incomplete.
 
     Queries the Search Console API:
     https://developers.google.com/webmaster-tools/v1/searchanalytics/query
@@ -754,18 +760,28 @@ def run_gsc_report(
             "sc-domain:example.com"), as listed by list_gsc_sites. Defaults to
             the configured Search Console site (gsc.site_url).
         dimensions: One or more of "query", "page", "country", "device",
-            "date". Defaults to ["query"].
+            "date", "searchAppearance" (search result feature, e.g. rich
+            results) or "hour" (hourly rows for roughly the last 10 days;
+            switches data_state to "hourly_all"). Defaults to ["query"].
         date_range_start: Start date as ISO "YYYY-MM-DD" or a relative value
             like "7daysAgo", "30daysAgo", "today".
         date_range_end: End date, same formats as date_range_start.
-        limit: Maximum rows to return (default 100, max 25000; higher values
-            are capped at 25000).
+        limit: Maximum rows to return (default 100, max 25000 per request;
+            higher values are capped at 25000).
         search_type: "web" (default), "image", "video", "news", "discover",
             or "googleNews".
         dimension_filter_groups: Optional list of GSC DimensionFilterGroup
             objects to filter by query, page, country, or device, e.g.
             [{"filters": [{"dimension": "query", "operator": "contains",
-            "expression": "analytics"}]}].
+            "expression": "analytics"}]}]. searchAppearance is filterable too.
+        data_state: "final" (default) returns finalized data only; "all"
+            adds fresh data from the last days that can still change;
+            "hourly_all" is the state the hour dimension uses.
+        aggregation_type: "auto" (default), "byPage" (aggregate by canonical
+            URL) or "byProperty" (aggregate by property; not combinable with
+            grouping or filtering by page).
+        start_row: Zero-based offset of the first row, for paging past the
+            25,000-row cap (pass the previous response's next_start_row).
     """
     from adloop.gsc.reports import run_gsc_report as _impl
 
@@ -778,6 +794,9 @@ def run_gsc_report(
         limit=limit,
         search_type=search_type,
         dimension_filter_groups=dimension_filter_groups,
+        data_state=data_state,
+        aggregation_type=aggregation_type,
+        start_row=start_row,
     )
 
 
