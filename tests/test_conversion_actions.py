@@ -733,9 +733,12 @@ class TestGaqlEscape:
 
 class TestRedactCallerId:
     def test_masks_middle(self):
-        assert conversion_actions._redact_caller_id("+14155550142") == (
-            "+141***0142"
-        )
+        assert conversion_actions._redact_caller_id("+14155550142") == "+1***42"
+
+    def test_keeps_the_whole_dialling_code(self):
+        """+49 is the country code; a fixed slice would show '+491' and hide
+        the last digits behind it."""
+        assert conversion_actions._redact_caller_id("+4915112345678") == "+49***78"
 
     def test_short_number_fully_masked(self):
         assert conversion_actions._redact_caller_id("12345") == "***"
@@ -1413,14 +1416,21 @@ class TestDraftUploadEcForLeads:
         assert "rows" not in plan.changes
         assert plan.apply_only_payload["rows"][0]["email_sha256"] == _EMAIL_HASH
 
-    def test_sample_rows_truncate_hashes(self, config, tmp_path):
+    def test_sample_rows_mark_hashes_without_showing_them(self, config, tmp_path):
+        """A 16-character prefix is 64 bits: enough to confirm a guessed
+        address with one hash, in a preview that reaches the model and the log."""
         path = self._write(tmp_path)
         result = (
             conversion_actions.draft_upload_enhanced_conversions_for_leads(
                 config, customer_id="1234567890", csv_path=path,
             )
         )
-        assert "..." in result["changes"]["sample_rows"][0]["email_sha256"]
+        sample = result["changes"]["sample_rows"]
+        assert sample[0]["email_sha256"] == "sha256:set"
+        # Nothing in the preview may carry part of a hash.
+        blob = repr(result["changes"])
+        assert _EMAIL_HASH[:16] not in blob
+        assert "..." not in blob
 
     def test_dedup_warning_when_no_order_id(self, config, tmp_path):
         path = self._write(tmp_path, order_id=False)

@@ -1142,17 +1142,35 @@ def _parse_call_conversion_csv(
 
 
 def _redact_caller_id(caller_id: str) -> str:
-    """Mask an E.164 phone for display/logging: keep the leading digits and
-    the last 4, star the middle. e.g. '+15555550142' -> '+155***0142'.
+    """Mask an E.164 phone for display/logging: the country code plus the last
+    two digits. e.g. '+14155550142' -> '+1***42'.
+
+    Two trailing digits are enough to sanity-check that the right number was
+    parsed. Everything between them is what would make the hint worth
+    attacking, and this string reaches the preview, the model's context and the
+    audit log.
     """
     s = (caller_id or "").strip()
     if not s:
         return ""
-    if len(s) <= 6:
+    if not s.startswith("+") or len(s) < 5:
         return "***"
-    head = s[:4]
-    tail = s[-4:]
-    return f"{head}***{tail}"
+    return f"+{_dialling_country_code(s)}***{s[-2:]}"
+
+
+def _dialling_country_code(e164: str) -> str:
+    """The dialling country code of an E.164 number, "" when it is unknown.
+
+    libphonenumber knows where the country code ends (`+1` vs `+49` vs `+49`
+    inside `+49151…`); a hand-rolled slice cannot. Failing to resolve it only
+    costs the prefix of a display hint, so this never raises.
+    """
+    try:
+        import phonenumbers
+
+        return str(phonenumbers.parse(e164, None).country_code or "")
+    except Exception:  # noqa: BLE001 — display helper, never fatal
+        return ""
 
 
 def draft_upload_call_conversions(
@@ -2417,10 +2435,14 @@ def draft_upload_enhanced_conversions_for_leads(
             ),
             "sample_rows": [
                 {
-                    "email_sha256": (r["email_sha256"][:16] + "...")
-                    if r["email_sha256"] else "",
-                    "phone_sha256": (r["phone_sha256"][:16] + "...")
-                    if r["phone_sha256"] else "",
+                    # A marker, not a prefix: the sample only has to show that
+                    # an identifier was there. 16 hex characters are 64 bits,
+                    # which is enough to confirm a guessed address from a word
+                    # list — in a preview that lands in a model's context and
+                    # in the audit log. The full hashes stay in
+                    # apply_only_payload, where the upload needs them.
+                    "email_sha256": "sha256:set" if r["email_sha256"] else "",
+                    "phone_sha256": "sha256:set" if r["phone_sha256"] else "",
                     "conversion_name": r["conversion_name"],
                     "conversion_value": r["conversion_value"],
                     "conversion_time": r["conversion_time"],
