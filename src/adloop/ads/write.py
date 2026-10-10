@@ -2847,7 +2847,7 @@ def confirm_and_apply(
                 + (
                     " The publish preflight ran a Tag Manager quick preview, "
                     "which stores a preview version and publishes nothing."
-                    if is_gtm
+                    if plan.operation == "gtm_publish_workspace"
                     else ""
                 )
             )

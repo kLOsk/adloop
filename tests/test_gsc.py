@@ -94,3 +94,100 @@ class TestRunReport:
         assert row["query"] == "adloop mcp"
         assert row["clicks"] == 12
         assert row["position"] == 4.2
+
+
+def _body(client):
+    return client.searchanalytics.return_value.query.call_args.kwargs["body"]
+
+
+class TestReportOptions:
+    def test_defaults_are_final_auto_and_first_row(self, config):
+        client = _fake_client(query_response={"rows": []})
+        with patch("adloop.gsc.client.get_gsc_client", return_value=client):
+            result = reports.run_gsc_report(config)
+
+        body = _body(client)
+        assert body["dataState"] == "final"
+        assert body["aggregationType"] == "auto"
+        assert body["startRow"] == 0
+        assert result["data_state"] == "final"
+        assert "next_start_row" not in result
+
+    def test_fresh_data_by_page_from_an_offset(self, config):
+        client = _fake_client(query_response={
+            "rows": [], "responseAggregationType": "byPage",
+            "metadata": {"firstIncompleteDate": "2026-10-09"},
+        })
+        with patch("adloop.gsc.client.get_gsc_client", return_value=client):
+            result = reports.run_gsc_report(
+                config, data_state="ALL", aggregation_type="bypage",
+                start_row=25_000,
+            )
+
+        body = _body(client)
+        assert body["dataState"] == "all"
+        assert body["aggregationType"] == "byPage"
+        assert body["startRow"] == 25_000
+        assert result["response_aggregation_type"] == "byPage"
+        assert result["metadata"]["firstIncompleteDate"] == "2026-10-09"
+
+    def test_a_full_page_points_at_the_next_start_row(self, config):
+        client = _fake_client(query_response={"rows": [
+            {"keys": [f"q{i}"], "clicks": 1, "impressions": 2, "ctr": 0.5,
+             "position": 1.0}
+            for i in range(3)
+        ]})
+        with patch("adloop.gsc.client.get_gsc_client", return_value=client):
+            result = reports.run_gsc_report(config, limit=3, start_row=6)
+        assert result["next_start_row"] == 9
+
+    @pytest.mark.parametrize("kwargs,message", [
+        ({"data_state": "fresh"}, "data_state"),
+        ({"aggregation_type": "byNewsShowcasePanel"}, "aggregation_type"),
+        ({"start_row": -1}, "start_row"),
+    ])
+    def test_invalid_options_are_refused_before_any_call(self, config, kwargs, message):
+        client = _fake_client()
+        with patch("adloop.gsc.client.get_gsc_client", return_value=client):
+            result = reports.run_gsc_report(config, **kwargs)
+        assert message in result["error"]
+        client.searchanalytics.assert_not_called()
+
+    def test_by_property_with_page_is_refused(self, config):
+        client = _fake_client()
+        page_filter = [{"filters": [{"dimension": "page", "operator": "contains",
+                                     "expression": "/blog/"}]}]
+        with patch("adloop.gsc.client.get_gsc_client", return_value=client):
+            grouped = reports.run_gsc_report(
+                config, dimensions=["page"], aggregation_type="byProperty")
+            filtered = reports.run_gsc_report(
+                config, dimensions=["query"], aggregation_type="byProperty",
+                dimension_filter_groups=page_filter)
+        assert "byProperty" in grouped["error"]
+        assert "byProperty" in filtered["error"]
+        client.searchanalytics.assert_not_called()
+
+    def test_hour_dimension_switches_to_hourly_data(self, config):
+        client = _fake_client(query_response={"rows": [
+            {"keys": ["2026-10-09T13:00:00-07:00"], "clicks": 4,
+             "impressions": 40, "ctr": 0.1, "position": 3.0},
+        ]})
+        with patch("adloop.gsc.client.get_gsc_client", return_value=client):
+            result = reports.run_gsc_report(config, dimensions=["HOUR"])
+
+        body = _body(client)
+        assert body["dimensions"] == ["hour"]
+        assert body["dataState"] == "hourly_all"
+        assert result["rows"][0]["hour"] == "2026-10-09T13:00:00-07:00"
+        assert any("hourly_all" in n for n in result["notes"])
+
+    def test_search_appearance_passes_through_under_one_name(self, config):
+        client = _fake_client(query_response={"rows": [
+            {"keys": ["RICHCARD"], "clicks": 1, "impressions": 9, "ctr": 0.11,
+             "position": 2.0},
+        ]})
+        with patch("adloop.gsc.client.get_gsc_client", return_value=client):
+            result = reports.run_gsc_report(config, dimensions=["search_appearance"])
+
+        assert _body(client)["dimensions"] == ["searchAppearance"]
+        assert result["rows"][0]["searchAppearance"] == "RICHCARD"

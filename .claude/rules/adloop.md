@@ -106,11 +106,14 @@ These tools call both APIs internally and return unified results with computed `
 |------|-------------|----------------|
 | `audit_event_coverage` | The GTM headline tool: three-way audit of codebase events ↔ live GTM tags ↔ GA4 actual fires, with a per-event status matrix and insights | `expected_events` (extracted from the codebase first), `gtm_account_id`, `gtm_container_id`, date range |
 | `list_gtm_accounts` / `list_gtm_containers` | First-time discovery — find GTM account and container IDs | (accounts: none; containers: `gtm_account_id`) |
-| `list_gtm_tags` / `get_gtm_tag` | Inventory tags in the live container / full detail for one tag | `gtm_account_id`, `gtm_container_id` (+ `tag_id`) |
-| `list_gtm_triggers` / `get_gtm_trigger` | Inventory triggers / full detail incl. filter conditions | `gtm_account_id`, `gtm_container_id` (+ `trigger_id`) |
-| `list_gtm_variables` | Inventory user-defined variables | `gtm_account_id`, `gtm_container_id` |
+| `list_gtm_tags` / `get_gtm_tag` | Inventory tags in the live container / full detail for one tag. With `workspace_id`, reads that workspace's unpublished state instead (a just-drafted tag shows up there, not in the live read) | `gtm_account_id`, `gtm_container_id`, `workspace_id` (+ `tag_id`) |
+| `list_gtm_triggers` / `get_gtm_trigger` | Inventory triggers / full detail incl. filter conditions. `workspace_id` reads a workspace like above | `gtm_account_id`, `gtm_container_id`, `workspace_id` (+ `trigger_id`) |
+| `list_gtm_variables` | Inventory user-defined and enabled built-in variables (live by default; `built_in_source` says where the built-ins came from) | `gtm_account_id`, `gtm_container_id`, `workspace_id` |
 | `list_gtm_workspaces` / `get_gtm_workspace_diff` | See open workspaces / unpublished changes pending in one | `gtm_account_id`, `gtm_container_id` (+ `workspace_id`) |
-| `list_gtm_versions` / `get_gtm_version` | Container publish history / full metadata of one version | `gtm_account_id`, `gtm_container_id` (+ `version_id`) |
+| `list_gtm_versions` / `get_gtm_version` | Container version history, newest first / name, notes and entity names of one version. The API returns no timestamps or author and does not mark which versions were published | `gtm_account_id`, `gtm_container_id` (+ `container_version_id`) |
+| `get_gtm_version_diff` | What a publish changed: added / removed / changed tags, triggers and variables with the changed fields (parameters and trigger conditions key by key), plus built-in variables enabled or disabled. Default compares live with the version created before it | `from_version_id`, `to_version_id` (both optional) |
+
+**GTM API quota:** Tag Manager allows 25 requests per 100 seconds per Google Cloud project. Live reads cost one call; a workspace read costs one call per entity kind; `get_gtm_version_diff` costs two or three. Don't loop over tags with `get_gtm_tag` when `list_gtm_tags` already returns them all.
 
 **GTM prerequisites:** the Tag Manager API must be enabled in the user's GCP project and their account needs at least Read access on the container. OAuth tokens granted before the GTM scope existed must be re-consented (delete `~/.adloop/token.json`, re-run any tool) — an `INSUFFICIENT_SCOPES` structured error means exactly that.
 
@@ -122,6 +125,7 @@ These tools call both APIs internally and return unified results with computed `
 | `draft_gtm_trigger` | Create a trigger (no `trigger_id`) or update one | `name`, `trigger_type` (camelCase API values: `pageview`, `domReady`, `click`, `linkClick`, `formSubmission`, `customEvent`, `elementVisibility`, …), `custom_event_name`, `filters` |
 | `draft_delete_gtm_entity` | Delete a workspace tag or trigger. Referenced triggers are refused with the referencing tags listed | `entity_type` (`tag`/`trigger`), `entity_id` |
 | `draft_publish_gtm_workspace` | Publish a workspace LIVE. Preview lists every pending change — including other people's UI edits | `version_name`, `version_notes`, `workspace_id` |
+| `draft_rollback_gtm_version` | Republish an older container version LIVE. Preview is the diff from the live version to the target; destructive, double confirmation | `version_id` |
 
 **GTM write rules:**
 - Writes are off unless the user sets `gtm.write_enabled: true`; enabling it asks for re-consent with the Tag Manager edit + publish scopes. The Google account also needs Edit (and Publish) permission on the container.
@@ -131,13 +135,16 @@ These tools call both APIs internally and return unified results with computed `
 - Updates and deletes pin the entity fingerprint and publish pins the workspace state; if someone edits the container after the preview, apply refuses. Re-draft rather than retrying.
 - The dry run for a publish runs a Tag Manager quick preview, so compiler errors show up before a version exists. The apply result names the version it replaced (`previous_live_version_id`) — that is the rollback, and if publishing a created version failed, the error carries both ids.
 - Prefer pausing a tag (`draft_gtm_tag` with `paused=true`) over deleting it.
+- **Rollback** (`draft_rollback_gtm_version`): find the target with `list_gtm_versions` and `get_gtm_version_diff`, then present the preview's `diff_from_live` in full, because every listed change goes live. The plan pins the live version, so apply refuses if anyone publishes in between; the result's `previous_live_version_id` is the version to roll back to if the rollback itself has to be undone. Workspaces are not touched and still hold the newer configuration: tell the user that publishing a workspace afterwards brings the rolled-back changes back unless they are reverted there. Custom HTML coming back with the target is gated like a publish.
 
 ### Google Search Console Read Tools (all read-only)
 
 | Tool | When to Use | Key Parameters |
 |------|-------------|----------------|
 | `list_gsc_sites` | First-time discovery — which GSC properties the connected account can access | (none) |
-| `run_gsc_report` | Organic search analytics — clicks, impressions, CTR, avg position by query/page/country/device/date | `site_url` (falls back to `gsc.site_url` config), `dimensions`, date range (ISO or "28daysAgo"), `dimension_filter_groups`, `search_type` |
+| `run_gsc_report` | Organic search analytics: clicks, impressions, CTR, avg position by query/page/country/device/date/searchAppearance/hour | `site_url` (falls back to `gsc.site_url` config), `dimensions`, date range (ISO or "28daysAgo"), `dimension_filter_groups`, `search_type`, `data_state`, `aggregation_type`, `start_row` |
+
+**GSC parameters:** `data_state="final"` (default) returns finalized data only; `"all"` adds the last days' fresh data, which can still change (the response `metadata` names the first incomplete date). The `hour` dimension covers roughly the last 10 days and switches `data_state` to `"hourly_all"` automatically. `aggregation_type` is `"auto"` (default), `"byPage"` or `"byProperty"`; `byProperty` cannot be combined with grouping or filtering by page. One request returns at most 25,000 rows: when a response carries `next_start_row`, pass it as `start_row` for the next page.
 
 **GSC prerequisites:** the Search Console API must be enabled in the user's GCP project and their Google account needs access to the property in Search Console. Tokens granted before the GSC scope existed must re-consent (`INSUFFICIENT_SCOPES` error tells the user how). Property formats: `https://example.com/` (URL-prefix) vs `sc-domain:example.com` (domain property) — use `list_gsc_sites` rather than guessing.
 
@@ -149,6 +156,7 @@ These tools call both APIs internally and return unified results with computed `
 
 - Run it on ad `final_urls`, mobile first — that's where most paid traffic lands. A Lighthouse run takes 10-30s; that's normal, don't retry.
 - Field (CrUX) data is real Chrome users over 28 days; lab data is simulated. When they disagree, trust field. Missing field data means low traffic, not a healthy page.
+- `field.scope` says what the field data covers. `"url"` is this page; `"origin"` means the page had too little traffic of its own and the numbers are the whole site's (origin-wide). Say so when reporting origin data, and don't attribute it to the page. Field data includes FCP and TTFB at p75 when CrUX has them.
 - Pairs with `landing_page_analysis`: pages with traffic but no conversions + a bad performance score = fix speed before touching ad copy.
 
 ### Merchant Center Read Tools (all read-only)

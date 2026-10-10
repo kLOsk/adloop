@@ -54,7 +54,7 @@ gtm:
   account_id: ""
   container_id: ""
   # GTM write tools (draft_gtm_tag / draft_gtm_trigger / draft_delete_gtm_entity
-  # / draft_publish_gtm_workspace). Off by default. Turning it on adds the
+  # / draft_publish_gtm_workspace / draft_rollback_gtm_version). Off by default. Turning it on adds the
   # Tag Manager edit + publish scopes to the OAuth grant — you'll be asked to
   # re-consent once. Turning it back off does not revoke an existing grant;
   # delete ~/.adloop/token.json for that.
