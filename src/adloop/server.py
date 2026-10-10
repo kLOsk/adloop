@@ -615,12 +615,23 @@ def run_ga4_report(
     date_range_end: str = "today",
     property_id: str = "",
     limit: int = 100,
+    dimension_filter: _DictListOpt = None,
+    metric_filter: _DictListOpt = None,
+    order_by: _DictListOpt = None,
+    offset: int = 0,
+    compare_start: str = "",
+    compare_end: str = "",
 ) -> dict:
-    """Run a custom GA4 report with specified dimensions, metrics, and date range.
+    """Run a custom GA4 report with optional filters, ordering, paging and a comparison period.
 
     Returns the property, the date range, the dimension and metric headers,
     one row per dimension combination (values as strings), row_count and
-    total_row_count. At least one dimension or metric is required.
+    total_row_count (plus next_offset while more rows remain). At least one
+    dimension or metric is required. With compare_start/compare_end the
+    comparison period is a second date range: every row then carries a
+    dateRange value of "current" or "comparison", and date_ranges maps both
+    labels to their dates. Invalid filters or ordering return "Validation
+    failed" with details, before anything is sent.
 
     Queries the GA4 Data API. Dimensions and metrics:
     https://developers.google.com/analytics/devguides/reporting/data/v1/api-schema
@@ -628,14 +639,37 @@ def run_ga4_report(
     Args:
         dimensions: GA4 dimension API names, e.g. date, pagePath,
             sessionSource, sessionMedium, country, deviceCategory, eventName.
+            Custom ones (customEvent:...) and every valid name are listed by
+            list_ga4_dimensions_and_metrics.
         metrics: GA4 metric API names, e.g. sessions, totalUsers, newUsers,
-            screenPageViews, conversions, eventCount, bounceRate.
+            screenPageViews, keyEvents, eventCount, bounceRate.
         date_range_start: Start date: "today", "yesterday", "NdaysAgo" (e.g.
             "7daysAgo", "28daysAgo", "90daysAgo"), or "YYYY-MM-DD".
         date_range_end: End date, same formats as date_range_start.
         property_id: GA4 property as "properties/123456789" (see
             get_account_summaries). If empty, uses the default from config.
-        limit: Maximum number of rows returned.
+        limit: Maximum number of rows returned (positive).
+        dimension_filter: Conditions on dimensions, all of which must hold
+            (AND). Each is {"field": <dimension>, "op": <match>, "value":
+            <string>}; op is EXACT (default), BEGINS_WITH, ENDS_WITH,
+            CONTAINS, FULL_REGEXP, PARTIAL_REGEXP, or IN_LIST with "values":
+            [<strings>]. Optional keys: "case_sensitive" (default false) and
+            "not": true to exclude matches. Example: [{"field":
+            "sessionDefaultChannelGroup", "op": "EXACT", "value": "Paid
+            Search"}].
+        metric_filter: Conditions on metrics, applied after aggregation, all
+            of which must hold (AND). Each is {"field": <metric>, "op": <op>,
+            "value": <number>}; op is EQUAL, LESS_THAN, LESS_THAN_OR_EQUAL,
+            GREATER_THAN, GREATER_THAN_OR_EQUAL (or =, <, <=, >, >=), or
+            BETWEEN with "value": [from, to]. Optional "not": true.
+            Example: [{"field": "sessions", "op": ">", "value": 100}].
+        order_by: Sort order as [{"field": <name>, "desc": true|false}]; each
+            field must be one of the requested dimensions or metrics.
+        offset: Zero-based row offset for paging; pass next_offset from the
+            previous result to get the following page.
+        compare_start: Start of the comparison period (same formats as
+            date_range_start). Set together with compare_end.
+        compare_end: End of the comparison period.
     """
     from adloop.ga4.reports import run_ga4_report as _impl
 
@@ -647,6 +681,12 @@ def run_ga4_report(
         date_range_start=date_range_start,
         date_range_end=date_range_end,
         limit=limit,
+        dimension_filter=dimension_filter,
+        metric_filter=metric_filter,
+        order_by=order_by,
+        offset=offset,
+        compare_start=compare_start,
+        compare_end=compare_end,
     )
 
 
@@ -707,6 +747,73 @@ def get_tracking_events(
         property_id=property_id or current_config().ga4.property_id,
         date_range_start=date_range_start,
         date_range_end=date_range_end,
+    )
+
+
+@_tool(title="List Analytics key events", annotations=_READONLY, tags={"ga4"})
+@_safe
+def list_key_events(property_id: str = "") -> dict:
+    """List the key events (conversions) configured on a GA4 property.
+
+    Returns each key event's event name, counting method (ONCE_PER_EVENT or
+    ONCE_PER_SESSION), create time, whether GA4 allows deleting it, whether
+    it is a custom event, and its resource name, sorted by event name, plus
+    the total. Reads the GA4 Admin API (keyEvents.list).
+
+    Args:
+        property_id: GA4 property as "properties/123456789" or the bare
+            numeric ID (see get_account_summaries). If empty, uses the
+            default from config.
+    """
+    from adloop.ga4.tracking import list_key_events as _impl
+
+    return _impl(
+        current_config(),
+        property_id=property_id or current_config().ga4.property_id,
+    )
+
+
+@_tool(title="Analytics dimensions and metrics", annotations=_READONLY, tags={"ga4"})
+@_safe
+def list_ga4_dimensions_and_metrics(
+    search: str = "",
+    kind: str = "all",
+    custom_only: bool = False,
+    include_descriptions: bool | None = None,
+    property_id: str = "",
+) -> dict:
+    """List the dimensions and metrics a GA4 property can report on, including custom ones.
+
+    Returns the exact API names valid in run_ga4_report for this property:
+    each with its UI name, category, whether it is a custom definition
+    (customEvent:..., customUser:...), and deprecated API names; metrics
+    also carry their type and, for calculated metrics, the expression.
+    Reads the GA4 Data API metadata (properties.getMetadata), which uses no
+    report quota.
+
+    Args:
+        search: Case-insensitive text matched against API name, UI name,
+            category, description and deprecated API names (e.g. "channel",
+            "revenue", or the legacy "conversions", which finds keyEvents).
+            Empty returns everything.
+        kind: "all" (default), "dimensions" or "metrics".
+        custom_only: True returns only the property's custom dimensions and
+            metrics.
+        include_descriptions: Include each field's description. Defaults to
+            true when search is set and false otherwise (the full list is
+            long).
+        property_id: GA4 property as "properties/123456789" or the bare
+            numeric ID. If empty, uses the default from config.
+    """
+    from adloop.ga4.reports import get_ga4_metadata as _impl
+
+    return _impl(
+        current_config(),
+        property_id=property_id or current_config().ga4.property_id,
+        search=search,
+        kind=kind,
+        custom_only=custom_only,
+        include_descriptions=include_descriptions,
     )
 
 
@@ -1415,6 +1522,7 @@ def analyze_campaign_conversions(
     reveal click-to-session ratios (GDPR indicator), compare Ads-reported vs
     GA4-reported conversions, and compute cost-per-GA4-conversion.
     Also returns non-paid channel conversion rates for comparison context.
+    GA4 conversions are the property's key events (GA4 metric keyEvents).
 
     Args:
         date_range_start: Start date as "YYYY-MM-DD". Both dates must be set
@@ -1488,7 +1596,8 @@ def attribution_check(
     Checks whether conversions reported by Google Ads match what GA4 records,
     diagnoses GDPR consent gaps, attribution model differences, and missing
     conversion event configuration. Returns both sides' totals with the
-    discrepancy and diagnostic insights.
+    discrepancy and diagnostic insights. GA4 conversions are the property's
+    key events (GA4 metric keyEvents).
 
     Args:
         date_range_start: Start date as "YYYY-MM-DD". Both dates must be set
@@ -4594,6 +4703,38 @@ def draft_key_event(
         property_id=property_id or current_config().ga4.property_id,
         event_name=event_name,
         counting_method=counting_method,
+    )
+
+
+@_tool(title="Draft removing an Analytics key event", annotations=_DESTRUCTIVE, tags={"ga4"})
+@_safe
+def draft_delete_key_event(
+    event_name: str,
+    property_id: str = "",
+) -> dict:
+    """Draft removing a GA4 key event so the event no longer counts as a conversion, returning a PREVIEW.
+
+    The event itself keeps firing and stays in event reports; only its
+    key-event status goes, for future data (key events already recorded are
+    not reclassified). The draft resolves the event name against the
+    property's key events (keyEvents.list), so the preview names the exact
+    key event, its counting method and create time; an unknown name returns
+    the existing key events, and one GA4 marks as not deletable is refused.
+    Returns a preview with a plan_id and warnings; nothing changes until
+    confirm_and_apply applies it (GA4 Admin API keyEvents.delete).
+
+    Args:
+        event_name: Event name of the key event to remove, exactly as listed
+            by list_key_events (e.g. "sign_up"). Required.
+        property_id: Numeric GA4 property ID, with or without the "properties/"
+            prefix. If empty, uses the default from config.
+    """
+    from adloop.ga4.write import draft_delete_key_event as _impl
+
+    return _impl(
+        current_config(),
+        property_id=property_id or current_config().ga4.property_id,
+        event_name=event_name,
     )
 
 

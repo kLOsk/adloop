@@ -41,6 +41,22 @@ def _safe_float(val) -> float:
         return 0.0
 
 
+# GA4 renamed "conversions" to "keyEvents" (March 2024). The legacy name is
+# still accepted as an alias, but every report here requests the current
+# one; output fields keep their "conversions" names so callers stay stable.
+GA4_KEY_EVENTS_METRIC = "keyEvents"
+
+
+def _key_events(row: dict) -> int | float:
+    """The keyEvents value of a GA4 row as a number.
+
+    GA4 reports key events as a float metric, so the value can arrive as
+    "12" or "12.0" (or fractional); int() alone would read "12.0" as 0.
+    """
+    value = _safe_float(row.get(GA4_KEY_EVENTS_METRIC, 0))
+    return int(value) if value.is_integer() else round(value, 2)
+
+
 # ---------------------------------------------------------------------------
 # Tool 1: analyze_campaign_conversions
 # ---------------------------------------------------------------------------
@@ -78,7 +94,7 @@ def analyze_campaign_conversions(
         config,
         property_id=property_id,
         dimensions=["sessionCampaignName", "sessionSource", "sessionMedium"],
-        metrics=["sessions", "conversions", "engagedSessions", "totalUsers"],
+        metrics=["sessions", GA4_KEY_EVENTS_METRIC, "engagedSessions", "totalUsers"],
         date_range_start=start,
         date_range_end=end,
         limit=1000,
@@ -95,7 +111,7 @@ def analyze_campaign_conversions(
         source = row.get("sessionSource", "")
         medium = row.get("sessionMedium", "")
         sessions = _safe_int(row.get("sessions", 0))
-        conversions = _safe_int(row.get("conversions", 0))
+        conversions = _key_events(row)
         engaged = _safe_int(row.get("engagedSessions", 0))
 
         is_paid = source == "google" and medium == "cpc"
@@ -219,7 +235,7 @@ def landing_page_analysis(
         config,
         property_id=property_id,
         dimensions=["pagePath", "sessionSource", "sessionMedium"],
-        metrics=["sessions", "conversions", "engagedSessions", "bounceRate"],
+        metrics=["sessions", GA4_KEY_EVENTS_METRIC, "engagedSessions", "bounceRate"],
         date_range_start=start,
         date_range_end=end,
         limit=1000,
@@ -256,7 +272,7 @@ def landing_page_analysis(
             "sessions": 0, "conversions": 0, "engaged": 0, "bounce_rate_sum": 0.0, "count": 0,
         })
         bucket["sessions"] += _safe_int(row.get("sessions", 0))
-        bucket["conversions"] += _safe_int(row.get("conversions", 0))
+        bucket["conversions"] += _key_events(row)
         bucket["engaged"] += _safe_int(row.get("engagedSessions", 0))
         bucket["bounce_rate_sum"] += _safe_float(row.get("bounceRate", 0))
         bucket["count"] += 1
@@ -371,7 +387,7 @@ def attribution_check(
         config,
         property_id=property_id,
         dimensions=["sessionSource", "sessionMedium"],
-        metrics=["sessions", "conversions"],
+        metrics=["sessions", GA4_KEY_EVENTS_METRIC],
         date_range_start=start,
         date_range_end=end,
         limit=200,
@@ -410,7 +426,7 @@ def attribution_check(
         source = row.get("sessionSource", "")
         medium = row.get("sessionMedium", "")
         sessions = _safe_int(row.get("sessions", 0))
-        conversions = _safe_int(row.get("conversions", 0))
+        conversions = _key_events(row)
 
         ga4_all_conversions += conversions
 
@@ -458,7 +474,7 @@ def attribution_check(
         insights.append(
             f"Google Ads reports {ads_total_conversions} conversions but GA4 shows 0 "
             f"from paid traffic — possible causes: GDPR consent blocking GA4, "
-            f"different attribution models, or GA4 conversion events not marked as conversions"
+            f"different attribution models, or the GA4 events not marked as key events"
         )
     elif ads_total_conversions == 0 and ga4_paid_conversions > 0:
         insights.append(
@@ -491,7 +507,7 @@ def attribution_check(
             insights.append(
                 f"Event '{ev_detail['event_name']}' fires {ev_detail['total_count']}x "
                 f"but none from paid traffic — users may convert through other channels, "
-                f"or the event is not marked as a conversion in GA4"
+                f"or the event is not marked as a key event in GA4"
             )
 
     return {

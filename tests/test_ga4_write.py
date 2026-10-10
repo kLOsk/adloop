@@ -116,3 +116,156 @@ class TestApply:
             result = ads_write._execute_plan(config, plan)
 
         assert result["event_name"] == "sign_up"
+
+
+# ---------------------------------------------------------------------------
+# Removing a key event
+# ---------------------------------------------------------------------------
+
+
+def _key_event(name="sign_up", deletable=True, method="ONCE_PER_SESSION"):
+    ke = MagicMock()
+    ke.event_name = name
+    ke.counting_method.name = method
+    ke.create_time = None
+    ke.deletable = deletable
+    ke.custom = True
+    ke.name = f"properties/123456/keyEvents/{name}-1"
+    ke.default_value = None
+    return ke
+
+
+def _admin(*key_events):
+    admin = MagicMock()
+    admin.list_key_events.return_value = list(key_events)
+    by_name = {ke.name: ke for ke in key_events}
+    admin.get_key_event.side_effect = lambda name: by_name[name]
+    return admin
+
+
+class TestDraftDelete:
+    def test_preview_names_the_event_and_warns_future_only(self, config):
+        admin = _admin(_key_event("sign_up"), _key_event("purchase"))
+        with patch("adloop.ga4.client.get_admin_client", return_value=admin):
+            result = ga4_write.draft_delete_key_event(
+                config, property_id="properties/123456", event_name="sign_up",
+            )
+
+        admin.list_key_events.assert_called_once_with(parent="properties/123456")
+        assert result["operation"] == "delete_key_event"
+        assert result["entity_id"] == "sign_up"
+        assert result["changes"]["resource_name"] == "properties/123456/keyEvents/sign_up-1"
+        assert result["changes"]["counting_method"] == "ONCE_PER_SESSION"
+        assert result["plan_id"]
+        warnings = " ".join(result["warnings"])
+        assert "'sign_up'" in warnings
+        assert "FUTURE reporting only" in warnings
+        assert "keeps firing" in warnings
+        admin.delete_key_event.assert_not_called()
+
+    def test_unknown_event_lists_the_existing_key_events(self, config):
+        admin = _admin(_key_event("purchase"), _key_event("generate_lead"))
+        with patch("adloop.ga4.client.get_admin_client", return_value=admin):
+            result = ga4_write.draft_delete_key_event(
+                config, property_id="123456", event_name="sign_up",
+            )
+        assert "not a key event" in result["error"]
+        assert result["key_events"] == ["generate_lead", "purchase"]
+
+    def test_refuses_undeletable_key_events(self, config):
+        admin = _admin(_key_event("purchase", deletable=False))
+        with patch("adloop.ga4.client.get_admin_client", return_value=admin):
+            result = ga4_write.draft_delete_key_event(
+                config, property_id="123456", event_name="purchase",
+            )
+        assert "not deletable" in result["error"]
+
+    def test_validates_inputs_without_calling_the_api(self, config):
+        with patch("adloop.ga4.client.get_admin_client") as get_admin:
+            result = ga4_write.draft_delete_key_event(
+                config, property_id="abc", event_name="",
+            )
+        details = " ".join(result["details"])
+        assert "numeric" in details and "event_name is required" in details
+        get_admin.assert_not_called()
+
+    def test_respects_blocked_operations(self, config):
+        config.safety.blocked_operations = ["delete_key_event"]
+        result = ga4_write.draft_delete_key_event(
+            config, property_id="123456", event_name="sign_up",
+        )
+        assert "blocked" in result["error"].lower()
+
+
+class TestApplyDelete:
+    def _plan(self, config):
+        admin = _admin(_key_event("sign_up"))
+        with patch("adloop.ga4.client.get_admin_client", return_value=admin):
+            preview = ga4_write.draft_delete_key_event(
+                config, property_id="123456", event_name="sign_up",
+            )
+        return preview["plan_id"], admin
+
+    def test_dry_run_rechecks_the_key_event_and_deletes_nothing(self, config):
+        from adloop.ads import write as ads_write
+
+        plan_id, admin = self._plan(config)
+
+        def _no_ads_client(*_a, **_k):
+            raise AssertionError("Ads client must not be built for GA4 plans")
+
+        with (
+            patch("adloop.ads.client.get_ads_client", _no_ads_client),
+            patch("adloop.ga4.client.get_admin_client", return_value=admin),
+        ):
+            result = ads_write.confirm_and_apply(config, plan_id=plan_id, dry_run=True)
+
+        assert result["status"] == "DRY_RUN_SUCCESS"
+        assert result["checks"] == {"key_event_exists": True, "deletable": True}
+        assert "Google Analytics" in result["note"]
+        admin.get_key_event.assert_called_once_with(
+            name="properties/123456/keyEvents/sign_up-1"
+        )
+        admin.delete_key_event.assert_not_called()
+
+    def test_dry_run_fails_when_the_key_event_became_undeletable(self, config):
+        from adloop.ads import write as ads_write
+
+        plan_id, _ = self._plan(config)
+        admin = _admin(_key_event("sign_up", deletable=False))
+        with patch("adloop.ga4.client.get_admin_client", return_value=admin):
+            result = ads_write.confirm_and_apply(config, plan_id=plan_id, dry_run=True)
+
+        assert result["status"] == "DRY_RUN_FAILED"
+        assert "not deletable" in result["error"]
+        assert "Google Analytics" in result["message"]
+
+    def test_apply_deletes_via_admin_api(self, config):
+        from adloop.ads import write as ads_write
+
+        config.safety.require_dry_run = False
+        plan_id, admin = self._plan(config)
+        with patch("adloop.ga4.client.get_admin_client", return_value=admin):
+            result = ads_write.confirm_and_apply(config, plan_id=plan_id, dry_run=False)
+
+        assert result["status"] == "APPLIED", result
+        admin.delete_key_event.assert_called_once_with(
+            name="properties/123456/keyEvents/sign_up-1"
+        )
+        assert result["result"]["deleted"] is True
+        assert result["result"]["event_name"] == "sign_up"
+
+    def test_create_key_event_dry_run_still_runs_no_checks(self, config):
+        from adloop.ads import write as ads_write
+
+        preview = ga4_write.draft_key_event(
+            config, property_id="123456", event_name="sign_up",
+        )
+        with patch("adloop.ga4.client.get_admin_client") as get_admin:
+            result = ads_write.confirm_and_apply(
+                config, plan_id=preview["plan_id"], dry_run=True,
+            )
+        assert result["status"] == "DRY_RUN_SUCCESS"
+        assert "checks" not in result
+        assert "Google Analytics" in result["message"]
+        get_admin.assert_not_called()
