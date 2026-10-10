@@ -1461,6 +1461,7 @@ def analyze_campaign_conversions(
     reveal click-to-session ratios (GDPR indicator), compare Ads-reported vs
     GA4-reported conversions, and compute cost-per-GA4-conversion.
     Also returns non-paid channel conversion rates for comparison context.
+    GA4 conversions are the property's key events (GA4 metric keyEvents).
 
     Args:
         date_range_start: Start date as "YYYY-MM-DD". Both dates must be set
@@ -1534,7 +1535,8 @@ def attribution_check(
     Checks whether conversions reported by Google Ads match what GA4 records,
     diagnoses GDPR consent gaps, attribution model differences, and missing
     conversion event configuration. Returns both sides' totals with the
-    discrepancy and diagnostic insights.
+    discrepancy and diagnostic insights. GA4 conversions are the property's
+    key events (GA4 metric keyEvents).
 
     Args:
         date_range_start: Start date as "YYYY-MM-DD". Both dates must be set
