@@ -5168,6 +5168,10 @@ def draft_upload_call_conversions(
     stays unusable are skipped and reported in `skipped_rows` instead of being
     uploaded to no effect.
 
+    Rows that repeat inside one file are named in `dedup_warnings`. A call
+    upload has no dedup key at Google, so each of them still goes out as its
+    own conversion — the warning is the only place that says so.
+
     Returns a preview with a plan_id, the row counts and the skipped rows;
     nothing is uploaded until that preview is confirmed.
 
@@ -5219,6 +5223,10 @@ def draft_upload_enhanced_conversions_for_leads(
     audit log. The target conversion action must be UPLOAD_CLICKS-type.
 
     An Order ID column makes re-uploads dedup instead of double-counting.
+
+    Rows that repeat inside one file are named in `dedup_warnings`. They are
+    still uploaded as separate conversions — the Order ID covers re-uploads of
+    the file, not a record that appears twice inside it.
 
     Local file only: on the hosted server this tool refuses, because it would
     read a path on the server rather than the caller's machine.

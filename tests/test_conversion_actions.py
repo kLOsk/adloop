@@ -747,6 +747,17 @@ class TestRedactCallerId:
         assert conversion_actions._redact_caller_id("") == ""
 
 
+class TestJoinSourceLines:
+    def test_reading_order_not_string_order(self):
+        """Line 10 belongs after line 9, not between 1 and 2."""
+        assert conversion_actions._join_source_lines([10, 9, 12]) == (
+            "9, 10 and 12"
+        )
+
+    def test_one_line(self):
+        assert conversion_actions._join_source_lines([4]) == "4"
+
+
 class TestConsentParam:
     def test_none_returns_none(self):
         assert conversion_actions._consent_from_param(None) is None
@@ -1105,6 +1116,35 @@ class TestDraftUploadCallConversions:
             assert "***" in s["caller_id"]
             assert s["caller_id"] != "+14155550142"
 
+    def _draft(self, config, tmp_path, rows: str):
+        path = tmp_path / "dup.csv"
+        path.write_text(_CALL_HEADER + rows)
+        return conversion_actions.draft_upload_call_conversions(
+            config, customer_id="1234567890", csv_path=str(path),
+        )
+
+    def test_duplicate_rows_are_named_in_dedup_warnings(self, config, tmp_path):
+        """Two identical rows upload twice, and nothing else says so."""
+        row = "+14155550142,2026-03-01T12:00:00Z,A,2026-03-01T13:00:00Z,10,USD\n"
+        result = self._draft(config, tmp_path, row + row)
+        warnings = result["changes"]["dedup_warnings"]
+        assert len(warnings) == 1
+        assert "lines 2 and 3" in warnings[0]
+        assert "same call" in warnings[0]
+
+    def test_the_value_is_not_part_of_the_duplicate_key(self, config, tmp_path):
+        """Same call, different value: still almost certainly one export."""
+        first = "+14155550142,2026-03-01T12:00:00Z,A,2026-03-01T13:00:00Z,10,USD\n"
+        second = "+14155550142,2026-03-01T12:00:00Z,A,2026-03-01T13:00:00Z,99,USD\n"
+        result = self._draft(config, tmp_path, first + second)
+        assert "lines 2 and 3" in result["changes"]["dedup_warnings"][0]
+
+    def test_a_different_call_time_is_not_a_duplicate(self, config, tmp_path):
+        first = "+14155550142,2026-03-01T12:00:00Z,A,2026-03-01T13:00:00Z,10,USD\n"
+        second = "+14155550142,2026-03-01T18:00:00Z,A,2026-03-01T19:00:00Z,10,USD\n"
+        result = self._draft(config, tmp_path, first + second)
+        assert result["changes"]["dedup_warnings"] == []
+
     def test_raw_rows_live_outside_plan_changes(self, config, tmp_path):
         """The applier needs the raw caller_id; `changes` must never carry it.
 
@@ -1398,6 +1438,33 @@ class TestDraftUploadEcForLeads:
         assert c["rows_with_email"] == 1
         assert c["rows_with_phone"] == 2
         assert c["distinct_conversion_actions"] == ["Job Close"]
+
+    def _draft(self, config, tmp_path, rows: str):
+        path = tmp_path / "dup-ec.csv"
+        path.write_text(_EC_HEADER + "\n" + rows)
+        return (
+            conversion_actions.draft_upload_enhanced_conversions_for_leads(
+                config, customer_id="1234567890", csv_path=str(path),
+            )
+        )
+
+    def test_duplicate_leads_are_named_in_dedup_warnings(self, config, tmp_path):
+        row = ("user@example.com,+14155550142,Test,User,Job Close,"
+               "2026-03-01T12:00:00Z,500.00,USD\n")
+        result = self._draft(config, tmp_path, row + row)
+        warnings = result["changes"]["dedup_warnings"]
+        assert any("lines 2 and 3" in w and "same lead" in w for w in warnings), (
+            warnings
+        )
+
+    def test_a_different_conversion_time_is_not_a_duplicate(self, config, tmp_path):
+        first = ("user@example.com,+14155550142,Test,User,Job Close,"
+                 "2026-03-01T12:00:00Z,500.00,USD\n")
+        second = ("user@example.com,+14155550142,Test,User,Job Close,"
+                  "2026-04-01T12:00:00Z,500.00,USD\n")
+        result = self._draft(config, tmp_path, first + second)
+        warnings = result["changes"]["dedup_warnings"]
+        assert not any("same lead" in w for w in warnings), warnings
 
     def test_no_raw_pii_in_plan_changes(self, config, tmp_path):
         # The stored plan must contain ONLY hashes for PII, never raw values.
