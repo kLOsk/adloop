@@ -64,6 +64,20 @@ def tool_visibility() -> ToolVisibility | None:
     return _tool_visibility
 
 
+def default_setting_hint(config_key: str, dashboard_page: str) -> str:
+    """How to set a missing default, phrased for where AdLoop runs.
+
+    Self-hosted it is a key in the config file; a hosted runtime has no
+    config file the user can edit, so it names the dashboard page instead.
+    """
+    if _deployment_mode == "server":
+        return (
+            f"choose a default under {dashboard_page} in the AdLoop Cloud "
+            "dashboard (agencies: per client under Settings → Clients)"
+        )
+    return f"set {config_key} in the config (~/.adloop/config.yaml)"
+
+
 def deployment_mode() -> DeploymentMode:
     """Return the process-wide deployment mode ("local" or "server")."""
     return _deployment_mode

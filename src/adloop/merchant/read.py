@@ -126,6 +126,8 @@ def get_merchant_feed_health(
 
     account_id = str(account_id or "").strip() or config.merchant.account_id.strip()
     if not account_id:
+        from adloop.runtime import default_setting_hint
+
         return {
             "error": (
                 "account_id is required: no Merchant Center account was "
@@ -133,8 +135,9 @@ def get_merchant_feed_health(
             ),
             "hint": (
                 "Call list_merchant_accounts to find the numeric Merchant "
-                "Center ID and pass it as account_id, or set "
-                "merchant.account_id in the config to make it the default."
+                "Center ID and pass it as account_id, or "
+                + default_setting_hint("merchant.account_id", "Settings → Google & accounts")
+                + "."
             ),
         }
     if not account_id.isdigit():

@@ -103,9 +103,13 @@ def resolve_account(config: AdLoopConfig, ad_account_id: str = "") -> str:
     """Explicit id wins, then ``reddit.ad_account_id`` from the config."""
     account = (ad_account_id or config.reddit.ad_account_id or "").strip()
     if not account:
+        from adloop.runtime import default_setting_hint
+
         raise ValueError(
-            "ad_account_id is required — pass it explicitly (see "
-            "list_reddit_accounts) or set reddit.ad_account_id in the config."
+            "ad_account_id is required: pass it explicitly (see "
+            "list_reddit_accounts) or "
+            + default_setting_hint("reddit.ad_account_id", "Settings → Reddit Ads")
+            + "."
         )
     return account
 

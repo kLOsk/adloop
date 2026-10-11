@@ -101,9 +101,13 @@ def run_gsc_report(
         site_url = config.gsc.site_url
 
     if not site_url:
+        from adloop.runtime import default_setting_hint
+
         return {
-            "error": "site_url is required. Pass it as an argument or set "
-                     "gsc.site_url in ~/.adloop/config.yaml."
+            "error": "site_url is required. Pass it as an argument (see "
+                     "list_gsc_sites) or "
+                     + default_setting_hint("gsc.site_url", "Settings → Google & accounts")
+                     + "."
         }
 
     dimensions = [_normalize_dimension(d) for d in (dimensions or ["query"])]

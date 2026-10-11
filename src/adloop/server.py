@@ -155,10 +155,13 @@ def _gtm_defaults(account_id: str, container_id: str) -> tuple[str, str]:
     account_id = account_id or cfg.account_id
     container_id = container_id or cfg.container_id
     if not account_id or not container_id:
+        from adloop.runtime import default_setting_hint
+
         raise ValueError(
-            "gtm_account_id and gtm_container_id are required — pass them "
-            "explicitly (see list_gtm_accounts / list_gtm_containers) or set "
-            "gtm.account_id / gtm.container_id in the config."
+            "gtm_account_id and gtm_container_id are required: pass them "
+            "explicitly (see list_gtm_accounts / list_gtm_containers) or "
+            + default_setting_hint("gtm.account_id / gtm.container_id", "Settings → Google & accounts")
+            + "."
         )
     return account_id, container_id
 
@@ -1790,9 +1793,12 @@ def list_gtm_containers(gtm_account_id: str = "") -> dict:
 
     gtm_account_id = gtm_account_id or current_config().gtm.account_id
     if not gtm_account_id:
+        from adloop.runtime import default_setting_hint
+
         raise ValueError(
-            "gtm_account_id is required — call list_gtm_accounts first or "
-            "set gtm.account_id in the config."
+            "gtm_account_id is required: call list_gtm_accounts first or "
+            + default_setting_hint("gtm.account_id", "Settings → Google & accounts")
+            + "."
         )
     return _impl(current_config(), account_id=gtm_account_id)
 
