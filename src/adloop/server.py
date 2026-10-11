@@ -5152,7 +5152,8 @@ def draft_upload_call_conversions(
     Call Start Time, Conversion Name, Conversion Time, Conversion Value,
     Conversion Currency. The Conversion Name must match an existing
     UPLOAD_CALLS-type conversion action — verified against the account while
-    drafting, so a typo fails here rather than after the upload.
+    drafting, so a typo fails here rather than after the upload. Optional
+    `Ad User Data` and `Ad Personalization` columns carry consent per row.
 
     Local file only: on the hosted server this tool refuses, because it would
     read a path on the server rather than the caller's machine.
@@ -5180,7 +5181,9 @@ def draft_upload_call_conversions(
             leaves such numbers unusable and the row is skipped.
         consent: Consent signals for GDPR/EEA, as an object with "ad_user_data"
             and/or "ad_personalization", each "GRANTED", "DENIED" or
-            "UNSPECIFIED". None sends UNSPECIFIED.
+            "UNSPECIFIED". None sends UNSPECIFIED. A row whose own "Ad User
+            Data" / "Ad Personalization" columns are filled in overrides this
+            for that row; empty cells fall back to it.
         customer_id: Google Ads customer ID (digits, e.g. "1234567890"). Empty
             uses the configured default account.
     """
@@ -5212,7 +5215,8 @@ def draft_upload_enhanced_conversions_for_leads(
     matching hashed customer PII back to the Google users who clicked the ads.
     The CSV holds RAW PII in columns: Email, Phone
     Number, First Name, Last Name (plus Conversion Name, Conversion Time,
-    Conversion Value, Conversion Currency; optional Order ID dedup key).
+    Conversion Value, Conversion Currency; optional Order ID dedup key, and
+    optional `Ad User Data` / `Ad Personalization` consent columns).
 
     PII is normalized and SHA-256-hashed AT PREVIEW TIME — only the hashes are
     stored in the plan. Raw email/phone/name never land in the plan or the
@@ -5236,7 +5240,9 @@ def draft_upload_enhanced_conversions_for_leads(
             or its complete address identifies the lead.
         consent: Consent signals for GDPR/EEA, as an object with "ad_user_data"
             and/or "ad_personalization", each "GRANTED", "DENIED" or
-            "UNSPECIFIED". None sends UNSPECIFIED.
+            "UNSPECIFIED". None sends UNSPECIFIED. A row whose own "Ad User
+            Data" / "Ad Personalization" columns are filled in overrides this
+            for that row; empty cells fall back to it.
         customer_id: Google Ads customer ID (digits, e.g. "1234567890"). Empty
             uses the configured default account.
     """

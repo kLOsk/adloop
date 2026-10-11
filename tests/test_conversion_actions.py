@@ -1105,6 +1105,107 @@ class TestDraftUploadCallConversions:
             assert "***" in s["caller_id"]
             assert s["caller_id"] != "+14155550142"
 
+    _CONSENT_COLUMNS = ",Ad User Data,Ad Personalization"
+
+    def _draft_with_consent(
+        self, config, tmp_path, rows, *, header_extra=None, consent=None
+    ):
+        header = _CALL_HEADER.rstrip("\n") + (
+            self._CONSENT_COLUMNS if header_extra is None else header_extra
+        )
+        path = tmp_path / "consent.csv"
+        path.write_text(header + "\n" + rows)
+        return conversion_actions.draft_upload_call_conversions(
+            config, customer_id="1234567890", csv_path=str(path), consent=consent,
+        )
+
+    def test_per_row_consent_overrides_the_argument(self, config, tmp_path):
+        """A CRM export mixes people who opted in with people who did not."""
+        rows = (
+            "+14155550142,2026-03-01T12:00:00Z,A,2026-03-01T13:00:00Z,10,USD,"
+            "GRANTED,DENIED\n"
+            "+14155550143,2026-03-02T12:00:00Z,A,2026-03-02T13:00:00Z,10,USD,,\n"
+        )
+        result = self._draft_with_consent(
+            config, tmp_path, rows,
+            consent={"ad_user_data": "DENIED", "ad_personalization": "DENIED"},
+        )
+        stored = _stored_plan(result).apply_only_payload["rows"]
+        assert stored[0]["consent"] == {
+            "ad_user_data": "GRANTED", "ad_personalization": "DENIED",
+        }
+        # Empty cells fall back to the file-wide argument.
+        assert stored[1]["consent"] == {
+            "ad_user_data": "DENIED", "ad_personalization": "DENIED",
+        }
+
+    def test_consent_headers_are_matched_case_insensitively(self, config, tmp_path):
+        rows = (
+            "+14155550142,2026-03-01T12:00:00Z,A,2026-03-01T13:00:00Z,10,USD,"
+            "GRANTED,DENIED\n"
+        )
+        result = self._draft_with_consent(
+            config, tmp_path, rows,
+            header_extra=",ad user data,ad personalization",
+        )
+        stored = _stored_plan(result).apply_only_payload["rows"]
+        assert stored[0]["consent"]["ad_user_data"] == "GRANTED"
+
+    def test_an_invalid_consent_cell_skips_the_row(self, config, tmp_path):
+        rows = (
+            "+14155550142,2026-03-01T12:00:00Z,A,2026-03-01T13:00:00Z,10,USD,"
+            "yes,no\n"
+            "+14155550143,2026-03-02T12:00:00Z,A,2026-03-02T13:00:00Z,10,USD,"
+            "GRANTED,DENIED\n"
+        )
+        result = self._draft_with_consent(config, tmp_path, rows)
+        assert result["changes"]["skipped_count"] == 1
+        skipped = result["changes"]["skipped_rows"][0]
+        assert skipped["row"] == 2
+        assert "Ad User Data" in skipped["reason"]
+        # Errors never echo the cell.
+        assert "yes" not in skipped["reason"]
+
+    def test_empty_consent_cells_without_argument_warn(self, config, tmp_path):
+        # The row ends after the required columns: a file with consent columns
+        # whose rows simply never fill them, which is what exports look like.
+        rows = "+14155550142,2026-03-01T12:00:00Z,A,2026-03-01T13:00:00Z,10,USD\n"
+        result = self._draft_with_consent(config, tmp_path, rows)
+        assert result["changes"]["row_count"] == 1
+        warnings = result["changes"]["parse_warnings"]
+        assert any("UNSPECIFIED" in w for w in warnings), warnings
+
+    def test_a_file_where_every_row_has_bad_consent_says_why(
+        self, config, tmp_path
+    ):
+        """The generic 'zero rows' error must not hide the actual reason."""
+        rows = (
+            "+14155550142,2026-03-01T12:00:00Z,A,2026-03-01T13:00:00Z,10,USD,"
+            "Yep,Nope\n"
+        )
+        result = self._draft_with_consent(config, tmp_path, rows)
+        assert "zero conversion rows" in result["error"]
+        assert result["skipped_rows"][0]["row"] == 2
+        assert "Ad User Data" in result["skipped_rows"][0]["reason"]
+
+    def test_a_filled_consent_column_is_not_warned_about(self, config, tmp_path):
+        rows = (
+            "+14155550142,2026-03-01T12:00:00Z,A,2026-03-01T13:00:00Z,10,USD,"
+            "GRANTED,DENIED\n"
+        )
+        result = self._draft_with_consent(config, tmp_path, rows)
+        warnings = result["changes"]["parse_warnings"]
+        assert not any("UNSPECIFIED" in w for w in warnings), warnings
+
+    def test_a_file_without_consent_columns_stays_quiet(self, config, tmp_path):
+        """Today's files must not start warning out of nowhere."""
+        path = self._write(tmp_path)
+        result = conversion_actions.draft_upload_call_conversions(
+            config, customer_id="1234567890", csv_path=path,
+        )
+        warnings = result["changes"]["parse_warnings"]
+        assert not any("UNSPECIFIED" in w for w in warnings), warnings
+
     def test_raw_rows_live_outside_plan_changes(self, config, tmp_path):
         """The applier needs the raw caller_id; `changes` must never carry it.
 
@@ -1277,6 +1378,25 @@ class TestApplyUploadCallConversions:
         assert sent[0].consent.ad_user_data == enums.GRANTED
         assert sent[0].consent.ad_personalization == enums.DENIED
 
+    def test_the_row_consent_wins_over_the_plan_default(self, tmp_path):
+        """The file-wide value is the fallback, not the last word."""
+        upload = _FakeUploadService(results_count=2)
+        ads = _FakeGoogleAdsService([
+            _FakeSearchRow("My Action", "customers/1/conversionActions/777")
+        ])
+        client = _client_with(upload_service=upload, ads_service=ads)
+        changes = self._changes(consent={
+            "ad_user_data": "GRANTED", "ad_personalization": "GRANTED",
+        })
+        changes["rows"][0]["consent"] = {
+            "ad_user_data": "DENIED", "ad_personalization": "DENIED",
+        }
+        conversion_actions._apply_upload_call_conversions(client, "1", changes)
+        sent = upload.called_with["conversions"]
+        enums = client.enums.ConsentStatusEnum
+        assert sent[0].consent.ad_user_data == enums.DENIED
+        assert sent[1].consent.ad_user_data == enums.GRANTED
+
     def test_empty_rows_returns_error(self, tmp_path):
         upload = _FakeUploadService()
         ads = _FakeGoogleAdsService([])
@@ -1398,6 +1518,36 @@ class TestDraftUploadEcForLeads:
         assert c["rows_with_email"] == 1
         assert c["rows_with_phone"] == 2
         assert c["distinct_conversion_actions"] == ["Job Close"]
+
+    def test_per_row_consent_from_the_csv(self, config, tmp_path):
+        header = _EC_HEADER + ",Ad User Data,Ad Personalization"
+        row = ("user@example.com,+14155550142,Test,User,Job Close,"
+               "2026-03-01T12:00:00Z,500.00,USD,GRANTED,DENIED")
+        path = tmp_path / "consent-ec.csv"
+        path.write_text(header + "\n" + row + "\n")
+        result = (
+            conversion_actions.draft_upload_enhanced_conversions_for_leads(
+                config, customer_id="1234567890", csv_path=str(path),
+            )
+        )
+        stored = _stored_plan(result).apply_only_payload["rows"]
+        assert stored[0]["consent"] == {
+            "ad_user_data": "GRANTED", "ad_personalization": "DENIED",
+        }
+
+    def test_empty_consent_cells_warn(self, config, tmp_path):
+        header = _EC_HEADER + ",Ad User Data,Ad Personalization"
+        row = ("user@example.com,+14155550142,Test,User,Job Close,"
+               "2026-03-01T12:00:00Z,500.00,USD,,")
+        path = tmp_path / "consent-ec.csv"
+        path.write_text(header + "\n" + row + "\n")
+        result = (
+            conversion_actions.draft_upload_enhanced_conversions_for_leads(
+                config, customer_id="1234567890", csv_path=str(path),
+            )
+        )
+        warnings = result["changes"]["parse_warnings"]
+        assert any("UNSPECIFIED" in w for w in warnings), warnings
 
     def test_no_raw_pii_in_plan_changes(self, config, tmp_path):
         # The stored plan must contain ONLY hashes for PII, never raw values.
@@ -1645,6 +1795,22 @@ class TestApplyUploadEcForLeads:
         enums = client.enums.ConsentStatusEnum
         assert sent[0].consent.ad_user_data == enums.GRANTED
         assert sent[0].consent.ad_personalization == enums.DENIED
+
+    def test_the_row_consent_wins_over_the_plan_default(self, tmp_path):
+        client, upload = self._client(results_count=2)
+        changes = self._changes(consent={
+            "ad_user_data": "GRANTED", "ad_personalization": "GRANTED",
+        })
+        changes["rows"][0]["consent"] = {
+            "ad_user_data": "DENIED", "ad_personalization": "DENIED",
+        }
+        conversion_actions._apply_upload_enhanced_conversions_for_leads(
+            client, "1", changes
+        )
+        sent = upload.called_with["conversions"]
+        enums = client.enums.ConsentStatusEnum
+        assert sent[0].consent.ad_user_data == enums.DENIED
+        assert sent[1].consent.ad_user_data == enums.GRANTED
 
     def test_gaql_escape_used_for_ec_resolver(self, tmp_path):
         ads = _FakeGoogleAdsService([

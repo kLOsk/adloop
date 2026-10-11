@@ -685,6 +685,11 @@ def _gaql_escape(s: str) -> str:
     return s.replace("\\", "\\\\").replace("'", "\\'")
 
 
+# Consent status values Google's ConsentStatus enum accepts, UNKNOWN included.
+# Shared with the per-row columns so the two cannot drift apart.
+_CONSENT_VALUES = frozenset({"GRANTED", "DENIED", "UNSPECIFIED", "UNKNOWN"})
+
+
 def _consent_from_param(consent: dict | None) -> dict | None:
     """Validate + normalize the ``consent`` tool parameter.
 
@@ -711,17 +716,96 @@ def _consent_from_param(consent: dict | None) -> dict | None:
             f"consent has unknown key(s): {', '.join(unknown)}. Use only "
             "ad_user_data and ad_personalization."
         )
-    valid = {"UNSPECIFIED", "UNKNOWN", "GRANTED", "DENIED"}
     out: dict[str, str] = {}
     for key in known:
         raw = str(consent.get(key, "UNSPECIFIED") or "UNSPECIFIED").upper()
-        if raw not in valid:
+        if raw not in _CONSENT_VALUES:
             raise ValueError(
                 f"consent.{key}='{raw}' is invalid. Use one of: "
                 "GRANTED, DENIED, UNSPECIFIED, UNKNOWN."
             )
         out[key] = raw
     return out
+
+
+# Google's own template carries consent per person, not per file: Consent is a
+# field on each Conversion, so a CRM export that mixes people who opted in with
+# people who did not can say so row by row. The spelling is Google's.
+_CONSENT_HEADERS = {
+    "Ad User Data": "ad_user_data",
+    "Ad Personalization": "ad_personalization",
+}
+def _row_consent(
+    raw: list[str], optional_col: dict[str, int]
+) -> tuple[dict[str, str] | None, str]:
+    """The consent one CSV row specifies: ``(consent, problem)``.
+
+    The dict holds only the fields that row actually filled in, so the
+    file-wide ``consent`` argument stays in charge of the rest. An unusable
+    value is reported without echoing the cell — errors never carry file
+    content.
+    """
+    out: dict[str, str] = {}
+    for header, key in _CONSENT_HEADERS.items():
+        index = optional_col.get(header)
+        if index is None:
+            continue
+        value = (raw[index] or "").strip().upper()
+        if not value:
+            continue
+        if value not in _CONSENT_VALUES:
+            return None, (
+                f"{header} is not one of GRANTED, DENIED, UNSPECIFIED or "
+                "UNKNOWN"
+            )
+        out[key] = value
+    return (out or None), ""
+
+
+def _effective_consent(
+    row_consent: dict | None, default: dict | None
+) -> dict | None:
+    """What one row uploads with: its own cells over the file-wide default.
+
+    Filling the remaining field with UNSPECIFIED keeps each stored row readable
+    on its own; ``_apply_consent`` would default it that way anyway.
+    """
+    if not row_consent and not default:
+        return None
+    merged = dict(default or {})
+    merged.update(row_consent or {})
+    for key in ("ad_user_data", "ad_personalization"):
+        merged.setdefault(key, "UNSPECIFIED")
+    return merged
+
+
+def _consent_warnings(
+    rows: list[dict], *, columns_present: bool, default: dict | None
+) -> list[str]:
+    """Rows that end up UNSPECIFIED even though the file tried to carry consent.
+
+    Google uses UNSPECIFIED conversions only in a limited way for EEA traffic,
+    and empty consent cells still look like the file says something. A file
+    without consent columns stays quiet: that is today's behaviour, and a
+    warning on every such file would only train callers to ignore it.
+    """
+    if not columns_present:
+        return []
+    unspecified = 0
+    for row in rows:
+        values = _effective_consent(row.get("consent"), default) or {}
+        if any(
+            values.get(key, "UNSPECIFIED") == "UNSPECIFIED"
+            for key in ("ad_user_data", "ad_personalization")
+        ):
+            unspecified += 1
+    if not unspecified:
+        return []
+    return [
+        f"{unspecified} of {len(rows)} row(s) upload as UNSPECIFIED for "
+        "consent: their consent cells are empty or only partly filled. Google "
+        "uses UNSPECIFIED conversions only in a limited way for EEA traffic."
+    ]
 
 
 def _apply_consent(client: object, conversion: object, consent: dict | None) -> None:
@@ -1032,6 +1116,24 @@ def _short_row(raw: list[str], col: dict[str, int]) -> bool:
     return len(raw) <= max(col.values())
 
 
+def _optional_column_indexes(
+    header: list[str], names: list[str]
+) -> dict[str, int]:
+    """Indexes of optional columns, matched case-insensitively.
+
+    The required columns come from Google's template verbatim. Optional ones
+    are typed by hand into exports often enough that "Order ID" versus
+    "order id" should not decide whether the file has a dedup key.
+    """
+    folded = [cell.casefold() for cell in header]
+    found: dict[str, int] = {}
+    for name in names:
+        key = name.casefold()
+        if key in folded:
+            found[name] = folded.index(key)
+    return found
+
+
 def _pad_to_header(raw: list[str], columns: int) -> list[str]:
     """Fill missing trailing cells with "" so every header index exists."""
     if len(raw) >= columns:
@@ -1067,6 +1169,9 @@ def _parse_call_conversion_csv(
     col, errors = _column_map(header, _EXPECTED_CALL_HEADERS)
     if errors:
         return [], errors, [], []
+    optional_col = _optional_column_indexes(
+        [cell.strip() for cell in header], list(_CONSENT_HEADERS)
+    )
 
     now = datetime.now(_tz.utc)
     out: list[dict] = []
@@ -1083,6 +1188,10 @@ def _parse_call_conversion_csv(
             })
             continue
         raw = _pad_to_header(raw, len(header))
+        row_consent, problem = _row_consent(raw, optional_col)
+        if problem:
+            skipped.append({"row": source_line, "reason": problem})
+            continue
         value, currency, problem = _parse_amount(
             raw[col["Conversion Value"]], raw[col["Conversion Currency"]]
         )
@@ -1137,6 +1246,8 @@ def _parse_call_conversion_csv(
             "conversion_time": converted,
             "conversion_value": value,
             "currency_code": currency,
+            "consent": row_consent,
+            "consent_columns_present": bool(optional_col),
         })
     return out, errors, advisories, skipped
 
@@ -1203,7 +1314,9 @@ def draft_upload_call_conversions(
     ``consent`` (GDPR/EEA): a dict like
     ``{"ad_user_data": "GRANTED", "ad_personalization": "DENIED"}``. Values:
     GRANTED / DENIED / UNSPECIFIED. Required for EEA traffic. Defaults to
-    UNSPECIFIED when omitted.
+    UNSPECIFIED when omitted. Optional ``Ad User Data`` /
+    ``Ad Personalization`` CSV columns say it per row and override this value
+    for the row that fills them in.
 
     PII note: the caller phone number is required raw by Google for matching,
     so the rows live in the plan's ``apply_only_payload`` — apply needs them,
@@ -1257,6 +1370,11 @@ def draft_upload_call_conversions(
         }
     rows = usable
 
+    consent_warnings = _consent_warnings(
+        rows,
+        columns_present=any(r.get("consent_columns_present") for r in rows),
+        default=consent_norm,
+    )
     distinct_actions = sorted({r["conversion_name"] for r in rows})
     total_value, totals_by_currency, currency_hint, value_warnings = (
         _value_summary(rows)
@@ -1293,6 +1411,7 @@ def draft_upload_call_conversions(
             "conversion_time": r["conversion_time"],
             "conversion_value": r["conversion_value"],
             "currency_code": r["currency_code"],
+            "consent": _effective_consent(r.get("consent"), consent_norm),
         }
         for r in rows
     ]
@@ -1329,7 +1448,7 @@ def draft_upload_call_conversions(
             # Resolved at draft time; apply reads them instead of querying again.
             "conversion_actions": action_resources,
             "consent": consent_norm,
-            "parse_warnings": parse_advisories,
+            "parse_warnings": [*parse_advisories, *consent_warnings],
             # Display sample uses REDACTED caller ids only.
             "sample_rows": [
                 {
@@ -1954,7 +2073,10 @@ def _apply_upload_call_conversions(
                 cc.conversion_value = float(r["conversion_value"])
             if r.get("currency_code"):
                 cc.currency_code = r["currency_code"]
-            _apply_consent(client, cc, consent)
+            # The row's own value wins; the file-wide argument is the fallback
+            # for rows that left the consent columns empty (and for plans
+            # drafted before the columns existed).
+            _apply_consent(client, cc, r.get("consent") or consent)
             payload.append(cc)
         return payload
 
@@ -2020,8 +2142,10 @@ def _parse_ec_for_leads_csv(
     Conversion Name, Conversion Time, Conversion Value, Conversion Currency.
     Optional: Order ID (Google's dedup key — strongly recommended so
     re-uploads of the same source row don't double-count), Country Code,
-    Postal Code. Returns ``(rows, errors, advisories, skipped)``: ``errors``
-    are file-level problems, ``advisories`` describe rows that still upload, and
+    Postal Code, and Google's per-person consent columns ``Ad User Data`` /
+    ``Ad Personalization``. Returns ``(rows, errors, advisories, skipped)``:
+    ``errors`` are file-level problems, ``advisories`` describe rows that still
+    upload, and
     ``skipped`` lists every row that will not be uploaded with its
     ``source_line``. A record that ends before the last required column is
     skipped instead of aborting the draft.
@@ -2041,7 +2165,9 @@ def _parse_ec_for_leads_csv(
     if errors:
         return [], errors, [], []
     header = [cell.strip() for cell in raw_header]
-    optional_col = {n: header.index(n) for n in _OPTIONAL_EC_HEADERS if n in header}
+    optional_col = _optional_column_indexes(
+        header, [*_OPTIONAL_EC_HEADERS, *_CONSENT_HEADERS]
+    )
 
     out: list[dict] = []
     skipped: list[dict] = []
@@ -2060,6 +2186,10 @@ def _parse_ec_for_leads_csv(
         # the header promises exists (Country Code and Postal Code used to
         # raise IndexError here).
         raw = _pad_to_header(raw, len(header))
+        row_consent, problem = _row_consent(raw, optional_col)
+        if problem:
+            skipped.append({"row": source_line, "reason": problem})
+            continue
         value, currency, problem = _parse_amount(
             raw[col["Conversion Value"]], raw[col["Conversion Currency"]]
         )
@@ -2136,6 +2266,10 @@ def _parse_ec_for_leads_csv(
             "conversion_value": value,
             "currency_code": currency,
             "order_id": order_id,
+            "consent": row_consent,
+            "consent_columns_present": any(
+                header in optional_col for header in _CONSENT_HEADERS
+            ),
         })
     return out, errors, advisories, skipped
 
@@ -2226,7 +2360,9 @@ def draft_upload_enhanced_conversions_for_leads(
     ``consent`` (GDPR/EEA): a dict like
     ``{"ad_user_data": "GRANTED", "ad_personalization": "DENIED"}``. Values:
     GRANTED / DENIED / UNSPECIFIED. Required for EEA traffic. Defaults to
-    UNSPECIFIED when omitted.
+    UNSPECIFIED when omitted. Optional ``Ad User Data`` /
+    ``Ad Personalization`` CSV columns say it per row and override this value
+    for the row that fills them in.
 
     Call confirm_and_apply with the returned plan_id to execute.
     """
@@ -2304,6 +2440,11 @@ def draft_upload_enhanced_conversions_for_leads(
         }
     rows = usable
 
+    consent_warnings = _consent_warnings(
+        rows,
+        columns_present=any(r.get("consent_columns_present") for r in rows),
+        default=consent_norm,
+    )
     distinct_actions = sorted({r["conversion_name"] for r in rows})
     total_value, totals_by_currency, currency_hint, value_warnings = (
         _value_summary(rows)
@@ -2387,6 +2528,7 @@ def draft_upload_enhanced_conversions_for_leads(
             "conversion_value": r["conversion_value"],
             "currency_code": r["currency_code"],
             "order_id": r.get("order_id", ""),
+            "consent": _effective_consent(r.get("consent"), consent_norm),
         }
         for r in rows
     ]
@@ -2425,7 +2567,7 @@ def draft_upload_enhanced_conversions_for_leads(
             # Resolved at draft time; apply reads them instead of querying again.
             "conversion_actions": action_resources,
             "consent": consent_norm,
-            "parse_warnings": parse_advisories,
+            "parse_warnings": [*parse_advisories, *consent_warnings],
             "dedup_warnings": dedup_warnings,
             "match_warnings": _match_warnings(
                 names_without_address,
@@ -2484,7 +2626,7 @@ def _apply_upload_enhanced_conversions_for_leads(
                 cc.currency_code = r["currency_code"]
             if r.get("order_id"):
                 cc.order_id = r["order_id"]
-            _apply_consent(client, cc, consent)
+            _apply_consent(client, cc, r.get("consent") or consent)
 
             # Hashed identifiers only; Google matches them to logged-in users
             # who clicked the ads. A row with no usable identifier never gets
