@@ -685,18 +685,21 @@ def _gaql_escape(s: str) -> str:
     return s.replace("\\", "\\\\").replace("'", "\\'")
 
 
-# Consent status values Google's ConsentStatus enum accepts, UNKNOWN included.
-# Shared with the per-row columns so the two cannot drift apart.
-_CONSENT_VALUES = frozenset({"GRANTED", "DENIED", "UNSPECIFIED", "UNKNOWN"})
+# The consent values a caller may send. Google's ConsentStatus enum also has
+# UNKNOWN, but that one reports a state the API determined, not one a caller
+# declares, so it is not accepted here. Shared with the per-row columns so the
+# two cannot drift apart.
+_CONSENT_VALUES = frozenset({"GRANTED", "DENIED", "UNSPECIFIED"})
 
 
 def _consent_from_param(consent: dict | None) -> dict | None:
     """Validate + normalize the ``consent`` tool parameter.
 
     Accepts ``{"ad_user_data": "GRANTED"|"DENIED"|"UNSPECIFIED",
-    "ad_personalization": ...}``. ``UNKNOWN`` is a legal enum value too.
-    Missing keys default to UNSPECIFIED. Returns a plain dict stored in the
-    plan (JSON-safe, non-PII), or None if no consent was supplied at all.
+    "ad_personalization": ...}``. Missing keys default to UNSPECIFIED. Returns
+    a plain dict stored in the plan (JSON-safe, non-PII), or None if no consent
+    was supplied at all. ``UNKNOWN`` is refused: the enum has it, but it
+    reports what Google determined, not something a caller declares.
 
     An unknown key is an error rather than a silent no-op: ``adPersonalization``
     (camelCase) would otherwise leave the field at UNSPECIFIED, which for EEA
@@ -722,7 +725,7 @@ def _consent_from_param(consent: dict | None) -> dict | None:
         if raw not in _CONSENT_VALUES:
             raise ValueError(
                 f"consent.{key}='{raw}' is invalid. Use one of: "
-                "GRANTED, DENIED, UNSPECIFIED, UNKNOWN."
+                "GRANTED, DENIED, UNSPECIFIED."
             )
         out[key] = raw
     return out
@@ -755,8 +758,7 @@ def _row_consent(
             continue
         if value not in _CONSENT_VALUES:
             return None, (
-                f"{header} is not one of GRANTED, DENIED, UNSPECIFIED or "
-                "UNKNOWN"
+                f"{header} is not one of GRANTED, DENIED or UNSPECIFIED"
             )
         out[key] = value
     return (out or None), ""
@@ -777,6 +779,26 @@ def _effective_consent(
     for key in ("ad_user_data", "ad_personalization"):
         merged.setdefault(key, "UNSPECIFIED")
     return merged
+
+
+def _consent_summary(
+    rows: list[dict], default: dict | None
+) -> dict[str, dict[str, int]]:
+    """How many uploaded rows carry each consent value, per field.
+
+    The preview is where an upload gets approved, and the plan-level ``consent``
+    is only the fallback for rows without their own: a file whose rows say
+    DENIED must not preview as GRANTED because that is the argument.
+    """
+    summary: dict[str, dict[str, int]] = {
+        "ad_user_data": {}, "ad_personalization": {},
+    }
+    for row in rows:
+        values = _effective_consent(row.get("consent"), default) or {}
+        for key in summary:
+            value = values.get(key, "UNSPECIFIED")
+            summary[key][value] = summary[key].get(value, 0) + 1
+    return summary
 
 
 def _consent_warnings(
@@ -1430,6 +1452,9 @@ def draft_upload_call_conversions(
             # Resolved at draft time; apply reads them instead of querying again.
             "conversion_actions": action_resources,
             "consent": consent_norm,
+            # What the rows actually upload with; ``consent`` alone is only the
+            # fallback and would misrepresent a file that sets it per row.
+            "consent_summary": _consent_summary(rows, consent_norm),
             "parse_warnings": [*parse_advisories, *consent_warnings],
             # Display sample uses REDACTED caller ids only.
             "sample_rows": [
@@ -1438,6 +1463,7 @@ def draft_upload_call_conversions(
                     "call_start_time": r["call_start_time"],
                     "conversion_name": r["conversion_name"],
                     "conversion_value": r["conversion_value"],
+                    "consent": _effective_consent(r.get("consent"), consent_norm),
                 }
                 for r in rows[:3]
             ],
@@ -2549,6 +2575,9 @@ def draft_upload_enhanced_conversions_for_leads(
             # Resolved at draft time; apply reads them instead of querying again.
             "conversion_actions": action_resources,
             "consent": consent_norm,
+            # What the rows actually upload with; ``consent`` alone is only the
+            # fallback and would misrepresent a file that sets it per row.
+            "consent_summary": _consent_summary(rows, consent_norm),
             "parse_warnings": [*parse_advisories, *consent_warnings],
             "dedup_warnings": dedup_warnings,
             "match_warnings": _match_warnings(
@@ -2567,6 +2596,7 @@ def draft_upload_enhanced_conversions_for_leads(
                     "conversion_value": r["conversion_value"],
                     "conversion_time": r["conversion_time"],
                     "order_id": r.get("order_id", ""),
+                    "consent": _effective_consent(r.get("consent"), consent_norm),
                 }
                 for r in rows[:3]
             ],

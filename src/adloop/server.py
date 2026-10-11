@@ -4705,8 +4705,9 @@ def draft_upload_call_conversions(
     stays unusable are skipped and reported in `skipped_rows` instead of being
     uploaded to no effect.
 
-    Returns a preview with a plan_id, the row counts and the skipped rows;
-    nothing is uploaded until that preview is confirmed.
+    Returns a preview with a plan_id, the row counts, the consent the rows
+    actually carry (`consent_summary`) and the skipped rows; nothing is
+    uploaded until that preview is confirmed.
 
     Args:
         csv_path: Path of the CSV file holding the upload rows, read on the
@@ -4763,8 +4764,9 @@ def draft_upload_enhanced_conversions_for_leads(
     Local file only: on the hosted server this tool refuses, because it would
     read a path on the server rather than the caller's machine.
 
-    Returns a preview with a plan_id, the row counts and the skipped rows;
-    nothing is uploaded until that preview is confirmed.
+    Returns a preview with a plan_id, the row counts, the consent the rows
+    actually carry (`consent_summary`) and the skipped rows; nothing is
+    uploaded until that preview is confirmed.
 
     Args:
         csv_path: Path of the CSV file holding the upload rows, read on the

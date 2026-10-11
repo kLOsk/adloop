@@ -772,15 +772,15 @@ class TestConsentParam:
             conversion_actions._consent_from_param({"ad_user_data": "YES"})
 
         text = str(info.value)
-        for value in ("GRANTED", "DENIED", "UNSPECIFIED", "UNKNOWN"):
+        for value in ("GRANTED", "DENIED", "UNSPECIFIED"):
             assert value in text
+        assert "UNKNOWN" not in text
 
-    def test_unknown_is_a_legal_value(self):
-        # The ConsentStatus enum has UNKNOWN next to UNSPECIFIED.
-        normalized = conversion_actions._consent_from_param(
-            {"ad_user_data": "UNKNOWN"}
-        )
-        assert normalized["ad_user_data"] == "UNKNOWN"
+    def test_unknown_is_refused(self):
+        """The enum has UNKNOWN, but it reports what Google found, not what a
+        caller declares."""
+        with pytest.raises(ValueError, match="GRANTED, DENIED, UNSPECIFIED"):
+            conversion_actions._consent_from_param({"ad_user_data": "UNKNOWN"})
 
     def test_a_consent_that_is_not_an_object_is_refused(self):
         with pytest.raises(ValueError, match="consent must be an object"):
@@ -1185,6 +1185,38 @@ class TestDraftUploadCallConversions:
         assert result["skipped_rows"][0]["row"] == 2
         assert "Ad User Data" in result["skipped_rows"][0]["reason"]
 
+    def test_the_preview_shows_what_the_rows_carry(self, config, tmp_path):
+        """The argument is only the fallback: a file whose rows say DENIED must
+        not preview as GRANTED."""
+        rows = (
+            "+14155550142,2026-03-01T12:00:00Z,A,2026-03-01T13:00:00Z,10,USD,"
+            "DENIED,DENIED\n"
+            "+14155550143,2026-03-02T12:00:00Z,A,2026-03-02T13:00:00Z,10,USD,,\n"
+        )
+        result = self._draft_with_consent(
+            config, tmp_path, rows,
+            consent={"ad_user_data": "GRANTED", "ad_personalization": "GRANTED"},
+        )
+        changes = result["changes"]
+        assert changes["consent_summary"]["ad_user_data"] == {
+            "DENIED": 1, "GRANTED": 1,
+        }
+        assert changes["consent_summary"]["ad_personalization"] == {
+            "DENIED": 1, "GRANTED": 1,
+        }
+        assert changes["sample_rows"][0]["consent"]["ad_user_data"] == "DENIED"
+        assert changes["sample_rows"][1]["consent"]["ad_user_data"] == "GRANTED"
+
+    def test_unknown_is_refused_in_a_cell(self, config, tmp_path):
+        """Google reports UNKNOWN; it is not something a row declares."""
+        rows = (
+            "+14155550142,2026-03-01T12:00:00Z,A,2026-03-01T13:00:00Z,10,USD,"
+            "UNKNOWN,DENIED\n"
+        )
+        result = self._draft_with_consent(config, tmp_path, rows)
+        assert "zero conversion rows" in result["error"]
+        assert "Ad User Data" in result["skipped_rows"][0]["reason"]
+
     def test_a_filled_consent_column_is_not_warned_about(self, config, tmp_path):
         rows = (
             "+14155550142,2026-03-01T12:00:00Z,A,2026-03-01T13:00:00Z,10,USD,"
@@ -1545,6 +1577,24 @@ class TestDraftUploadEcForLeads:
         )
         warnings = result["changes"]["parse_warnings"]
         assert any("UNSPECIFIED" in w for w in warnings), warnings
+
+    def test_the_preview_shows_what_the_rows_carry(self, config, tmp_path):
+        header = _EC_HEADER + ",Ad User Data,Ad Personalization"
+        row = ("user@example.com,+14155550142,Test,User,Job Close,"
+               "2026-03-01T12:00:00Z,500.00,USD,GRANTED,DENIED")
+        path = tmp_path / "consent-ec.csv"
+        path.write_text(header + "\n" + row + "\n")
+        result = (
+            conversion_actions.draft_upload_enhanced_conversions_for_leads(
+                config, customer_id="1234567890", csv_path=str(path),
+            )
+        )
+        changes = result["changes"]
+        assert changes["consent_summary"] == {
+            "ad_user_data": {"GRANTED": 1},
+            "ad_personalization": {"DENIED": 1},
+        }
+        assert changes["sample_rows"][0]["consent"]["ad_user_data"] == "GRANTED"
 
     def test_no_raw_pii_in_plan_changes(self, config, tmp_path):
         # The stored plan must contain ONLY hashes for PII, never raw values.
