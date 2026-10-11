@@ -26,7 +26,7 @@ from __future__ import annotations
 import threading
 from contextlib import contextmanager
 from contextvars import ContextVar
-from typing import TYPE_CHECKING, Iterator, Literal
+from typing import TYPE_CHECKING, Callable, Iterable, Iterator, Literal
 
 if TYPE_CHECKING:
     from adloop.config import AdLoopConfig
@@ -44,6 +44,24 @@ _default_config: AdLoopConfig | None = None
 _default_config_lock = threading.Lock()
 
 _deployment_mode: DeploymentMode = "local"
+
+
+# Which registered tools the current caller is actually offered, given each
+# tool's tags. Self-hosted, every enabled tool is; a hosted runtime narrows it
+# per request (a key's toolsets, tools it cannot serve) so health_check can
+# report the same list the caller's tools/list shows.
+ToolVisibility = Callable[[dict[str, frozenset[str]]], Iterable[str]]
+_tool_visibility: ToolVisibility | None = None
+
+
+def set_tool_visibility(fn: ToolVisibility | None) -> None:
+    """Install the per-request tool filter. Called once at startup."""
+    global _tool_visibility
+    _tool_visibility = fn
+
+
+def tool_visibility() -> ToolVisibility | None:
+    return _tool_visibility
 
 
 def deployment_mode() -> DeploymentMode:

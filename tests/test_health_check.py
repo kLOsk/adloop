@@ -73,3 +73,57 @@ def test_no_property_to_probe(monkeypatch, stub_other_services):
 
     assert status["ga4"] == "ok"
     assert status["ga4_data"] == "not_checked"
+
+
+def test_health_check_reports_version_and_offered_tools(stub_other_services):
+    # The AI compares tools_offered with its own tool list: a mismatch means
+    # the client cached an older list (claude.ai, ChatGPT and Perplexity do).
+    result = server.health_check()
+
+    assert result["adloop_version"]
+    assert "health_check" in result["tools_offered"]
+    assert "run_ga4_report" in result["tools_offered"]
+    assert result["tools_offered"] == sorted(result["tools_offered"])
+    assert "refresh" in result["tools_note"]
+
+
+def test_offered_tools_follow_the_runtime_visibility_hook():
+    seen = {}
+
+    def only_ga4(tools):
+        seen.update(tools)
+        return [name for name, tags in tools.items() if tags & {"ga4", "core"}]
+
+    runtime.set_tool_visibility(only_ga4)
+    try:
+        names = server._offered_tool_names()
+    finally:
+        runtime.set_tool_visibility(None)
+
+    assert "run_ga4_report" in names and "health_check" in names
+    assert "get_campaign_performance" not in names
+    # The hook gets every enabled tool with its tags.
+    assert seen["get_campaign_performance"] == frozenset({"ads"})
+
+
+def test_offered_tools_respect_adloop_toolsets(monkeypatch):
+    monkeypatch.setattr(server, "_ENABLED_TAGS", {"gsc", "core"})
+
+    names = server._offered_tool_names()
+
+    assert "run_gsc_report" in names and "health_check" in names
+    assert "run_ga4_report" not in names
+
+
+@pytest.mark.asyncio
+async def test_server_announces_its_icons_and_website():
+    from fastmcp import Client
+
+    async with Client(server.mcp, mode="legacy") as client:
+        info = client.initialize_result.server_info
+
+    assert str(info.website_url).startswith("https://getadloop.com")
+    assert [icon.src for icon in info.icons] == [
+        "https://getadloop.com/icon-512.png",
+        "https://getadloop.com/favicon.svg",
+    ]

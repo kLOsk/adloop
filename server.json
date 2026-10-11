@@ -3,7 +3,7 @@
   "name": "com.getadloop/adloop",
   "title": "AdLoop",
   "description": "Google Ads, Reddit Ads, GA4 and Tag Manager in your AI client, with a preview before every change.",
-  "version": "0.22.0",
+  "version": "0.22.1",
   "websiteUrl": "https://getadloop.com",
   "repository": {
     "url": "https://github.com/kLOsk/adloop",
@@ -19,7 +19,7 @@
     {
       "registryType": "pypi",
       "identifier": "adloop",
-      "version": "0.22.0",
+      "version": "0.22.1",
       "transport": {
         "type": "stdio"
       }

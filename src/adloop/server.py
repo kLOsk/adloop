@@ -9,7 +9,7 @@ from typing import Annotated, Callable
 
 from fastmcp import FastMCP
 from fastmcp.utilities.docstring_parsing import parse_docstring
-from mcp.types import ToolAnnotations
+from mcp.types import Icon, ToolAnnotations
 from pydantic import BeforeValidator
 
 from adloop import diagnostics
@@ -166,7 +166,21 @@ def _gtm_defaults(account_id: str, container_id: str) -> tuple[str, str]:
 mcp = FastMCP(
     "AdLoop",
     instructions=_build_orchestration_instructions(),
+    website_url="https://getadloop.com",
+    # Clients that support MCP server icons show these instead of guessing
+    # from the domain's favicon. Square and full-bleed, so a client's own
+    # rounded mask leaves no stray corners.
+    icons=[
+        Icon(src="https://getadloop.com/icon-512.png", mimeType="image/png", sizes=["512x512"]),
+        Icon(src="https://getadloop.com/favicon.svg", mimeType="image/svg+xml", sizes=["any"]),
+    ],
 )
+
+# name -> tags of every registered tool, so health_check can say which tools
+# this server offers without reaching into FastMCP internals.
+_TOOL_TAGS: dict[str, frozenset[str]] = {}
+# Tags enabled by ADLOOP_TOOLSETS (None: the full catalog).
+_ENABLED_TAGS: set[str] | None = None
 
 
 # The API each toolset calls, linked at the end of every tool description:
@@ -217,6 +231,7 @@ def _tool(*, title: str, annotations: ToolAnnotations, tags: set[str], **kwargs)
         description = parse_docstring(fn).description or inspect.cleandoc(fn.__doc__ or "")
         if docs and "https://" not in description:
             description = f"{description}\n\n{docs}"
+        _TOOL_TAGS[kwargs.get("name") or fn.__name__] = frozenset(tags)
         return mcp.tool(
             title=title,
             annotations=annotations,
@@ -585,7 +600,42 @@ def health_check() -> dict:
     elif status.get("reddit") == "error" and status.get("reddit_hint"):
         status["hint"] = status["reddit_hint"]
 
+    status["adloop_version"] = _adloop_version()
+    status["tools_offered"] = _offered_tool_names()
+    status["tools_note"] = (
+        "These are the tools this AdLoop server offers to you. If one of "
+        "them is missing from your own tool list, your app is showing a "
+        "cached list from an earlier version: ask the user to refresh the "
+        "AdLoop connection (claude.ai: Settings → Connectors → AdLoop; "
+        "ChatGPT: the AdLoop plugin's settings; Perplexity: remove and add "
+        "the connector again; coding agents: reconnect the MCP server or "
+        "start a new session)."
+    )
     return status
+
+
+def _adloop_version() -> str:
+    from importlib.metadata import PackageNotFoundError, version
+
+    try:
+        return version("adloop")
+    except PackageNotFoundError:
+        return "unknown"
+
+
+def _offered_tool_names() -> list[str]:
+    """The tools the current caller sees in tools/list: enabled by
+    ADLOOP_TOOLSETS, then narrowed by the runtime's visibility hook."""
+    from adloop.runtime import tool_visibility
+
+    tools = {
+        name: tags
+        for name, tags in _TOOL_TAGS.items()
+        if _ENABLED_TAGS is None or tags & _ENABLED_TAGS
+    }
+    hook = tool_visibility()
+    names = hook(tools) if hook is not None else tools
+    return sorted(names)
 
 
 # ---------------------------------------------------------------------------
@@ -5728,7 +5778,9 @@ def _apply_toolsets_env() -> None:
             f"ADLOOP_TOOLSETS names unknown toolset(s): {', '.join(unknown)}. "
             f"Valid toolsets: {', '.join(TOOLSETS)}. Example: ADLOOP_TOOLSETS=ads,ga4"
         )
-    mcp.enable(tags=requested | {"core"}, only=True)
+    global _ENABLED_TAGS
+    _ENABLED_TAGS = requested | {"core"}
+    mcp.enable(tags=_ENABLED_TAGS, only=True)
 
 
 _apply_toolsets_env()

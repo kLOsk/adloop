@@ -14,6 +14,8 @@ You have access to AdLoop MCP tools that connect Google Ads, Reddit Ads and Goog
 |------|-------------|----------------|
 | `health_check` | First thing to run when tools are failing — tests OAuth token, GA4, Ads, and (when configured) Reddit Ads connectivity | (none) |
 
+**A tool you expect is missing?** Apps such as claude.ai, ChatGPT and Perplexity cache AdLoop's tool list from when the connection was made. `health_check` returns `adloop_version` and `tools_offered`, the tools this server offers to you. If the user asks for something a tool in `tools_offered` does and that tool isn't in your own tool list, don't improvise with other tools: tell the user their app shows an older list and to refresh the AdLoop connection (claude.ai: Settings → Connectors → AdLoop; ChatGPT: the AdLoop plugin's settings; Perplexity: remove and add the connector again; coding agents: reconnect the MCP server or start a new session).
+
 **GA4 has two surfaces in health_check:** `ga4_admin` (listing properties) and `ga4_data` (every report). `ga4_data: error` with `SERVICE_DISABLED` means the Google Analytics Data API is not enabled in the Google Cloud project — tell the user to enable it; it is not a permissions or consent problem.
 
 **If health_check reports Google auth errors:** Tell the user to delete `~/.adloop/token.json` and re-run any tool to trigger re-authorization. If tokens keep expiring weekly, the GCP consent screen needs to be published from "Testing" to "In production". **Reddit auth errors** (`REDDIT_INVALID_GRANT`, `REDDIT_NOT_CONNECTED`) are fixed by re-running the Reddit step of `adloop init` (self-hosted) or reconnecting under Settings → Reddit Ads (AdLoop Cloud); the Google token is unrelated.
