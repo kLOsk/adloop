@@ -4760,9 +4760,9 @@ def draft_upload_enhanced_conversions_for_leads(
 
     An Order ID column makes re-uploads dedup instead of double-counting.
 
-    Rows that repeat inside one file are named in `dedup_warnings`. They are
-    still uploaded as separate conversions — the Order ID covers re-uploads of
-    the file, not a record that appears twice inside it.
+    Rows that repeat inside one file are named in `dedup_warnings`. Rows
+    sharing an Order ID count once at Google; two rows with different Order
+    IDs are two real orders and are not reported.
 
     Local file only: on the hosted server this tool refuses, because it would
     read a path on the server rather than the caller's machine.

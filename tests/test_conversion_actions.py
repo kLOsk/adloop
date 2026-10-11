@@ -1142,6 +1142,15 @@ class TestDraftUploadCallConversions:
         result = self._draft(config, tmp_path, first + second)
         assert result["changes"]["dedup_warnings"] == []
 
+    def test_three_rows_read_as_three(self, config, tmp_path):
+        """'counts twice' read oddly for three rows."""
+        row = "+14155550142,2026-03-01T12:00:00Z,A,2026-03-01T13:00:00Z,10,USD\n"
+        result = self._draft(config, tmp_path, row * 3)
+        warning = result["changes"]["dedup_warnings"][0]
+        assert "lines 2, 3 and 4" in warning
+        assert "counted 3 times" in warning
+        assert "counts twice" not in warning
+
     def test_raw_rows_live_outside_plan_changes(self, config, tmp_path):
         """The applier needs the raw caller_id; `changes` must never carry it.
 
@@ -1436,9 +1445,11 @@ class TestDraftUploadEcForLeads:
         assert c["rows_with_phone"] == 2
         assert c["distinct_conversion_actions"] == ["Job Close"]
 
-    def _draft(self, config, tmp_path, rows: str):
+    def _draft(self, config, tmp_path, rows: str, *, order_id: bool = False):
         path = tmp_path / "dup-ec.csv"
-        path.write_text(_EC_HEADER + "\n" + rows)
+        path.write_text(
+            _EC_HEADER + (",Order ID" if order_id else "") + "\n" + rows
+        )
         return (
             conversion_actions.draft_upload_enhanced_conversions_for_leads(
                 config, customer_id="1234567890", csv_path=str(path),
@@ -1462,6 +1473,27 @@ class TestDraftUploadEcForLeads:
         result = self._draft(config, tmp_path, first + second)
         warnings = result["changes"]["dedup_warnings"]
         assert not any("same lead" in w for w in warnings), warnings
+
+    def test_different_order_ids_are_two_real_orders(self, config, tmp_path):
+        """Same lead, same (date-only) time: the Order ID tells them apart."""
+        first = ("user@example.com,+14155550142,Test,User,Job Close,"
+                 "2026-03-01T12:00:00Z,500.00,USD,ORD-1\n")
+        second = ("user@example.com,+14155550142,Test,User,Job Close,"
+                  "2026-03-01T12:00:00Z,500.00,USD,ORD-2\n")
+        result = self._draft(config, tmp_path, first + second, order_id=True)
+        warnings = result["changes"]["dedup_warnings"]
+        assert not any("same lead" in w for w in warnings), warnings
+
+    def test_the_same_order_id_gets_its_own_wording(self, config, tmp_path):
+        """Those rows are one conversion at Google, not a double count."""
+        row = ("user@example.com,+14155550142,Test,User,Job Close,"
+               "2026-03-01T12:00:00Z,500.00,USD,ORD-1\n")
+        result = self._draft(config, tmp_path, row + row, order_id=True)
+        warnings = result["changes"]["dedup_warnings"]
+        duplicate = next(w for w in warnings if "same lead" in w)
+        assert "same Order ID" in duplicate
+        assert "count once" in duplicate
+        assert "counted 2 times" not in duplicate
 
     def test_no_raw_pii_in_plan_changes(self, config, tmp_path):
         # The stored plan must contain ONLY hashes for PII, never raw values.

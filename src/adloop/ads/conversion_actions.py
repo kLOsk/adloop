@@ -1460,7 +1460,10 @@ def _join_source_lines(lines: list[object]) -> str:
 
 
 def _duplicate_row_warnings(
-    rows: list[dict], key_of: Callable[[dict], tuple | None], what: str
+    rows: list[dict],
+    key_of: Callable[[dict], tuple | None],
+    what: str,
+    order_id_of: Callable[[dict], str] | None = None,
 ) -> list[str]:
     """Rows that repeat inside one CSV — reported, not refused.
 
@@ -1469,21 +1472,34 @@ def _duplicate_row_warnings(
     in the result says so. Legitimate repetition exists (two calls from the
     same number, the same second), so the rows are named and the caller decides
     in the preview.
+
+    ``order_id_of`` splits the wording: rows that share an Order ID collapse
+    into one conversion at Google, the others add up.
     """
-    seen: dict[tuple, list[object]] = {}
+    seen: dict[tuple, list[tuple[object, dict]]] = {}
     for index, row in enumerate(rows, start=1):
         key = key_of(row)
         if key:
-            seen.setdefault(key, []).append(_source_line(row, index))
+            seen.setdefault(key, []).append((_source_line(row, index), row))
     warnings: list[str] = []
-    for lines in seen.values():
-        if len(lines) < 2:
+    for group in seen.values():
+        if len(group) < 2:
+            continue
+        lines = [line for line, _ in group]
+        order_id = order_id_of(group[0][1]) if order_id_of else ""
+        if order_id:
+            warnings.append(
+                f"{len(group)} rows look like the same {what} and carry the "
+                f"same Order ID: lines {_join_source_lines(lines)}. Google "
+                "dedups on the conversion action and that Order ID, so they "
+                "count once."
+            )
             continue
         warnings.append(
-            f"{len(lines)} rows look like the same {what}: lines "
-            f"{_join_source_lines(lines)}. Each row is uploaded as its own "
-            "conversion, so the repetition counts twice — delete the duplicate "
-            "row if it is one copy-paste accident."
+            f"{len(group)} rows look like the same {what}: lines "
+            f"{_join_source_lines(lines)}. Every row is uploaded as its own "
+            f"conversion, so the record is counted {len(group)} times — delete "
+            "the extra rows if it is one copy-paste accident."
         )
     return warnings
 
@@ -1504,7 +1520,9 @@ def _ec_duplicate_key(row: dict) -> tuple | None:
     """What identifies a lead: the strongest identifier the row carries.
 
     A row that only matched on its address is compared by that address, not
-    reported as a duplicate of every other row without an email.
+    reported as a duplicate of every other row without an email. The Order ID
+    is part of the key whenever the row has one: two orders for the same lead
+    at the same (often date-only) time are two real orders, not one.
     """
     identifier: object = row.get("email_sha256") or row.get("phone_sha256")
     if not identifier and _has_complete_address(row):
@@ -1516,7 +1534,15 @@ def _ec_duplicate_key(row: dict) -> tuple | None:
         )
     if not identifier:
         return None
-    return (identifier, row.get("conversion_time") or "")
+    return (
+        identifier,
+        row.get("conversion_time") or "",
+        row.get("order_id") or "",
+    )
+
+
+def _row_order_id(row: dict) -> str:
+    return str(row.get("order_id") or "")
 
 
 def _upload_draft_preflight(
@@ -2428,7 +2454,9 @@ def draft_upload_enhanced_conversions_for_leads(
             "Rows without one will double-count on re-upload."
         )
     dedup_warnings.extend(
-        _duplicate_row_warnings(rows, _ec_duplicate_key, "lead")
+        _duplicate_row_warnings(
+            rows, _ec_duplicate_key, "lead", order_id_of=_row_order_id
+        )
     )
 
     # Freeze the hashed rows apply will upload. These are already SHA-256
