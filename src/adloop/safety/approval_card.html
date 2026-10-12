@@ -5,6 +5,11 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>AdLoop approval</title>
 <style>
+  /* Hosts may send their colours as light-dark() values, which resolve by
+     color-scheme; the script sets it from the host theme. */
+  :root { color-scheme: light dark; }
+  :root[data-theme="light"] { color-scheme: light; }
+  :root[data-theme="dark"] { color-scheme: dark; }
   :root {
     --bg: var(--color-background-primary, #ffffff);
     --bg-2: var(--color-background-secondary, #f4f4f5);
@@ -121,6 +126,9 @@
   const MAX_ROWS = 14;
 
   let lang = "en";
+  // Until the host says otherwise, follow the system theme.
+  document.documentElement.dataset.theme =
+    window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
   let nextId = 1;
   const pending = new Map();
   let plan = null; // { planId, code, tool, preview }
@@ -139,7 +147,7 @@
 
   function applyContext(ctx) {
     if (!ctx) return;
-    if (ctx.theme) document.documentElement.dataset.theme = ctx.theme;
+    if (ctx.theme === "dark" || ctx.theme === "light") document.documentElement.dataset.theme = ctx.theme;
     const vars = ctx.styles && ctx.styles.variables;
     if (vars) for (const [k, v] of Object.entries(vars)) if (v) document.documentElement.style.setProperty(k, v);
     if (typeof ctx.locale === "string" && ctx.locale.toLowerCase().startsWith("de")) lang = "de";
