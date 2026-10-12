@@ -53,7 +53,7 @@ AdLoop exists because managing Google Ads alongside your code is a mess. These a
 
 - **"Is my tracking even working?"** Compare the event names in your actual codebase against what GA4 is receiving. Find the mismatches: events you fire that GA4 never sees, events GA4 records that you didn't know about.
 
-- **"I need to create ads but the Google Ads UI is hostile."** Draft responsive search ads, create campaigns, add keywords — all through natural language. Every change shows a preview first. Nothing goes live without your explicit confirmation. New ads and campaigns start paused.
+- **"I need to create ads but the Google Ads UI is hostile."** Draft responsive search ads, create campaigns, add keywords — all through natural language. Every change shows a preview first. Nothing goes live without your explicit confirmation: in Claude, ChatGPT and VS Code the preview is an approval card, and only your click on Apply changes the account (the AI cannot press it). New ads and campaigns start paused.
 
 - **"My landing page gets paid traffic but nobody converts."** AdLoop joins your ad final URLs with GA4 page-level data. See which pages get clicks but no conversions, which have high bounce rates, and which ones are orphaned from any ad campaign.
 

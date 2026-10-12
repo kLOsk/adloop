@@ -298,6 +298,8 @@ Same draft → preview → `confirm_and_apply` gate; the plan carries `platform:
 3. Call `confirm_and_apply(plan_id=..., dry_run=true)` first to test
 4. Only call with `dry_run=false` after explicit user confirmation
 
+**Approval cards (Claude, ChatGPT, VS Code and other apps with MCP Apps):** when the preview comes back with `approval: "card"`, the user sees it as an AdLoop approval card with Test run, Apply and Discard buttons, and approves there. Summarize the change and its warnings, then let the user decide on the card instead of asking for a "yes" in the chat. In those apps `confirm_and_apply(dry_run=false)` is refused with status `APPROVE_ON_CARD` (a dry run still works), because only the click applies; the AI cannot press the button. Do not retry. If the user says the card is not visible, tell them the workspace owner can allow approval in chat (AdLoop Cloud: Settings → Safety; self-hosted: `safety.allow_chat_approval`). After a click the card posts a message such as "Applied on the AdLoop approval card: ..."; continue from there (e.g. remind them to enable a new paused ad). Apps without cards keep the chat flow above.
+
 **Safety behaviors:**
 - New campaigns and RSAs (and every Reddit campaign, ad group and ad) are created as PAUSED — user must explicitly enable them after review.
 - `draft_campaign` REQUIRES `geo_target_ids` and `language_ids` — campaigns without targeting waste budget. The tool rejects drafts with missing targeting.
