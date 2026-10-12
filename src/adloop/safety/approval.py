@@ -11,8 +11,15 @@ model's context, and it is an HMAC the model cannot compute.
 
 While a card can be shown, ``confirm_and_apply(dry_run=false)`` from the
 model is refused unless ``safety.allow_chat_approval`` is on, so "the user
-said yes" in the chat is not enough to change an account. Clients without
-the extension keep the chat flow unchanged.
+said yes" in the chat is not enough to change an account.
+
+Apps without cards that support elicitation (confirmation dialogs) get a
+dialog instead: before ``confirm_and_apply(dry_run=false)`` runs, the server
+asks the user directly, and a decline changes nothing. On the 2026-07-28
+protocol the dialog is an ``InputRequiredResult`` round trip, which works on
+a stateless server; on older protocols it is a server-initiated request,
+used only self-hosted, where the connection can carry it. Apps with neither
+keep the chat flow unchanged.
 """
 
 from __future__ import annotations
@@ -22,6 +29,7 @@ import hashlib
 import hmac
 import json
 import secrets
+from dataclasses import dataclass
 from collections.abc import Iterator
 from contextlib import contextmanager
 from functools import lru_cache
@@ -189,3 +197,184 @@ def is_app_only(meta: dict | None) -> bool:
         return False
     visibility = ui.get("visibility")
     return isinstance(visibility, list) and "model" not in visibility
+
+
+# ---------------------------------------------------------------------------
+# Confirmation dialogs (elicitation) for apps without cards
+# ---------------------------------------------------------------------------
+
+DIALOG_KEY = "adloop_confirm"
+_MAX_DIALOG_FIELDS = 10
+
+
+@dataclass
+class ApplyConfirmation:
+    apply: bool = False
+
+
+@dataclass
+class IrreversibleConfirmation:
+    apply: bool = False
+    cannot_be_undone: bool = False
+
+
+def _confirmation_type(plan: ChangePlan) -> type:
+    return IrreversibleConfirmation if plan.requires_double_confirm else ApplyConfirmation
+
+
+def client_can_elicit() -> bool:
+    """Whether the calling app declared form elicitation (confirmation dialogs)."""
+    try:
+        from fastmcp.server.dependencies import get_context
+
+        caps = get_context().session.client_capabilities
+    except Exception:
+        return False
+    elicitation = getattr(caps, "elicitation", None) if caps is not None else None
+    if elicitation is None:
+        return False
+    # An empty capability object means form mode (the spec's default).
+    form = getattr(elicitation, "form", None)
+    url = getattr(elicitation, "url", None)
+    return form is not None or url is None
+
+
+def _platform_label(plan: ChangePlan) -> str:
+    op = plan.operation
+    if op.startswith("reddit_"):
+        return "Reddit Ads"
+    if op.startswith("gtm_"):
+        return "Google Tag Manager"
+    if "key_event" in op:
+        return "Google Analytics"
+    return "Google Ads"
+
+
+def confirmation_message(plan: ChangePlan) -> str:
+    """The dialog text: what changes, where, and what confirming does."""
+    title = plan.operation.replace("reddit_", "").replace("gtm_", "").replace("_", " ")
+    target = " ".join(
+        part for part in (plan.entity_type.replace("_", " "), plan.entity_id) if part
+    )
+    lines = [f"AdLoop: apply this change in {_platform_label(plan)}?", ""]
+    lines.append(title.capitalize() + (f" ({target})" if target else ""))
+    for key, value in list(plan.changes.items())[:_MAX_DIALOG_FIELDS]:
+        text = value if isinstance(value, str) else json.dumps(value, default=str)
+        if len(text) > 160:
+            text = text[:157] + "..."
+        lines.append(f"- {key.replace('_', ' ')}: {text}")
+    if len(plan.changes) > _MAX_DIALOG_FIELDS:
+        lines.append(f"- ... {len(plan.changes) - _MAX_DIALOG_FIELDS} more fields in the preview")
+    lines.append("")
+    if plan.requires_double_confirm:
+        lines.append("This cannot be undone. Tick both boxes to apply it for real.")
+    else:
+        lines.append("Tick the box to apply it for real. Declining changes nothing.")
+    return "\n".join(lines)
+
+
+def _accepted(plan: ChangePlan, action: str | None, content: Any) -> bool:
+    if action != "accept":
+        return False
+    if content is None:
+        data: dict = {}
+    elif isinstance(content, dict):
+        data = content
+    else:
+        data = vars(content)
+    if not data.get("apply"):
+        return False
+    return not plan.requires_double_confirm or bool(data.get("cannot_be_undone"))
+
+
+def _not_confirmed(plan: ChangePlan) -> dict:
+    return {
+        "status": "NOT_CONFIRMED",
+        "plan_id": plan.plan_id,
+        "operation": plan.operation,
+        "message": (
+            "The user did not confirm the change in the confirmation dialog, so "
+            "nothing was changed. Do not retry on your own; ask the user what "
+            "they want to do. The preview stays pending."
+        ),
+    }
+
+
+def _dialog_applies(plan_id: str) -> ChangePlan | None:
+    """The plan when a real apply must be confirmed in a dialog, else None."""
+    from adloop.runtime import current_config
+    from adloop.safety.preview import get_plan
+
+    if card_click_active() or client_shows_cards() or not client_can_elicit():
+        return None
+    safety = current_config().safety
+    if safety.allow_chat_approval or safety.require_dry_run:
+        # Chat approval is allowed, or the apply turns into a dry run anyway.
+        return None
+    plan = get_plan(plan_id)
+    if plan is None:
+        return None
+    if safety.two_phase_apply and plan.dry_run_result is None:
+        # confirm_and_apply refuses with DRY_RUN_REQUIRED; don't ask first.
+        return None
+    return plan
+
+
+async def confirm_in_dialog(context: Any, plan_id: str) -> Any | None:
+    """Ask the user before a real apply; None means "go ahead".
+
+    Otherwise returns an ``InputRequiredToolResult`` (2026-07-28: the app
+    shows the dialog and repeats the call with the answer) or a
+    NOT_CONFIRMED result when the user declined.
+    """
+    plan = _dialog_applies(plan_id)
+    if plan is None:
+        return None
+
+    from fastmcp.server.elicitation import parse_elicit_response_type
+    from fastmcp.tools import ToolResult
+
+    response_type = _confirmation_type(plan)
+    message = confirmation_message(plan)
+
+    if context._is_modern_protocol():
+        responses = context.input_responses
+        if responses is None:
+            import mcp_types
+            from fastmcp.tools.base import InputRequiredToolResult
+
+            schema = parse_elicit_response_type(response_type).schema
+            request = mcp_types.ElicitRequest(
+                params=mcp_types.ElicitRequestFormParams(
+                    mode="form", message=message, requested_schema=schema
+                )
+            )
+            state = json.dumps({"plan_id": plan.plan_id, "code": approval_code(plan)})
+            return InputRequiredToolResult(
+                mcp_types.InputRequiredResult(
+                    input_requests={DIALOG_KEY: request}, request_state=state
+                )
+            )
+        try:
+            state = json.loads(context.request_state or "{}")
+        except ValueError:
+            state = {}
+        if state.get("plan_id") != plan.plan_id or not code_matches(plan, state.get("code", "")):
+            return ToolResult(structured_content=_not_confirmed(plan))
+        answer = responses.get(DIALOG_KEY) if hasattr(responses, "get") else None
+        action = getattr(answer, "action", None)
+        content = getattr(answer, "content", None)
+    else:
+        from adloop.runtime import deployment_mode
+
+        if deployment_mode() == "server":
+            # A stateless hosted server cannot push a request to the app on
+            # the older protocol; that app keeps the chat flow.
+            return None
+        answer = await context.elicit(message, response_type)
+        action = getattr(answer, "action", None)
+        content = getattr(answer, "data", None)
+
+    if _accepted(plan, action, content):
+        return None
+    return ToolResult(structured_content=_not_confirmed(plan))

@@ -129,7 +129,10 @@ def _build_orchestration_instructions() -> str:
         "preview (`approval: \"card\"`), the user approves with Test run and "
         "Apply on the card. Summarize the change and let them decide there; "
         "`confirm_and_apply` with `dry_run=false` is refused in those apps "
-        "unless the workspace allows approval in chat.\n"
+        "unless the workspace allows approval in chat. In apps without cards that "
+        "support confirmation dialogs, AdLoop asks the user in a dialog before a "
+        "real apply; `NOT_CONFIRMED` means they declined and nothing changed, so "
+        "ask instead of retrying.\n"
         "- Respect the config's `max_daily_budget` cap.\n"
         "- New Google Ads campaigns and RSAs, and every new Reddit campaign, "
         "ad group and ad, are created PAUSED. A new Google Ads ad group is "
@@ -231,6 +234,58 @@ class _AppOnlyToolsForCardClients(Middleware):
 
 
 mcp.add_middleware(_AppOnlyToolsForCardClients())
+
+
+def _wants_real_apply(arguments: dict | None) -> bool:
+    value = (arguments or {}).get("dry_run", True)
+    if isinstance(value, str):
+        return value.strip().lower() in {"false", "0", "no"}
+    return value is False or value == 0
+
+
+class _ConfirmationDialog(Middleware):
+    """Ask the user in a dialog before a real apply, in apps without cards.
+
+    Apps that declared elicitation get the question from the server itself,
+    so the AI cannot answer it on the user's behalf. Apps with cards keep
+    the card, apps with neither keep the chat flow.
+    """
+
+    async def on_call_tool(self, context, call_next):
+        message = context.message
+        if message.name == "confirm_and_apply" and _wants_real_apply(message.arguments):
+            from adloop.safety.approval import confirm_in_dialog
+
+            outcome = await confirm_in_dialog(
+                context.fastmcp_context, str((message.arguments or {}).get("plan_id") or "")
+            )
+            if outcome is not None:
+                return outcome
+        return await call_next(context)
+
+
+mcp.add_middleware(_ConfirmationDialog())
+
+
+def set_request_state_keys(keys: list[bytes]) -> None:
+    """Seal multi-round-trip state (confirmation dialogs) with stable keys.
+
+    FastMCP seals the state a tool hands to the app between rounds with a
+    per-process key unless told otherwise. A hosted runtime whose next round
+    can reach another worker, or land after a restart, passes shared keys
+    here (``keys[0]`` seals, every key unseals, for rotation).
+    """
+    from mcp.server.request_state import RequestStateBoundary, RequestStateSecurity
+
+    security = RequestStateSecurity(keys=keys)
+    mcp._request_state_security = security
+    low_level = mcp._mcp_server
+    low_level.middleware[:] = [
+        RequestStateBoundary(security, default_audience=low_level.name)
+        if isinstance(m, RequestStateBoundary)
+        else m
+        for m in low_level.middleware
+    ]
 
 # name -> tags of every registered tool, so health_check can say which tools
 # this server offers without reaching into FastMCP internals.

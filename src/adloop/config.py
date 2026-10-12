@@ -91,7 +91,8 @@ class SafetyConfig:
     # Apps), only a click on the card applies a change, and
     # confirm_and_apply(dry_run=false) from the model is refused. True also
     # accepts the approval in chat, for app surfaces that claim card support
-    # but do not render it. Apps without cards always use the chat flow.
+    # but do not render it. Apps without cards that support confirmation
+    # dialogs ask in a dialog before a real apply; True skips that as well.
     allow_chat_approval: bool = False
     log_file: str = "~/.adloop/audit.log"
     blocked_operations: list[str] = field(default_factory=list)
