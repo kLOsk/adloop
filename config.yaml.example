@@ -113,6 +113,14 @@ safety:
   # (preview, then apply) without blocking real writes entirely.
   two_phase_apply: false
 
+  # Approval cards. AI apps that support MCP Apps (Claude, ChatGPT, VS Code)
+  # show every change preview as a card with "Test run" and "Apply" buttons,
+  # and then only that click applies a change: the AI cannot apply it by
+  # itself. Set to true to also accept "yes, apply it" in the chat, for an
+  # app that claims card support but does not show the card. Apps without
+  # cards always use the chat flow.
+  allow_chat_approval: false
+
   # Path to the audit log file. All operations are logged here.
   log_file: "~/.adloop/audit.log"
 

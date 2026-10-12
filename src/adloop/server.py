@@ -8,12 +8,22 @@ import json
 from typing import Annotated, Callable
 
 from fastmcp import FastMCP
+from fastmcp.server.middleware import Middleware
 from fastmcp.utilities.docstring_parsing import parse_docstring
 from mcp.types import Icon, ToolAnnotations
 from pydantic import BeforeValidator
 
 from adloop import diagnostics
 from adloop.runtime import current_config
+from adloop.safety.approval import (
+    APPROVE_TOOL,
+    CARD_MIME_TYPE,
+    CARD_URI,
+    card_html,
+    client_shows_cards,
+    is_app_only,
+    with_card,
+)
 
 # openWorldHint: every tool talks to an external service (Google, Reddit,
 # a live web page), which directories such as ChatGPT's require to be said.
@@ -179,6 +189,44 @@ mcp = FastMCP(
     ],
 )
 
+
+
+@mcp.resource(
+    CARD_URI,
+    name="approval_card",
+    title="AdLoop approval card",
+    description="Renders a change preview with Test run and Apply buttons.",
+    mime_type=CARD_MIME_TYPE,
+    meta={"ui": {"prefersBorder": False}},
+)
+def approval_card() -> str:
+    return card_html()
+
+
+class _AppOnlyToolsForCardClients(Middleware):
+    """List and run app-only tools only for apps that render cards.
+
+    The MCP Apps spec makes a card-capable app hide app-only tools from its
+    model. An app without the extension knows nothing about that rule and
+    would hand them to its model, so they are not offered to it at all.
+    """
+
+    async def on_list_tools(self, context, call_next):
+        tools = await call_next(context)
+        if client_shows_cards():
+            return tools
+        return [tool for tool in tools if not is_app_only(tool.meta)]
+
+    async def on_call_tool(self, context, call_next):
+        if context.message.name == APPROVE_TOOL and not client_shows_cards():
+            from fastmcp.exceptions import ToolError
+
+            raise ToolError(f"{APPROVE_TOOL} can only be called from the AdLoop approval card.")
+        return await call_next(context)
+
+
+mcp.add_middleware(_AppOnlyToolsForCardClients())
+
 # name -> tags of every registered tool, so health_check can say which tools
 # this server offers without reaching into FastMCP internals.
 _TOOL_TAGS: dict[str, frozenset[str]] = {}
@@ -215,6 +263,20 @@ _API_DOCS: dict[str, str] = {
 }
 
 
+# Write tools that do not produce a preview of their own.
+_NO_CARD_TOOLS = frozenset({"confirm_and_apply", APPROVE_TOOL})
+
+
+def _with_approval_card(fn: Callable) -> Callable:
+    """Hand a write tool's preview to the approval card when the app shows one."""
+
+    @functools.wraps(fn)
+    def wrapper(*args, **kwargs):
+        return with_card(fn(*args, **kwargs))
+
+    return wrapper
+
+
 def _tool(*, title: str, annotations: ToolAnnotations, tags: set[str], **kwargs):
     """Register a tool with its title in both places MCP defines one, and
     with a link to the API it calls.
@@ -234,13 +296,21 @@ def _tool(*, title: str, annotations: ToolAnnotations, tags: set[str], **kwargs)
         description = parse_docstring(fn).description or inspect.cleandoc(fn.__doc__ or "")
         if docs and "https://" not in description:
             description = f"{description}\n\n{docs}"
-        _TOOL_TAGS[kwargs.get("name") or fn.__name__] = frozenset(tags)
+        name = kwargs.get("name") or fn.__name__
+        options = dict(kwargs)
+        if not annotations.read_only_hint and name not in _NO_CARD_TOOLS:
+            # Write tools return a preview; apps with MCP Apps support
+            # render it as the approval card.
+            options["meta"] = {**(options.get("meta") or {}), "ui": {"resourceUri": CARD_URI}}
+            fn = _with_approval_card(fn)
+        if not is_app_only(options.get("meta")):
+            _TOOL_TAGS[name] = frozenset(tags)
         return mcp.tool(
             title=title,
             annotations=annotations,
             tags=tags,
             description=description,
-            **kwargs,
+            **options,
         )(fn)
 
     return register
@@ -3773,6 +3843,11 @@ def confirm_and_apply(
     APPLY_IN_PROGRESS means an earlier call claimed this plan first, so this
     call executed nothing.
 
+    Approval cards: in AI apps that show AdLoop's approval card with the
+    preview, dry_run=false is REFUSED with status APPROVE_ON_CARD, because
+    only the user's click on the card applies the change. Dry runs still
+    work. The workspace owner can allow approval in chat as well.
+
     Args:
         plan_id: The plan_id returned by a prior draft_*, update_*, add_*,
             pause/enable/remove or other preview tool call. An unknown or
@@ -3781,8 +3856,76 @@ def confirm_and_apply(
             applies the change for real.
     """
     from adloop.ads.write import confirm_and_apply as _impl
+    from adloop.safety.approval import chat_apply_refusal
 
+    if not dry_run:
+        refusal = chat_apply_refusal(plan_id)
+        if refusal is not None:
+            return refusal
     return _impl(current_config(), plan_id=plan_id, dry_run=dry_run)
+
+
+@_tool(
+    title="Approve a change on its card",
+    annotations=_DESTRUCTIVE,
+    tags={"core"},
+    meta={"ui": {"resourceUri": CARD_URI, "visibility": ["app"]}},
+)
+@_safe
+def approve_change(
+    plan_id: str,
+    code: str,
+    action: str = "test",
+    acknowledged: bool = False,
+) -> dict:
+    """Run, apply or discard a previewed change from its approval card.
+
+    Called only by the AdLoop approval card when the user clicks a button;
+    AI apps keep this tool out of the model's tool list.
+
+    Args:
+        plan_id: The plan shown on the card.
+        code: The card's approval code for this plan.
+        action: "test" (dry run), "apply" (real change) or "discard".
+        acknowledged: The user ticked "cannot be undone"; required to apply a
+            plan that needs double confirmation.
+    """
+    from adloop.ads.write import confirm_and_apply as _impl
+    from adloop.safety.approval import card_click, code_matches
+    from adloop.safety.audit import log_mutation
+    from adloop.safety.preview import get_plan, remove_plan
+
+    if action not in {"test", "apply", "discard"}:
+        return {"error": "action must be test, apply or discard."}
+    plan = get_plan(plan_id)
+    if plan is None:
+        return {
+            "error": f"No pending plan '{plan_id}': it is no longer pending "
+            "(applied, discarded or expired)."
+        }
+    if not code_matches(plan, code):
+        return {"error": "This card does not match the change. Draft the change again."}
+    config = current_config()
+    if action == "discard":
+        remove_plan(plan_id)
+        log_mutation(
+            config.safety.log_file,
+            operation=plan.operation,
+            customer_id=plan.customer_id,
+            entity_type=plan.entity_type,
+            entity_id=plan.entity_id,
+            changes=plan.changes,
+            dry_run=True,
+            result="discarded",
+        )
+        return {"status": "DISCARDED", "plan_id": plan_id, "operation": plan.operation}
+    if action == "apply" and plan.requires_double_confirm and not acknowledged:
+        return {
+            "error": "This change cannot be undone: tick the confirmation on the "
+            "card before applying."
+        }
+    with card_click():
+        return _impl(config, plan_id=plan_id, dry_run=action == "test")
 
 
 # ---------------------------------------------------------------------------

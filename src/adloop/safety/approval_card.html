@@ -1,0 +1,352 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AdLoop approval</title>
+<style>
+  :root {
+    --bg: var(--color-background-primary, #ffffff);
+    --bg-2: var(--color-background-secondary, #f4f4f5);
+    --fg: var(--color-text-primary, #18181b);
+    --fg-2: var(--color-text-secondary, #52525b);
+    --border: var(--color-border-primary, #e4e4e7);
+    --accent: #2563eb;
+    --accent-fg: #ffffff;
+    --ok: var(--color-text-success, #15803d);
+    --ok-bg: var(--color-background-success, #f0fdf4);
+    --warn: var(--color-text-warning, #a16207);
+    --warn-bg: var(--color-background-warning, #fefce8);
+    --bad: var(--color-text-danger, #b91c1c);
+    --bad-bg: var(--color-background-danger, #fef2f2);
+    --radius: var(--border-radius-lg, 12px);
+    --font: var(--font-sans, ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif);
+    --mono: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+  }
+  :root[data-theme="dark"] {
+    --bg: var(--color-background-primary, #18181b);
+    --bg-2: var(--color-background-secondary, #27272a);
+    --fg: var(--color-text-primary, #fafafa);
+    --fg-2: var(--color-text-secondary, #a1a1aa);
+    --border: var(--color-border-primary, #3f3f46);
+    --accent: #3b82f6;
+    --ok: var(--color-text-success, #4ade80);
+    --ok-bg: var(--color-background-success, #052e16);
+    --warn: var(--color-text-warning, #facc15);
+    --warn-bg: var(--color-background-warning, #2a2205);
+    --bad: var(--color-text-danger, #f87171);
+    --bad-bg: var(--color-background-danger, #2a0b0b);
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; background: transparent; }
+  body { font: 14px/1.45 var(--font); color: var(--fg); }
+  .card { background: var(--bg); border: 1px solid var(--border); border-radius: var(--radius); padding: 16px; }
+  .hidden { display: none !important; }
+  .head { display: flex; align-items: center; gap: 8px; color: var(--fg-2); font-size: 12px; }
+  .head svg { flex: none; }
+  .badge { margin-left: auto; border: 1px solid var(--border); border-radius: 999px; padding: 1px 8px; font-size: 11px; }
+  h1 { font-size: 16px; font-weight: 600; margin: 10px 0 2px; }
+  .sub { color: var(--fg-2); font-size: 12px; margin: 0 0 12px; overflow-wrap: anywhere; }
+  dl { display: grid; grid-template-columns: minmax(90px, max-content) 1fr; gap: 6px 12px; margin: 0; padding: 12px; background: var(--bg-2); border-radius: calc(var(--radius) - 4px); }
+  dt { color: var(--fg-2); font-size: 12px; overflow-wrap: anywhere; }
+  dd { margin: 0; overflow-wrap: anywhere; white-space: pre-wrap; }
+  dd.mono { font: 12px/1.4 var(--mono); }
+  .more { grid-column: 1 / -1; color: var(--fg-2); font-size: 12px; }
+  .note { margin-top: 10px; padding: 8px 10px; border-radius: 8px; font-size: 13px; overflow-wrap: anywhere; }
+  .note.warn { color: var(--warn); background: var(--warn-bg); }
+  .note.ok { color: var(--ok); background: var(--ok-bg); }
+  .note.bad { color: var(--bad); background: var(--bad-bg); }
+  .note.info { color: var(--fg-2); background: var(--bg-2); }
+  label.ack { display: flex; gap: 8px; align-items: flex-start; margin-top: 12px; font-size: 13px; }
+  .actions { display: flex; gap: 8px; justify-content: flex-end; margin-top: 14px; flex-wrap: wrap; }
+  button { font: inherit; font-size: 13px; font-weight: 500; border-radius: 8px; padding: 7px 14px; cursor: pointer; border: 1px solid var(--border); background: transparent; color: var(--fg); }
+  button.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-fg); }
+  button.danger { background: var(--bad); border-color: var(--bad); color: #fff; }
+  button:disabled { opacity: .45; cursor: default; }
+  .steps { display: flex; gap: 6px; margin-top: 12px; font-size: 12px; color: var(--fg-2); }
+  .steps span.done { color: var(--ok); }
+</style>
+</head>
+<body>
+<div class="card hidden" id="card">
+  <div class="head">
+    <svg width="18" height="18" viewBox="0 0 32 32" fill="none" aria-hidden="true"><rect width="32" height="32" rx="7" fill="#09090b"/><path d="M16 16 C 13.5 11.5, 6.5 11.5, 6.5 16 C 6.5 20.5, 13.5 20.5, 16 16 C 18.5 11.5, 25.5 11.5, 25.5 16 C 25.5 20.5, 18.5 20.5, 16 16 Z" stroke="#60a5fa" stroke-width="2.6" stroke-linejoin="round" stroke-linecap="round"/></svg>
+    <span data-t="brand">AdLoop · approval required</span>
+    <span class="badge" id="platform"></span>
+  </div>
+  <h1 id="title"></h1>
+  <p class="sub" id="subtitle"></p>
+  <dl id="changes"></dl>
+  <div id="warnings"></div>
+  <label class="ack hidden" id="ackRow"><input type="checkbox" id="ack"> <span data-t="ack">I understand that this cannot be undone.</span></label>
+  <div class="steps"><span id="stepTest" data-t="stepTest">1 · Test run</span><span>→</span><span id="stepApply" data-t="stepApply">2 · Apply</span></div>
+  <div id="status"></div>
+  <div class="actions" id="actions">
+    <button id="discard" data-t="discard">Discard</button>
+    <button id="test" class="primary" data-t="test">Test run</button>
+    <button id="apply" class="primary hidden" data-t="apply">Apply</button>
+  </div>
+</div>
+<script>
+(() => {
+  "use strict";
+  const META_KEY = "adloop/approval";
+  const STRINGS = {
+    en: {
+      brand: "AdLoop · approval required", ack: "I understand that this cannot be undone.",
+      stepTest: "1 · Test run", stepApply: "2 · Apply", discard: "Discard", test: "Test run", apply: "Apply",
+      running: "Running the test…", applying: "Applying…",
+      testOk: "Test run passed. Nothing was changed yet. Apply makes the change live.",
+      testForced: "Live changes are switched off, so only test runs are possible.",
+      applied: "Applied.", discarded: "Discarded. Nothing was changed.",
+      failed: "Not applied:", more: "more fields not shown",
+      msgApplied: "Applied on the AdLoop approval card: {op} (plan {id}).",
+      msgDiscarded: "Discarded on the AdLoop approval card: {op} (plan {id}). Nothing was changed.",
+      gone: "This change is no longer pending (applied, discarded or expired).",
+    },
+    de: {
+      brand: "AdLoop · Freigabe nötig", ack: "Mir ist klar, dass sich das nicht rückgängig machen lässt.",
+      stepTest: "1 · Testlauf", stepApply: "2 · Anwenden", discard: "Verwerfen", test: "Testlauf", apply: "Anwenden",
+      running: "Testlauf läuft…", applying: "Wird angewendet…",
+      testOk: "Testlauf bestanden. Noch ist nichts geändert. Anwenden macht die Änderung live.",
+      testForced: "Echte Änderungen sind ausgeschaltet, daher sind nur Testläufe möglich.",
+      applied: "Angewendet.", discarded: "Verworfen. Nichts wurde geändert.",
+      failed: "Nicht angewendet:", more: "weitere Felder nicht angezeigt",
+      msgApplied: "Auf der AdLoop-Freigabekarte angewendet: {op} (Plan {id}).",
+      msgDiscarded: "Auf der AdLoop-Freigabekarte verworfen: {op} (Plan {id}). Nichts wurde geändert.",
+      gone: "Diese Änderung ist nicht mehr offen (angewendet, verworfen oder abgelaufen).",
+    },
+  };
+  const PLATFORMS = { google: "Google Ads", reddit: "Reddit Ads", ga4: "Google Analytics", gtm: "Tag Manager" };
+  const MAX_ROWS = 14;
+
+  let lang = "en";
+  let nextId = 1;
+  const pending = new Map();
+  let plan = null; // { planId, code, tool, preview }
+  let busy = false;
+
+  const $ = (id) => document.getElementById(id);
+  const t = (key) => (STRINGS[lang] || STRINGS.en)[key] || STRINGS.en[key] || key;
+
+  function post(message) { window.parent.postMessage(message, "*"); }
+  function request(method, params) {
+    const id = nextId++;
+    post({ jsonrpc: "2.0", id, method, params });
+    return new Promise((resolve, reject) => pending.set(id, { resolve, reject }));
+  }
+  function notify(method, params) { post({ jsonrpc: "2.0", method, params }); }
+
+  function applyContext(ctx) {
+    if (!ctx) return;
+    if (ctx.theme) document.documentElement.dataset.theme = ctx.theme;
+    const vars = ctx.styles && ctx.styles.variables;
+    if (vars) for (const [k, v] of Object.entries(vars)) if (v) document.documentElement.style.setProperty(k, v);
+    if (typeof ctx.locale === "string" && ctx.locale.toLowerCase().startsWith("de")) lang = "de";
+    for (const el of document.querySelectorAll("[data-t]")) el.textContent = t(el.dataset.t);
+  }
+
+  function reportSize() {
+    const el = document.documentElement;
+    notify("ui/notifications/size-changed", { width: el.scrollWidth, height: el.scrollHeight });
+  }
+
+  function humanize(op) {
+    const s = String(op || "change").replace(/^(reddit|gtm|ga4)_/, "").replace(/_/g, " ");
+    return s.charAt(0).toUpperCase() + s.slice(1);
+  }
+
+  function platformOf(preview) {
+    const op = String(preview.operation || "");
+    if (preview.platform === "reddit" || op.startsWith("reddit_")) return "reddit";
+    if (op.startsWith("gtm_")) return "gtm";
+    if (op.includes("key_event")) return "ga4";
+    return "google";
+  }
+
+  function formatValue(value) {
+    if (value === null || value === undefined) return { text: "–", mono: false };
+    if (typeof value === "boolean") return { text: value ? "✓" : "✗", mono: false };
+    if (typeof value !== "object") return { text: String(value), mono: false };
+    if (Array.isArray(value) && value.every((v) => typeof v !== "object" || v === null)) {
+      return { text: value.map(String).join("\n"), mono: false };
+    }
+    return { text: JSON.stringify(value, null, 2), mono: true };
+  }
+
+  function row(dl, key, value) {
+    const dt = document.createElement("dt");
+    dt.textContent = String(key).replace(/_/g, " ");
+    const dd = document.createElement("dd");
+    const v = formatValue(value);
+    dd.textContent = v.text;
+    if (v.mono) dd.classList.add("mono");
+    dl.append(dt, dd);
+  }
+
+  function note(container, kind, text) {
+    const div = document.createElement("div");
+    div.className = "note " + kind;
+    div.textContent = text;
+    container.append(div);
+  }
+
+  function render() {
+    const p = plan.preview;
+    $("platform").textContent = PLATFORMS[platformOf(p)];
+    $("title").textContent = humanize(p.operation);
+    const sub = [];
+    if (p.entity_type) sub.push(String(p.entity_type).replace(/_/g, " ") + (p.entity_id ? " " + p.entity_id : ""));
+    if (p.customer_id) sub.push(String(p.customer_id));
+    sub.push("plan " + plan.planId);
+    $("subtitle").textContent = sub.join(" · ");
+
+    const dl = $("changes");
+    dl.replaceChildren();
+    const entries = Object.entries(p.changes || {});
+    entries.slice(0, MAX_ROWS).forEach(([k, v]) => row(dl, k, v));
+    if (entries.length > MAX_ROWS) {
+      const more = document.createElement("div");
+      more.className = "more";
+      more.textContent = (entries.length - MAX_ROWS) + " " + t("more");
+      dl.append(more);
+    }
+    if (!entries.length) dl.classList.add("hidden");
+
+    const warnings = $("warnings");
+    warnings.replaceChildren();
+    const list = [].concat(p.warnings || [], (p.changes && p.changes.warnings) || []);
+    for (const w of list) note(warnings, "warn", typeof w === "string" ? w : JSON.stringify(w));
+
+    $("ackRow").classList.toggle("hidden", !p.requires_double_confirm);
+    $("card").classList.remove("hidden");
+    updateButtons();
+  }
+
+  let tested = false;
+  let finished = false;
+  function updateButtons() {
+    const needsAck = plan.preview.requires_double_confirm && !$("ack").checked;
+    $("test").classList.toggle("hidden", tested || finished);
+    $("apply").classList.toggle("hidden", !tested || finished);
+    $("apply").classList.toggle("danger", !!plan.preview.requires_double_confirm);
+    $("apply").classList.toggle("primary", !plan.preview.requires_double_confirm);
+    $("discard").classList.toggle("hidden", finished);
+    $("test").disabled = busy;
+    $("apply").disabled = busy || needsAck;
+    $("discard").disabled = busy;
+    $("stepTest").classList.toggle("done", tested);
+    $("stepApply").classList.toggle("done", finished && tested);
+    reportSize();
+  }
+
+  function setStatus(kind, text) {
+    const s = $("status");
+    s.replaceChildren();
+    if (text) note(s, kind, text);
+    reportSize();
+  }
+
+  function resultPayload(result) {
+    if (!result) return {};
+    if (result.structuredContent && typeof result.structuredContent === "object") return result.structuredContent;
+    const text = (result.content || []).filter((c) => c && c.type === "text").map((c) => c.text).join("");
+    try { return JSON.parse(text); } catch (_) { return { message: text }; }
+  }
+
+  async function act(action) {
+    if (busy || !plan) return;
+    busy = true;
+    setStatus("info", action === "test" ? t("running") : action === "apply" ? t("applying") : "");
+    updateButtons();
+    try {
+      const result = await request("tools/call", {
+        name: plan.tool,
+        arguments: { plan_id: plan.planId, code: plan.code, action, acknowledged: $("ack").checked },
+      });
+      const r = resultPayload(result);
+      const status = r.status || "";
+      if (result && result.isError || r.error) {
+        setStatus("bad", t("failed") + " " + (r.error || r.message || JSON.stringify(r)));
+        if (/no pending plan|no longer pending/i.test(String(r.error || ""))) { finished = true; setStatus("info", t("gone")); }
+      } else if (action === "test") {
+        if (status === "DRY_RUN_SUCCESS") {
+          tested = !r.dry_run_forced_by;
+          setStatus(r.dry_run_forced_by ? "warn" : "ok", r.dry_run_forced_by ? (r.remediation || t("testForced")) : (t("testOk") + (r.note ? " " + r.note : "")));
+        } else {
+          setStatus("bad", t("failed") + " " + (r.error || r.message || status));
+        }
+      } else if (action === "apply") {
+        if (status === "APPLIED" || status === "PARTIAL_UPLOAD") {
+          finished = true;
+          setStatus("ok", t("applied") + (r.message ? " " + r.message : ""));
+          tell(t("msgApplied"));
+        } else {
+          setStatus(status === "DRY_RUN_SUCCESS" ? "warn" : "bad", r.remediation || r.message || r.error || status);
+        }
+      } else if (action === "discard") {
+        finished = true;
+        setStatus("info", t("discarded"));
+        tell(t("msgDiscarded"));
+      }
+    } catch (err) {
+      setStatus("bad", t("failed") + " " + (err && err.message ? err.message : String(err)));
+    } finally {
+      busy = false;
+      updateButtons();
+    }
+  }
+
+  function tell(template) {
+    const text = template.replace("{op}", humanize(plan.preview.operation)).replace("{id}", plan.planId);
+    request("ui/message", { role: "user", content: { type: "text", text } }).catch(() => {});
+  }
+
+  function onToolResult(result) {
+    if (plan || !result) return; // later results come from the card's own calls
+    const meta = (result._meta && result._meta[META_KEY]) || null;
+    if (!meta || !meta.code || !meta.plan_id) { reportSize(); return; }
+    const preview = resultPayload(result);
+    plan = { planId: meta.plan_id, code: meta.code, tool: meta.tool || "approve_change", preview };
+    render();
+  }
+
+  window.addEventListener("message", (event) => {
+    if (event.source !== window.parent) return;
+    const msg = event.data;
+    if (!msg || msg.jsonrpc !== "2.0") return;
+    if (msg.id !== undefined && pending.has(msg.id) && !msg.method) {
+      const { resolve, reject } = pending.get(msg.id);
+      pending.delete(msg.id);
+      if (msg.error) reject(new Error(msg.error.message || "error")); else resolve(msg.result);
+      return;
+    }
+    switch (msg.method) {
+      case "ui/notifications/tool-result": onToolResult(msg.params); break;
+      case "ui/notifications/host-context-changed": applyContext(msg.params); break;
+      case "ui/resource-teardown": post({ jsonrpc: "2.0", id: msg.id, result: {} }); break;
+      case "ping": post({ jsonrpc: "2.0", id: msg.id, result: {} }); break;
+      default:
+        if (msg.id !== undefined && msg.method) post({ jsonrpc: "2.0", id: msg.id, error: { code: -32601, message: "Method not found" } });
+    }
+  });
+
+  $("test").addEventListener("click", () => act("test"));
+  $("apply").addEventListener("click", () => act("apply"));
+  $("discard").addEventListener("click", () => act("discard"));
+  $("ack").addEventListener("change", updateButtons);
+  new ResizeObserver(reportSize).observe(document.documentElement);
+
+  request("ui/initialize", {
+    protocolVersion: "2026-01-26",
+    appCapabilities: { availableDisplayModes: ["inline"] },
+    clientInfo: { name: "AdLoop approval card", version: "1" },
+  }).then((result) => {
+    applyContext(result && result.hostContext);
+    notify("ui/notifications/initialized", {});
+    reportSize();
+  }).catch(() => notify("ui/notifications/initialized", {}));
+})();
+</script>
+</body>
+</html>

@@ -87,6 +87,12 @@ class SafetyConfig:
     # (which blocks real writes entirely), this only enforces the order:
     # preview first, apply second.
     two_phase_apply: bool = False
+    # Approval cards: when the AI app shows AdLoop's approval card (MCP
+    # Apps), only a click on the card applies a change, and
+    # confirm_and_apply(dry_run=false) from the model is refused. True also
+    # accepts the approval in chat, for app surfaces that claim card support
+    # but do not render it. Apps without cards always use the chat flow.
+    allow_chat_approval: bool = False
     log_file: str = "~/.adloop/audit.log"
     blocked_operations: list[str] = field(default_factory=list)
 
@@ -217,6 +223,7 @@ def load_config(config_path: str | None = None) -> AdLoopConfig:
             max_bid_increase_pct=safety_raw.get("max_bid_increase_pct", 100),
             require_dry_run=safety_raw.get("require_dry_run", True),
             two_phase_apply=safety_raw.get("two_phase_apply", False),
+            allow_chat_approval=safety_raw.get("allow_chat_approval", False),
             log_file=_text(safety_raw, "log_file", "~/.adloop/audit.log"),
             blocked_operations=safety_raw.get("blocked_operations", []),
         ),
