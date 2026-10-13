@@ -414,7 +414,7 @@ def _wizard_gsc_step(oauth_ok: bool, _existing) -> str:
     )
 
 
-def _wizard_reddit_step(_existing) -> dict[str, str]:
+def _wizard_reddit_step(_existing, required: bool = False) -> dict[str, str]:
     """Optionally connect Reddit Ads: own developer app, own OAuth, own token file.
 
     Returns the ``reddit:`` values for the config. Reddit's redirect URI
@@ -430,7 +430,8 @@ def _wizard_reddit_step(_existing) -> dict[str, str]:
         "ad_account_id": _existing("reddit", "ad_account_id"),
         "username": _existing("reddit", "username"),
     }
-    if not _prompt_bool("Connect Reddit Ads? (optional)", default=bool(existing_id)):
+    # Without Google, Reddit is the platform being set up: no opt-out.
+    if not required and not _prompt_bool("Connect Reddit Ads? (optional)", default=bool(existing_id)):
         return values
 
     _print()
@@ -589,6 +590,70 @@ def run_init_wizard() -> None:
             return str(existing_config[section].get(key, fallback))
         return fallback
 
+    # Both platforms are optional; a workspace can run on Reddit alone.
+    _print("  AdLoop connects Google (Ads, Analytics, Tag Manager, Search Console)")
+    _print("  and Reddit Ads. Set up one or both.")
+    _print()
+    use_google = _prompt_bool(
+        "Set up Google?", default=_existing("google", "credentials_path") != "" or existing_config is None
+    )
+    credentials_path = project_id = developer_token = login_customer_id = ""
+    step_num = 0
+    if use_google:
+        step_num = _wizard_google_steps(_existing)
+        credentials_path, project_id, developer_token, login_customer_id = _WIZARD_GOOGLE
+
+    # OAuth + auto-discovery
+    step_num += 1
+    _step_header(step_num, "Authorization & Account Discovery" if use_google else "Writing a first config")
+
+    # Write a temporary config for OAuth + discovery.  If the wizard is
+    # interrupted after this point, _cleanup_on_cancel restores the original.
+    _ADLOOP_DIR.mkdir(parents=True, exist_ok=True)
+    temp_config_yaml = _generate_config_yaml(
+        project_id=project_id,
+        credentials_path=credentials_path,
+        property_id="",
+        developer_token=developer_token,
+        customer_id="",
+        login_customer_id=login_customer_id,
+        max_daily_budget=50.0,
+        require_dry_run=True,
+    )
+    _CONFIG_PATH.write_text(temp_config_yaml)
+
+    # Everything below uses the temp config for OAuth and discovery.
+    # If the wizard is interrupted, restore the original config (or remove
+    # the temp) so we never leave a half-baked config on disk.
+    try:
+        _run_wizard_post_config(
+            credentials_path=credentials_path,
+            project_id=project_id,
+            developer_token=developer_token,
+            login_customer_id=login_customer_id,
+            step_num=step_num,
+            _existing=_existing,
+            use_google=use_google,
+        )
+    except KeyboardInterrupt:
+        if _original_config_backup is not None:
+            _CONFIG_PATH.write_text(_original_config_backup)
+        elif _CONFIG_PATH.exists():
+            _CONFIG_PATH.unlink()
+        raise
+
+
+_WIZARD_GOOGLE: tuple[str, str, str, str] = ("", "", "", "")
+
+
+def _wizard_google_steps(_existing) -> int:
+    """The Google project, credentials and API access steps; returns the last step number.
+
+    The collected values land in ``_WIZARD_GOOGLE`` (credentials path,
+    project id, developer token, login customer id).
+    """
+    global _WIZARD_GOOGLE
+
     # Step 1: Google Cloud project
     #
     # AdLoop no longer ships OAuth credentials. Every install brings its
@@ -641,44 +706,8 @@ def run_init_wizard() -> None:
         default=_existing("ads", "login_customer_id"),
         required=False,
     )
-
-    # OAuth + auto-discovery
-    step_num += 1
-    _step_header(step_num, "Authorization & Account Discovery")
-
-    # Write a temporary config for OAuth + discovery.  If the wizard is
-    # interrupted after this point, _cleanup_on_cancel restores the original.
-    _ADLOOP_DIR.mkdir(parents=True, exist_ok=True)
-    temp_config_yaml = _generate_config_yaml(
-        project_id=project_id,
-        credentials_path=credentials_path,
-        property_id="",
-        developer_token=developer_token,
-        customer_id="",
-        login_customer_id=login_customer_id,
-        max_daily_budget=50.0,
-        require_dry_run=True,
-    )
-    _CONFIG_PATH.write_text(temp_config_yaml)
-
-    # Everything below uses the temp config for OAuth and discovery.
-    # If the wizard is interrupted, restore the original config (or remove
-    # the temp) so we never leave a half-baked config on disk.
-    try:
-        _run_wizard_post_config(
-            credentials_path=credentials_path,
-            project_id=project_id,
-            developer_token=developer_token,
-            login_customer_id=login_customer_id,
-            step_num=step_num,
-            _existing=_existing,
-        )
-    except KeyboardInterrupt:
-        if _original_config_backup is not None:
-            _CONFIG_PATH.write_text(_original_config_backup)
-        elif _CONFIG_PATH.exists():
-            _CONFIG_PATH.unlink()
-        raise
+    _WIZARD_GOOGLE = (credentials_path, project_id, developer_token, login_customer_id)
+    return step_num
 
 
 def _run_wizard_post_config(
@@ -689,10 +718,9 @@ def _run_wizard_post_config(
     login_customer_id: str,
     step_num: int,
     _existing: object,
+    use_google: bool = True,
 ) -> None:
     """Run the wizard steps after the temp config has been written."""
-    from adloop.config import load_config
-
     # Optional: copy custom credentials to ~/.adloop/
     if credentials_path:
         creds_expanded = Path(credentials_path).expanduser()
@@ -705,6 +733,54 @@ def _run_wizard_post_config(
 
                 shutil.copy2(creds_expanded, adloop_creds)
                 _print(f"  ✓ Credentials copied to {adloop_creds}")
+
+    oauth_ok = False
+    property_id = ""
+    customer_id = ""
+    gtm_account_id = gtm_container_id = gsc_site_url = ""
+    if use_google:
+        oauth_ok, property_id, customer_id, step_num = _wizard_google_discovery(step_num, _existing)
+
+    # Optional service pins: GTM / Search Console / PageSpeed. All three
+    # work without config (explicit args or discovery per call) — a pin
+    # just saves the model a lookup and locks tools to the right property.
+    step_num += 1
+    if use_google:
+        _step_header(step_num, "Optional Services (GTM, Search Console, PageSpeed)")
+        gtm_account_id, gtm_container_id = _wizard_gtm_step(oauth_ok, _existing)
+        gsc_site_url = _wizard_gsc_step(oauth_ok, _existing)
+    else:
+        _step_header(step_num, "PageSpeed (optional)")
+    pagespeed_api_key = _prompt(
+        "PageSpeed Insights API key (optional, Enter to skip)",
+        default=_existing("pagespeed", "api_key"),  # type: ignore[operator]
+        required=False,
+    )
+
+    # Reddit Ads: a second ad platform with its own OAuth app and token file.
+    step_num += 1
+    _step_header(step_num, "Reddit Ads" if not use_google else "Reddit Ads (optional)")
+    reddit_values = _wizard_reddit_step(_existing, required=not use_google)
+    _wizard_finish(
+        step_num=step_num,
+        _existing=_existing,
+        credentials_path=credentials_path,
+        project_id=project_id,
+        developer_token=developer_token,
+        login_customer_id=login_customer_id,
+        property_id=property_id,
+        customer_id=customer_id,
+        gtm_account_id=gtm_account_id,
+        gtm_container_id=gtm_container_id,
+        gsc_site_url=gsc_site_url,
+        pagespeed_api_key=pagespeed_api_key,
+        reddit_values=reddit_values,
+    )
+
+
+def _wizard_google_discovery(step_num: int, _existing) -> tuple[bool, str, str, int]:
+    """Google sign-in plus GA4 and Ads account discovery: (oauth_ok, property_id, customer_id, step)."""
+    from adloop.config import load_config
 
     _print("  Signing in with Google (this may open a browser)...")
     _print()
@@ -797,24 +873,26 @@ def _run_wizard_post_config(
             default=_existing("ads", "customer_id"),  # type: ignore[operator]
         )
 
-    # Optional service pins: GTM / Search Console / PageSpeed. All three
-    # work without config (explicit args or discovery per call) — a pin
-    # just saves the model a lookup and locks tools to the right property.
-    step_num += 1
-    _step_header(step_num, "Optional Services (GTM, Search Console, PageSpeed)")
-    gtm_account_id, gtm_container_id = _wizard_gtm_step(oauth_ok, _existing)
-    gsc_site_url = _wizard_gsc_step(oauth_ok, _existing)
-    pagespeed_api_key = _prompt(
-        "PageSpeed Insights API key (optional, Enter to skip)",
-        default=_existing("pagespeed", "api_key"),  # type: ignore[operator]
-        required=False,
-    )
+    return oauth_ok, property_id, customer_id, step_num
 
-    # Reddit Ads: a second ad platform with its own OAuth app and token file.
-    step_num += 1
-    _step_header(step_num, "Reddit Ads (optional)")
-    reddit_values = _wizard_reddit_step(_existing)
 
+def _wizard_finish(
+    *,
+    step_num: int,
+    _existing,
+    credentials_path: str,
+    project_id: str,
+    developer_token: str,
+    login_customer_id: str,
+    property_id: str,
+    customer_id: str,
+    gtm_account_id: str,
+    gtm_container_id: str,
+    gsc_site_url: str,
+    pagespeed_api_key: str,
+    reddit_values: dict,
+) -> None:
+    """Safety defaults, the final config and the client snippets."""
     # Safety defaults
     step_num += 1
     _step_header(step_num, "Safety Defaults")

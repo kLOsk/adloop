@@ -376,7 +376,7 @@ uv run adloop init
 
 ### What `adloop init` does
 
-The wizard walks you through:
+The wizard first asks whether to set up Google. Answer no to run AdLoop on Reddit Ads alone: it skips steps 1 to 6 and goes straight to the Reddit step. Otherwise it walks you through:
 
 1. **Google Cloud setup** — creates a project, enables the three APIs, generates an OAuth client (see [Custom Google Cloud Project Setup](#custom-google-cloud-project-setup) below for the exact steps the wizard refers you to)
 2. **Google Ads API access** — applied for on your Cloud project's [Google Ads API Overview page](https://console.cloud.google.com/google/ads-apis/overview); the legacy developer-token prompt can be left empty
@@ -384,9 +384,10 @@ The wizard walks you through:
 4. **OAuth sign-in** — opens a browser to sign in with Google (or prints a URL for headless servers)
 5. **Auto-discovers your accounts** — finds your GA4 properties and Ads accounts automatically
 6. **Optional services** — pin a GTM container, a Search Console property (both auto-discovered too), and a PageSpeed API key; skip any of them with Enter
-7. **Safety defaults** — budget cap and dry-run preference
-8. **Toolsets** — optionally expose only part of the tool catalog to your AI client (see [Toolsets](#toolsets--trim-the-context-footprint))
-9. **Editor config snippets** — prints MCP configuration for both Cursor and Claude Code, including your toolset selection
+7. **Reddit Ads** — optional next to Google, required without it: your own Reddit developer app, sign-in, and the default ad account
+8. **Safety defaults** — budget cap and dry-run preference
+9. **Toolsets** — optionally expose only part of the tool catalog to your AI client (see [Toolsets](#toolsets--trim-the-context-footprint))
+10. **Editor config snippets** — prints MCP configuration for both Cursor and Claude Code, including your toolset selection
 
 ### Requirements
 
