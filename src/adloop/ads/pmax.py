@@ -502,3 +502,220 @@ def apply_asset_group_signals(client: object, cid: str, changes: dict) -> dict:
         "audience_added": bool(changes.get("audience_id")),
         "signals_removed": len(changes.get("remove") or []),
     }
+
+
+# ---------------------------------------------------------------------------
+# Product exclusions: the asset group's listing group filter tree (retail)
+# ---------------------------------------------------------------------------
+
+_DIMENSIONS = {
+    "item_id": ("product_item_id", None),
+    "brand": ("product_brand", None),
+    **{f"custom_label_{i}": ("product_custom_attribute", f"INDEX{i}") for i in range(5)},
+}
+_FILTER_FIELDS = (
+    "asset_group_listing_group_filter.resource_name, asset_group_listing_group_filter.id, "
+    "asset_group_listing_group_filter.type, asset_group_listing_group_filter.parent_listing_group_filter, "
+    "asset_group_listing_group_filter.case_value.product_item_id.value, "
+    "asset_group_listing_group_filter.case_value.product_brand.value, "
+    "asset_group_listing_group_filter.case_value.product_custom_attribute.index, "
+    "asset_group_listing_group_filter.case_value.product_custom_attribute.value"
+)
+_MAX_EXCLUSIONS = 500
+
+
+def _filter_rows(config: AdLoopConfig, customer_id: str, asset_group_id: str) -> list[dict]:
+    from adloop.ads.gaql import execute_query
+
+    rows = execute_query(
+        config,
+        customer_id,
+        f"SELECT {_FILTER_FIELDS} FROM asset_group_listing_group_filter "
+        f"WHERE asset_group.id = {int(asset_group_id)} "
+        "AND asset_group_listing_group_filter.listing_source = 'SHOPPING'",
+    )
+    prefix = "asset_group_listing_group_filter."
+    nodes = []
+    for row in rows:
+        index = row.get(prefix + "case_value.product_custom_attribute.index")
+        if index in (None, "", "UNSPECIFIED", "UNKNOWN"):
+            index = None
+        if index:
+            dimension, value = f"custom_label_{str(index)[-1]}", row.get(prefix + "case_value.product_custom_attribute.value")
+        elif row.get(prefix + "case_value.product_item_id.value"):
+            dimension, value = "item_id", row.get(prefix + "case_value.product_item_id.value")
+        elif row.get(prefix + "case_value.product_brand.value"):
+            dimension, value = "brand", row.get(prefix + "case_value.product_brand.value")
+        else:
+            dimension, value = None, ""
+        nodes.append({
+            "resource_name": row.get(prefix + "resource_name"),
+            "type": str(row.get(prefix + "type") or ""),
+            "parent": row.get(prefix + "parent_listing_group_filter") or None,
+            "dimension": dimension,
+            "value": value or "",
+        })
+    return nodes
+
+
+def read_product_filter(nodes: list[dict]) -> dict:
+    """The current tree in the supported shapes, or a reason it is not one.
+
+    Supported: no split (one UNIT_INCLUDED root), or a root SUBDIVISION
+    whose children are units on one dimension plus the empty "everything
+    else" unit.
+    """
+    if not nodes:
+        return {"error": "This asset group has no product filter: it is not a retail (Merchant Center) asset group."}
+    roots = [n for n in nodes if not n["parent"]]
+    if len(roots) != 1:
+        return {"error": "The product filter has an unexpected shape; edit it in Google Ads."}
+    root = roots[0]
+    if root["type"] == "UNIT_INCLUDED":
+        return {"dimension": None, "excluded": [], "included": [], "nodes": nodes}
+    if root["type"] != "SUBDIVISION":
+        return {"error": f"The product filter root is {root['type']}; edit it in Google Ads."}
+    children = [n for n in nodes if n["parent"] == root["resource_name"]]
+    if len(children) != len(nodes) - 1 or any(c["type"] == "SUBDIVISION" for c in children):
+        return {"error": "The product filter is split on more than one level; edit it in Google Ads."}
+    valued = [c for c in children if c["value"]]
+    dimensions = {c["dimension"] for c in valued}
+    others = [c for c in children if not c["value"]]
+    if len(dimensions) > 1 or len(others) != 1:
+        return {"error": "The product filter mixes dimensions or lacks an 'everything else' group; edit it in Google Ads."}
+    return {
+        "dimension": dimensions.pop() if dimensions else None,
+        "excluded": [c["value"] for c in valued if c["type"] == "UNIT_EXCLUDED"],
+        "included": [c["value"] for c in valued if c["type"] == "UNIT_INCLUDED"],
+        "others_type": others[0]["type"],
+        "nodes": nodes,
+    }
+
+
+def draft_pmax_product_exclusions(
+    config: AdLoopConfig,
+    *,
+    customer_id: str = "",
+    asset_group_id: str = "",
+    dimension: str = "item_id",
+    exclude_values: list[str] | None = None,
+) -> dict:
+    """Draft the full list of products a retail PMax asset group excludes, on one dimension — preview."""
+    from adloop.safety.guards import SafetyViolation, check_blocked_operation
+    from adloop.safety.preview import ChangePlan, store_plan
+
+    try:
+        check_blocked_operation("update_pmax_product_filter", config.safety)
+    except SafetyViolation as e:
+        return {"error": str(e)}
+    asset_group_id = str(asset_group_id or "").strip()
+    dimension = (dimension or "").strip().lower()
+    errors = []
+    if not asset_group_id.isdigit():
+        errors.append("asset_group_id is required (see get_pmax_performance)")
+    if dimension not in _DIMENSIONS:
+        errors.append(f"dimension must be one of {sorted(_DIMENSIONS)}")
+    wanted = list(dict.fromkeys(str(v).strip() for v in (exclude_values or []) if str(v).strip()))
+    if len(wanted) > _MAX_EXCLUSIONS:
+        errors.append(f"at most {_MAX_EXCLUSIONS} values per draft")
+    if errors:
+        return {"error": "Validation failed", "details": errors}
+
+    current = read_product_filter(_filter_rows(config, customer_id, asset_group_id))
+    if "error" in current:
+        return current
+    if current["dimension"] and current["dimension"] != dimension:
+        return {
+            "error": f"The product filter is split by {current['dimension']}; exclusions by {dimension} would "
+            "replace that split. Use the same dimension, or change the split in Google Ads."
+        }
+    if current["included"]:
+        return {
+            "error": "The product filter targets specific products, not all products minus exclusions; "
+            "edit it in Google Ads."
+        }
+    if current.get("others_type") == "UNIT_EXCLUDED":
+        return {"error": "The 'everything else' group is excluded; edit this filter in Google Ads."}
+    before = {v.lower(): v for v in current["excluded"]}
+    after = {v.lower(): v for v in wanted}
+    if before.keys() == after.keys():
+        return {"status": "NO_CHANGE", "message": "The asset group already excludes exactly these values."}
+
+    warnings = [
+        "The product filter is rebuilt in one request: the old groups are removed and the new ones "
+        "created, so the asset group never serves excluded products in between.",
+    ]
+    if dimension == "item_id":
+        warnings.append("Item ids must match the feed's id attribute exactly as in Merchant Center.")
+    plan = ChangePlan(
+        operation="update_pmax_product_filter",
+        entity_type="asset_group",
+        entity_id=asset_group_id,
+        customer_id=customer_id,
+        changes={
+            "asset_group_id": asset_group_id,
+            "dimension": dimension,
+            "exclude_values": wanted,
+            "newly_excluded": [after[k] for k in after.keys() - before.keys()],
+            "no_longer_excluded": [before[k] for k in before.keys() - after.keys()],
+            # Bottom-up removal of the current tree, children before the root.
+            "remove_nodes": [n["resource_name"] for n in sorted(current["nodes"], key=lambda n: n["parent"] is None)],
+        },
+    )
+    store_plan(plan)
+    preview = plan.to_preview()
+    preview["warnings"] = warnings
+    return preview
+
+
+def apply_pmax_product_filter(client: object, cid: str, changes: dict) -> dict:
+    service = client.get_service("GoogleAdsService")
+    group = changes["asset_group_id"]
+    group_path = service.asset_group_path(cid, group)
+    shopping = client.enums.ListingGroupFilterListingSourceEnum.SHOPPING
+    types = client.enums.ListingGroupFilterTypeEnum
+    field, index = _DIMENSIONS[changes["dimension"]]
+    operations = []
+
+    for resource_name in changes["remove_nodes"]:
+        op = client.get_type("MutateOperation")
+        op.asset_group_listing_group_filter_operation.remove = resource_name
+        operations.append(op)
+
+    def node(temp_id: int, node_type: object, parent: str | None, value: str | None) -> str:
+        op = client.get_type("MutateOperation")
+        f = op.asset_group_listing_group_filter_operation.create
+        f.resource_name = service.asset_group_listing_group_filter_path(cid, group, str(temp_id))
+        f.asset_group = group_path
+        f.type_ = node_type
+        f.listing_source = shopping
+        if parent:
+            f.parent_listing_group_filter = parent
+            dim = getattr(f.case_value, field)
+            # Marks the dimension as set even without a value: an empty
+            # dimension is the "everything else" case.
+            dim._pb.SetInParent()
+            if index:
+                dim.index = getattr(client.enums.ListingGroupFilterCustomAttributeIndexEnum, index)
+            if value is not None:
+                dim.value = value
+        operations.append(op)
+        return f.resource_name
+
+    values = changes["exclude_values"]
+    if not values:
+        node(-1, types.UNIT_INCLUDED, None, None)
+    else:
+        root = node(-1, types.SUBDIVISION, None, None)
+        for i, value in enumerate(values, start=2):
+            node(-i, types.UNIT_EXCLUDED, root, value)
+        node(-(len(values) + 2), types.UNIT_INCLUDED, root, None)
+
+    service.mutate(customer_id=cid, mutate_operations=operations)
+    return {
+        "asset_group_id": group,
+        "dimension": changes["dimension"],
+        "excluded": len(values),
+        "newly_excluded": changes.get("newly_excluded", []),
+        "no_longer_excluded": changes.get("no_longer_excluded", []),
+    }

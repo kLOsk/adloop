@@ -2708,6 +2708,46 @@ def draft_asset_group_signals(
     )
 
 
+@_tool(title="Draft Performance Max product exclusions", annotations=_WRITE, tags={"ads"})
+@_safe
+def draft_pmax_product_exclusions(
+    asset_group_id: str,
+    exclude_values: _StrList,
+    dimension: str = "item_id",
+    customer_id: str = "",
+) -> dict:
+    """Draft which products a retail Performance Max asset group excludes — returns a PREVIEW.
+
+    Sets the full list of excluded values on one product dimension (item id,
+    brand or a custom label); everything else stays included. Pass the
+    complete list each time: values left out are included again, and an
+    empty list includes all products. Works on asset groups that advertise
+    all products or are already split on that one dimension; more complex
+    product filters are refused and stay a job for Google Ads. The filter is
+    rebuilt in one atomic request. Nothing changes until confirm_and_apply
+    applies the plan_id; a dry run has Google validate it.
+
+    Args:
+        asset_group_id: Numeric asset group id of a Performance Max campaign
+            with a Merchant Center feed (from get_pmax_performance).
+        exclude_values: Every value to exclude, e.g. item ids from the feed,
+            brand names or custom label values. [] removes all exclusions.
+        dimension: "item_id" (default), "brand", or "custom_label_0" to
+            "custom_label_4".
+        customer_id: Google Ads customer ID (digits, dashes optional).
+            Defaults to the configured account.
+    """
+    from adloop.ads.pmax import draft_pmax_product_exclusions as _impl
+
+    return _impl(
+        current_config(),
+        customer_id=customer_id or current_config().ads.customer_id,
+        asset_group_id=asset_group_id,
+        dimension=dimension,
+        exclude_values=exclude_values,
+    )
+
+
 @_tool(title="Draft Performance Max asset changes", annotations=_WRITE, tags={"ads"})
 @_safe
 def draft_asset_group_assets(

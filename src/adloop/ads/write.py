@@ -3946,6 +3946,7 @@ def _dispatch_ads_plan(client: object, cid: str, plan: object) -> dict:
     from adloop.ads.shopping import apply_create_shopping_campaign as _apply_create_shopping_campaign
     from adloop.ads.pmax import apply_asset_group_assets as _apply_asset_group_assets
     from adloop.ads.pmax import apply_asset_group_signals as _apply_asset_group_signals
+    from adloop.ads.pmax import apply_pmax_product_filter as _apply_pmax_product_filter
     # Custom conversion goals live in their own module for the same reason.
     from adloop.ads.custom_conversion_goals import (
         _apply_assign_custom_conversion_goal,
@@ -3959,6 +3960,7 @@ def _dispatch_ads_plan(client: object, cid: str, plan: object) -> dict:
         "create_shopping_campaign": _apply_create_shopping_campaign,
         "update_asset_group_assets": _apply_asset_group_assets,
         "update_asset_group_signals": _apply_asset_group_signals,
+        "update_pmax_product_filter": _apply_pmax_product_filter,
         "create_ad_group": _apply_create_ad_group,
         "update_campaign": _apply_update_campaign,
         "update_ad_group": _apply_update_ad_group,

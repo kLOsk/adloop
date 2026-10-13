@@ -228,3 +228,88 @@ def test_asset_groups_can_be_paused_enabled_and_removed():
     assert list(sent[0].update_mask.paths) == ["status"]
     write._apply_remove(client, "1", "asset_group", "9")
     assert sent[1].remove == "customers/1/assetGroups/9"
+
+
+def _node(rn, node_type, parent=None, dimension=None, value=""):
+    return {"resource_name": f"customers/1/assetGroupListingGroupFilters/9~{rn}", "type": node_type,
+            "parent": f"customers/1/assetGroupListingGroupFilters/9~{parent}" if parent else None,
+            "dimension": dimension, "value": value}
+
+
+_ALL = [_node(1, "UNIT_INCLUDED")]
+_SPLIT = [_node(1, "SUBDIVISION"), _node(2, "UNIT_EXCLUDED", 1, "item_id", "sku-1"), _node(3, "UNIT_INCLUDED", 1)]
+
+
+def test_product_filter_shapes():
+    assert "not a retail" in pmax.read_product_filter([])["error"]
+    assert pmax.read_product_filter(_ALL)["excluded"] == []
+    split = pmax.read_product_filter(_SPLIT)
+    assert split["dimension"] == "item_id" and split["excluded"] == ["sku-1"]
+    nested = _SPLIT + [_node(4, "SUBDIVISION", 1), _node(5, "UNIT_INCLUDED", 4)]
+    assert "more than one level" in pmax.read_product_filter(nested)["error"]
+    mixed = [_node(1, "SUBDIVISION"), _node(2, "UNIT_EXCLUDED", 1, "brand", "Acme"),
+             _node(3, "UNIT_EXCLUDED", 1, "item_id", "x"), _node(4, "UNIT_INCLUDED", 1)]
+    assert "mixes dimensions" in pmax.read_product_filter(mixed)["error"]
+
+
+def _exclusions(nodes, **kwargs):
+    with patch.object(pmax, "_filter_rows", return_value=nodes):
+        return pmax.draft_pmax_product_exclusions(AdLoopConfig(), customer_id="1", asset_group_id="9", **kwargs)
+
+
+def test_exclusion_draft_rules():
+    preview = _exclusions(_SPLIT, exclude_values=["sku-1", "sku-2"])
+    changes = preview["changes"]
+    assert changes["newly_excluded"] == ["sku-2"] and changes["no_longer_excluded"] == []
+    # Children are removed before the root.
+    assert changes["remove_nodes"][-1].endswith("9~1")
+    assert _exclusions(_SPLIT, exclude_values=["SKU-1"])["status"] == "NO_CHANGE"
+    assert "split by item_id" in _exclusions(_SPLIT, dimension="brand", exclude_values=["Acme"])["error"]
+    targeted = [_node(1, "SUBDIVISION"), _node(2, "UNIT_INCLUDED", 1, "item_id", "a"), _node(3, "UNIT_INCLUDED", 1)]
+    assert "targets specific products" in _exclusions(targeted, exclude_values=["b"])["error"]
+    assert "dimension must be one of" in _exclusions(_ALL, dimension="color", exclude_values=["red"])["details"][0]
+
+
+class _FilterClient(_FakeClient):
+    def __init__(self):
+        super().__init__()
+        self._service.asset_group_listing_group_filter_path = GoogleAdsServiceClient.asset_group_listing_group_filter_path
+
+
+def test_exclusion_tree_is_rebuilt_in_one_request():
+    client = _FilterClient()
+    preview = _exclusions(_SPLIT, dimension="item_id", exclude_values=["sku-1", "sku-2"])
+    pmax.apply_pmax_product_filter(client, "1", preview["changes"])
+    ops = [op.asset_group_listing_group_filter_operation for op in client.sent]
+    removes = [op.remove for op in ops if op.remove]
+    assert removes[-1].endswith("9~1") and len(removes) == 3
+    created = [op.create for op in ops if not op.remove]
+    types = client.enums.ListingGroupFilterTypeEnum
+    assert [c.type_ for c in created] == [types.SUBDIVISION, types.UNIT_EXCLUDED, types.UNIT_EXCLUDED, types.UNIT_INCLUDED]
+    root = created[0]
+    assert root.resource_name == "customers/1/assetGroupListingGroupFilters/9~-1"
+    assert all(c.parent_listing_group_filter == root.resource_name for c in created[1:])
+    assert [c.case_value.product_item_id.value for c in created[1:3]] == ["sku-1", "sku-2"]
+    others = created[3]
+    assert others.case_value._pb.HasField("product_item_id") and others.case_value.product_item_id.value == ""
+    assert all(c.listing_source == client.enums.ListingGroupFilterListingSourceEnum.SHOPPING for c in created)
+
+
+def test_custom_labels_and_clearing_all_exclusions():
+    client = _FilterClient()
+    preview = _exclusions(_ALL, dimension="custom_label_2", exclude_values=["clearance"])
+    pmax.apply_pmax_product_filter(client, "1", preview["changes"])
+    created = [op.asset_group_listing_group_filter_operation.create for op in client.sent
+               if not op.asset_group_listing_group_filter_operation.remove]
+    index = client.enums.ListingGroupFilterCustomAttributeIndexEnum.INDEX2
+    assert created[1].case_value.product_custom_attribute.index == index
+    assert created[1].case_value.product_custom_attribute.value == "clearance"
+    assert created[2].case_value.product_custom_attribute.index == index
+
+    clear_client = _FilterClient()
+    split = [_node(1, "SUBDIVISION"), _node(2, "UNIT_EXCLUDED", 1, "custom_label_2", "clearance"), _node(3, "UNIT_INCLUDED", 1)]
+    cleared = _exclusions(split, dimension="custom_label_2", exclude_values=[])
+    pmax.apply_pmax_product_filter(clear_client, "1", cleared["changes"])
+    created = [op.asset_group_listing_group_filter_operation.create for op in clear_client.sent
+               if not op.asset_group_listing_group_filter_operation.remove]
+    assert len(created) == 1 and created[0].type_ == clear_client.enums.ListingGroupFilterTypeEnum.UNIT_INCLUDED
