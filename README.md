@@ -234,6 +234,19 @@ A second ad platform, same safety model. Reddit is a separate connection: its ow
 
 > **Setup for Reddit Ads tools** — In Reddit Ads Manager open **Business Manager → Developer Application → Create app** (business admins only; no approval wait). Register the redirect URL exactly as `http://localhost:8765/callback`, then run `adloop init` and complete the Reddit Ads step: it opens Reddit's consent page (scopes `adsread` + `adsedit`, permanent grant), stores the refresh token at `~/.adloop/reddit_token.json`, and lets you pick the default ad account. Reddit rate-limits per user (reporting: 60 requests/min) and requires a descriptive User-Agent, which AdLoop builds from your app id and Reddit username. Reddit has no validate-only mode, so `confirm_and_apply(dry_run=true)` re-reads the target and re-checks the safety caps instead.
 
+### Image Uploads
+
+An image on your computer, or one you attached in the chat, has no public URL, and an AI app cannot hand the file to a tool. `upload_images` gives it a way in.
+
+<p align="center"><img src="https://raw.githubusercontent.com/kLOsk/adloop/main/assets/upload-card.gif" alt="An AdLoop upload card in an AI chat: the user drags a banner onto it, the card shows the upload id, posts it into the chat, and the AI drafts the image asset" width="760"></p>
+
+| Tool | What It Does |
+|------|-------------|
+| `upload_images` | Shows an upload card in apps with MCP Apps (drop PNG, JPEG or GIF up to 5 MB); on AdLoop Cloud in other apps it returns a one-time upload link, which a coding agent can also use with `curl -T` |
+| `list_uploads` | The uploads that have not expired yet (kept 24 hours), with id, dimensions and size |
+
+The upload ids go into `draft_image_assets(upload_ids=[...])`, or as `upload:<id>` into the image fields of `draft_reddit_ad` on AdLoop Cloud.
+
 ### Planning Tools
 
 | Tool | What It Does |
@@ -254,7 +267,7 @@ All write operations follow a **draft → preview → confirm** workflow. Nothin
 | `draft_responsive_search_ad` | Create RSA preview (3-15 headlines ≤30 chars, 2-4 descriptions ≤90 chars). Warns if headline/description count is below best practice. |
 | `draft_callouts` | Create campaign callout assets from 1-25 character text snippets. |
 | `draft_structured_snippets` | Create campaign structured snippet assets using official header values and 3-10 snippet values. |
-| `draft_image_assets` | Create campaign image assets from local files or public image URLs (PNG, JPEG, or GIF). |
+| `draft_image_assets` | Create campaign image assets from local files, public image URLs or uploads (PNG, JPEG, or GIF). |
 | `draft_keywords` | Propose keyword additions with match types. Proactively checks bidding strategy — flags BROAD match on campaigns without Smart Bidding as dangerous in the preview. |
 | `add_negative_keywords` | Propose negative keywords directly on a campaign |
 | `add_negative_locations` | Propose negative geo exclusions on a campaign — exclude cities/regions while keeping broader positive targets |
