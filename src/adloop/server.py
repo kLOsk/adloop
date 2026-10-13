@@ -2648,6 +2648,78 @@ def run_gaql(
 # ---------------------------------------------------------------------------
 
 
+@_tool(title="Draft a Shopping campaign", annotations=_WRITE, tags={"ads"})
+@_safe
+def draft_shopping_campaign(
+    campaign_name: str,
+    daily_budget: float,
+    merchant_id: str,
+    product_bid: float,
+    geo_target_ids: _StrList,
+    bidding_strategy: str = "MANUAL_CPC",
+    target_roas: float = 0,
+    max_cpc: float = 0,
+    campaign_priority: str = "LOW",
+    feed_label: str = "",
+    ad_group_name: str = "",
+    search_partners_enabled: bool = False,
+    customer_id: str = "",
+) -> dict:
+    """Draft a Standard Shopping campaign that advertises a Merchant Center feed — returns a PREVIEW.
+
+    Creates the budget, the campaign (PAUSED), a product ad group with its
+    Shopping ad, and one "All products" product group, in one atomic request.
+    The Merchant Center account must be linked to the Google Ads account;
+    the draft checks that. Shopping campaigns take no keywords and no
+    language targeting (the feed's language applies). Nothing changes until
+    confirm_and_apply applies the plan_id; a dry run has Google validate it.
+
+    Args:
+        campaign_name: Name of the new campaign.
+        daily_budget: Daily budget in account currency, checked against the
+            max_daily_budget safety cap.
+        merchant_id: Numeric Merchant Center id (from list_merchant_accounts)
+            whose products the campaign advertises.
+        product_bid: CPC bid of the "All products" group in account currency.
+            Google requires it even when the bid strategy sets bids.
+        geo_target_ids: Countries or regions as geo target constant ids, e.g.
+            ["2276"] for Germany. Required.
+        bidding_strategy: MANUAL_CPC (default), TARGET_SPEND (Maximize clicks)
+            or TARGET_ROAS.
+        target_roas: Target return on ad spend for TARGET_ROAS, e.g. 4.0 for
+            400%.
+        max_cpc: Optional CPC ceiling for TARGET_SPEND, in account currency.
+        campaign_priority: LOW (default), MEDIUM or HIGH. With several
+            Shopping campaigns on the same products, the higher priority
+            serves first.
+        feed_label: Optional feed label to limit the campaign to one feed of
+            the Merchant Center account.
+        ad_group_name: Optional ad group name; defaults to "<campaign> - All
+            products".
+        search_partners_enabled: Also serve on Google search partners.
+        customer_id: Google Ads customer ID (digits, dashes optional).
+            Defaults to the configured account.
+    """
+    from adloop.ads.shopping import draft_shopping_campaign as _impl
+
+    return _impl(
+        current_config(),
+        customer_id=customer_id or current_config().ads.customer_id,
+        campaign_name=campaign_name,
+        daily_budget=daily_budget,
+        merchant_id=merchant_id,
+        bidding_strategy=bidding_strategy,
+        product_bid=product_bid,
+        target_roas=target_roas,
+        max_cpc=max_cpc,
+        geo_target_ids=geo_target_ids,
+        campaign_priority=campaign_priority,
+        feed_label=feed_label,
+        ad_group_name=ad_group_name,
+        search_partners_enabled=search_partners_enabled,
+    )
+
+
 @_tool(title="Draft a campaign", annotations=_WRITE, tags={"ads"})
 @_safe
 def draft_campaign(

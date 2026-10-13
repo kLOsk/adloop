@@ -3932,6 +3932,7 @@ def _dispatch_ads_plan(client: object, cid: str, plan: object) -> dict:
         _apply_upload_call_conversions,
         _apply_upload_enhanced_conversions_for_leads,
     )
+    from adloop.ads.shopping import apply_create_shopping_campaign as _apply_create_shopping_campaign
     # Custom conversion goals live in their own module for the same reason.
     from adloop.ads.custom_conversion_goals import (
         _apply_assign_custom_conversion_goal,
@@ -3942,6 +3943,7 @@ def _dispatch_ads_plan(client: object, cid: str, plan: object) -> dict:
 
     dispatch = {
         "create_campaign": _apply_create_campaign,
+        "create_shopping_campaign": _apply_create_shopping_campaign,
         "create_ad_group": _apply_create_ad_group,
         "update_campaign": _apply_update_campaign,
         "update_ad_group": _apply_update_ad_group,
