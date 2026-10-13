@@ -432,7 +432,7 @@ def _size_kb(data: bytes) -> float:
 
 def _describe_image(image: dict[str, object]) -> str:
     """One preview line: source, type, dimensions and size."""
-    source = image.get("url") or image.get("path")
+    source = image.get("url") or image.get("path") or f"upload {image.get('upload_id')}"
     kind = str(image.get("mime_type", "")).removeprefix("image/").upper()
     return (
         f"{source} — {kind} {image.get('width')}x{image.get('height')}, "
@@ -2457,12 +2457,14 @@ def draft_image_assets(
     campaign_id: str = "",
     image_paths: list[str] | None = None,
     image_urls: list[str] | None = None,
+    upload_ids: list[str] | None = None,
 ) -> dict:
-    """Draft campaign image assets from local files and/or public image URLs.
+    """Draft campaign image assets from local files, public image URLs and/or uploads.
 
     URL images are fetched now (public addresses only, pinned against DNS
     rebinding, capped at Google's 5120 KB limit) and their sha256 is kept
-    in the plan; apply re-fetches and refuses if the bytes changed.
+    in the plan; apply re-fetches and refuses if the bytes changed. Uploads
+    (``up_...`` ids from the upload card or link) are pinned the same way.
     """
     from adloop.runtime import deployment_mode
     from adloop.safety.guards import SafetyViolation, check_blocked_operation
@@ -2486,7 +2488,7 @@ def draft_image_assets(
         return {"error": str(e)}
 
     validated_images, errors = _validate_image_assets(
-        campaign_id, image_paths, image_urls
+        campaign_id, image_paths, image_urls, list(upload_ids or [])
     )
     if errors:
         return {"error": "Validation failed", "details": errors}
@@ -3300,16 +3302,38 @@ def _validate_structured_snippets(
 
 
 def _validate_image_assets(
-    campaign_id: str, image_paths: list[str], image_urls: list[str] | None = None
+    campaign_id: str,
+    image_paths: list[str],
+    image_urls: list[str] | None = None,
+    upload_ids: list[str] | None = None,
 ) -> tuple[list[dict[str, object]], list[str]]:
     errors = []
     validated = []
     image_urls = image_urls or []
+    upload_ids = upload_ids or []
 
     if not campaign_id:
         errors.append("campaign_id is required")
-    if not image_paths and not image_urls:
-        errors.append("At least one image (image_paths or image_urls) is required")
+    if not image_paths and not image_urls and not upload_ids:
+        errors.append("At least one image (image_paths, image_urls or upload_ids) is required")
+
+    for index, upload_id in enumerate(upload_ids):
+        from adloop.uploads import UploadError, current_tenant, get_upload_store
+
+        try:
+            upload, _data = get_upload_store().get(current_tenant(), upload_id)
+        except UploadError as exc:
+            errors.append(f"Upload {index + 1}: {exc}")
+            continue
+        validated.append({
+            "upload_id": upload.upload_id,
+            "sha256": upload.sha256,
+            "name": _build_image_asset_name(PurePosixPath(upload.name), _data),
+            "mime_type": upload.mime_type,
+            "width": upload.width,
+            "height": upload.height,
+            "size_kb": round(upload.size_bytes / 1024, 1),
+        })
 
     for index, image_path in enumerate(image_paths):
         try:
@@ -4916,6 +4940,13 @@ def _apply_create_image_assets(client: object, cid: str, changes: dict) -> dict:
         if payload.get("url"):
             image_bytes = _fetch_approved_image_url(payload)
             name_source = _url_path(str(payload["url"]))
+        elif payload.get("upload_id"):
+            from adloop.uploads import current_tenant, get_upload_store
+
+            upload, image_bytes = get_upload_store().get(current_tenant(), str(payload["upload_id"]))
+            if upload.sha256 != payload.get("sha256"):
+                raise ValueError(f"upload {upload.upload_id} changed since the preview; draft again.")
+            name_source = PurePosixPath(upload.name)
         elif deployment_mode() == "server":
             # Drafts refuse paths on a server; never read server files even
             # if a path-based plan reached apply some other way.

@@ -15,6 +15,7 @@ from pydantic import BeforeValidator
 
 from adloop import diagnostics
 from adloop.runtime import current_config
+from adloop.uploads import STORE_UPLOAD_TOOL, UPLOAD_CARD_URI
 from adloop.safety.approval import (
     APPROVE_TOOL,
     CARD_MIME_TYPE,
@@ -144,7 +145,10 @@ def _build_orchestration_instructions() -> str:
         "rejected too. Per-row problems in an upload are not a rejection: they "
         "come back as `row_errors` with DRY_RUN_SUCCESS, and the apply would "
         "carry out the other rows.\n"
-        "- One change at a time — don't batch unrelated writes.\n\n"
+        "- One change at a time — don't batch unrelated writes.\n"
+        "- Images without a public URL (a file on the user's computer, an image "
+        "attached in the chat): call `upload_images`, which shows an upload card "
+        "or returns an upload link, then use the upload ids it yields.\n\n"
         "PRE-WRITE CHECKS (before any `draft_*`):\n"
         "- BROAD match keywords require Smart Bidding (MAXIMIZE_CONVERSIONS, "
         "tCPA, tROAS). Refuse BROAD on MANUAL_CPC. This is the #1 cause of "
@@ -211,6 +215,27 @@ def approval_card() -> str:
     return card_html()
 
 
+@mcp.resource(
+    UPLOAD_CARD_URI,
+    name="upload_card",
+    title="AdLoop image upload",
+    description="A drop zone that uploads images to AdLoop for use as ad assets.",
+    mime_type=CARD_MIME_TYPE,
+    meta={"ui": {"prefersBorder": False}},
+)
+def upload_card() -> str:
+    from importlib import resources
+
+    return resources.files("adloop").joinpath("upload_card.html").read_text(encoding="utf-8")
+
+
+# App-only tools and the card that calls each one.
+_APP_ONLY_TOOLS = {
+    APPROVE_TOOL: "AdLoop approval card",
+    STORE_UPLOAD_TOOL: "AdLoop upload card",
+}
+
+
 class _AppOnlyToolsForCardClients(Middleware):
     """List and run app-only tools only for apps that render cards.
 
@@ -226,10 +251,11 @@ class _AppOnlyToolsForCardClients(Middleware):
         return [tool for tool in tools if not is_app_only(tool.meta)]
 
     async def on_call_tool(self, context, call_next):
-        if context.message.name == APPROVE_TOOL and not client_shows_cards():
+        card = _APP_ONLY_TOOLS.get(context.message.name)
+        if card and not client_shows_cards():
             from fastmcp.exceptions import ToolError
 
-            raise ToolError(f"{APPROVE_TOOL} can only be called from the AdLoop approval card.")
+            raise ToolError(f"{context.message.name} can only be called from the {card}.")
         return await call_next(context)
 
 
@@ -324,7 +350,7 @@ _API_DOCS: dict[str, str] = {
 
 
 # Write tools that do not produce a preview of their own.
-_NO_CARD_TOOLS = frozenset({"confirm_and_apply", APPROVE_TOOL})
+_NO_CARD_TOOLS = frozenset({"confirm_and_apply", APPROVE_TOOL, STORE_UPLOAD_TOOL})
 
 
 def _with_approval_card(fn: Callable) -> Callable:
@@ -3684,10 +3710,12 @@ def draft_image_assets(
     image_paths: _StrList = [],  # noqa: B006 — mutable default required for MCP JSON schema
     image_urls: _StrList = [],  # noqa: B006
     customer_id: str = "",
+    upload_ids: _StrList = [],  # noqa: B006
 ) -> dict:
-    """Draft campaign image assets from local files or public image URLs — returns a PREVIEW.
+    """Draft campaign image assets from local files, public image URLs or uploads — returns a PREVIEW.
 
-    At least one image in total is required across image_paths and image_urls.
+    At least one image in total is required across image_paths, image_urls
+    and upload_ids.
     Images must be PNG, JPEG or GIF and at most 5120 KB (Google's limit).
     URL images are downloaded now and checked; applying re-downloads them
     and refuses if the image changed since the preview. Returns a preview with
@@ -3703,6 +3731,9 @@ def draft_image_assets(
             private, local or internal addresses are refused.
         customer_id: Google Ads customer ID (digits, dashes optional). Defaults to
             the configured account.
+        upload_ids: Ids of images the user uploaded (up_..., from
+            upload_images or list_uploads). The way to use an image that has
+            no public URL.
     """
     from adloop.ads.write import draft_image_assets as _impl
 
@@ -3712,6 +3743,7 @@ def draft_image_assets(
         campaign_id=campaign_id,
         image_paths=image_paths,
         image_urls=image_urls,
+        upload_ids=upload_ids,
     )
 
 
@@ -3986,6 +4018,93 @@ def approve_change(
         }
     with card_click():
         return _impl(config, plan_id=plan_id, dry_run=action == "test")
+
+
+# ---------------------------------------------------------------------------
+# Image uploads
+# ---------------------------------------------------------------------------
+# Images without a public URL reach AdLoop through the upload card (apps with
+# MCP Apps) or an upload link (hosted, every other app). Tools then take the
+# upload id: draft_image_assets(upload_ids=...), upload:<id> for Reddit.
+
+
+@_tool(
+    title="Upload images",
+    annotations=_READONLY,
+    tags={"core"},
+    meta={"ui": {"resourceUri": UPLOAD_CARD_URI}},
+)
+@_safe
+def upload_images() -> dict:
+    """Let the user upload images (PNG, JPEG, GIF up to 5 MB) for ad assets.
+
+    For images without a public URL, such as a file on the user's computer
+    or an image attached in the chat. Apps that show AdLoop's cards display
+    an upload card where the user drops the files; the card then posts the
+    upload ids into the chat. On AdLoop Cloud in other apps the result
+    carries an upload link for the user (or a coding agent, with curl).
+    Uploads expire after a day. The ids go into upload_ids of
+    draft_image_assets, or as "upload:<id>" into the image fields of
+    draft_reddit_ad. Returns the current uploads and how to add more.
+    """
+    from adloop.uploads import upload_instructions
+
+    return upload_instructions(client_shows_cards())
+
+
+@_tool(
+    title="Store an uploaded image",
+    annotations=_WRITE,
+    tags={"core"},
+    meta={"ui": {"resourceUri": UPLOAD_CARD_URI, "visibility": ["app"]}},
+)
+@_safe
+def store_image_upload(name: str, data_base64: str) -> dict:
+    """Store an image dropped on the AdLoop upload card.
+
+    Called only by the upload card; AI apps keep this tool out of the
+    model's tool list. Returns the upload's id, type and dimensions.
+
+    Args:
+        name: The file name, used for the asset name.
+        data_base64: The file content, base64-encoded.
+    """
+    import base64
+    import binascii
+
+    from adloop.uploads import UploadError, current_tenant, get_upload_store
+
+    try:
+        data = base64.b64decode(data_base64, validate=True)
+    except (binascii.Error, ValueError):
+        return {"error": "The file did not arrive intact; upload it again."}
+    try:
+        upload = get_upload_store().put(current_tenant(), name, data)
+    except UploadError as exc:
+        return {"error": f"{name}: {exc}"}
+    return {"status": "UPLOADED", **upload.summary()}
+
+
+@_tool(title="List uploaded images", annotations=_READONLY, tags={"core"})
+@_safe
+def list_uploads() -> dict:
+    """List the images the user uploaded to AdLoop that have not expired.
+
+    Returns each upload's upload_id, name, type, dimensions, size and hours
+    until it expires (uploads last a day): the ids of files the user sent
+    through the upload link, or of earlier uploads.
+    """
+    from adloop.uploads import current_tenant, get_upload_store
+
+    uploads = [u.summary() for u in get_upload_store().list(current_tenant())]
+    return {
+        "uploads": uploads,
+        "usage": (
+            "draft_image_assets(upload_ids=[...]) for Google Ads; "
+            "\"upload:<upload_id>\" as image_url, thumbnail_url or a carousel card's "
+            "image_url in draft_reddit_ad (AdLoop Cloud only)."
+        ),
+    }
 
 
 # ---------------------------------------------------------------------------

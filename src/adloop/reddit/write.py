@@ -1595,6 +1595,40 @@ def _check_media(url: str, kind: str, timeout: int = 10) -> tuple[str | None, st
     return None, None
 
 
+def _media_problem(url: str, kind: str) -> tuple[str | None, str | None]:
+    """Check a media field: an ``upload:<id>`` reference, or a URL Reddit downloads."""
+    from adloop.uploads import UploadError, public_url_for, upload_ref
+
+    upload_id = upload_ref(url)
+    if upload_id is None:
+        return _check_media(url, kind)
+    if kind == "video":
+        return "is an upload; videos cannot be uploaded to AdLoop, pass a public video URL", None
+    try:
+        public_url_for(upload_id)
+    except UploadError as exc:
+        return f"cannot be used: {exc}", None
+    return None, None
+
+
+def _resolve_uploads(post: dict) -> dict:
+    """Swap ``upload:<id>`` media references for links Reddit can download now."""
+    from adloop.uploads import public_url_for, upload_ref
+
+    def swap(value: Any) -> Any:
+        upload_id = upload_ref(value) if isinstance(value, str) else None
+        return public_url_for(upload_id) if upload_id else value
+
+    resolved = dict(post)
+    if "thumbnail_url" in resolved:
+        resolved["thumbnail_url"] = swap(resolved["thumbnail_url"])
+    resolved["content"] = [
+        {**item, "media_url": swap(item.get("media_url"))} if isinstance(item, dict) else item
+        for item in resolved.get("content") or []
+    ]
+    return resolved
+
+
 def _carousel_content(
     cards: list | None, *, click_url: str, call_to_action: str, display_url: str, errors: list[str]
 ) -> list[dict]:
@@ -1757,15 +1791,20 @@ def draft_reddit_ad(
     from adloop.ads.write import _validate_urls
 
     landing = list(dict.fromkeys([click_url] + [c["destination_url"] for c in cards]))
-    url_errors, url_warnings = _validate_urls(landing + ([image_url] if image_url else []))
+    from adloop.uploads import upload_ref
+
+    image_is_upload = upload_ref(image_url) is not None
+    url_errors, url_warnings = _validate_urls(landing + ([image_url] if image_url and not image_is_upload else []))
     for url, problem in url_errors.items():
         if problem:
             errors.append(f"'{url}' is not reachable: {problem}")
     warnings.extend(url_warnings.values())
     media = [(video_url, "video"), (thumbnail_url, "image")] if post_type == "VIDEO" else []
     media += [(c["media_url"], "image") for c in cards]
+    if image_is_upload:
+        media.append((image_url, "image"))
     for url, kind in media:
-        problem, note = _check_media(url, kind)
+        problem, note = _media_problem(url, kind)
         if problem:
             errors.append(f"'{url}' {problem}")
         if note:
@@ -2185,7 +2224,8 @@ def apply_plan(config: AdLoopConfig, plan: ChangePlan) -> dict:
             post_id = str(changes["existing_post_id"])
             post = get_reddit_post(config, post_id) or {"id": post_id}
         else:
-            post = data_of(reddit_post(config, f"profiles/{profile_id}/posts", {"data": changes["post"]}))
+            post_payload = _resolve_uploads(changes["post"])
+            post = data_of(reddit_post(config, f"profiles/{profile_id}/posts", {"data": post_payload}))
             post_id = post.get("id")
             if not post_id:
                 raise ValueError("Reddit created the post but returned no post id; check Ads Manager.")

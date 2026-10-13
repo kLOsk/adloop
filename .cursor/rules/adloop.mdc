@@ -227,6 +227,20 @@ Reddit is a second ad platform with its own connection (own OAuth app, no develo
 5. `gtm_paused_but_firing` means the event reaches GA4 from somewhere other than the paused tag — hardcoded gtag, another container, or a mobile SDK; don't advise unpausing without finding the real source first
 6. Remember dynamic-event tags (`{{Event}}`) and Custom HTML tags are opaque to the audit — the tool lists them separately for manual review
 
+### Image Uploads
+
+For images that have no public URL: a file on the user's computer, or an image they attached in the chat (you can see it, but you cannot pass its bytes to a tool).
+
+| Tool | When to Use | Key Parameters |
+|------|-------------|----------------|
+| `upload_images` | The user wants such an image in an ad. Apps with AdLoop cards show an upload card; on AdLoop Cloud in other apps the result has an `upload_url` | (none) |
+| `list_uploads` | Find upload ids after the user used the upload link, or to reuse an earlier upload | (none) |
+
+- **With the card** (`upload: "card"` in the result): the user drops PNG, JPEG or GIF files (up to 5 MB) on the card; it then posts the upload ids into the chat. Wait for that message instead of asking for a URL.
+- **With an upload link** (`upload_url`): give the user the link (valid 30 minutes) to open in the browser, then call `list_uploads` once they say they are done. A coding agent that has the file on disk can upload it itself: `curl -T "logo.png" "<upload_url>/"`, one call per file.
+- **Using an upload:** `draft_image_assets(upload_ids=["up_..."])` for Google Ads; `"upload:up_..."` as `image_url`, `thumbnail_url` or a carousel card's `image_url` in `draft_reddit_ad` (AdLoop Cloud only, because Reddit downloads the image from a short-lived public link). Videos cannot be uploaded.
+- Uploads expire after 24 hours. Self-hosted without a card, pass local files directly (`image_paths`).
+
 ### Planning Tools
 
 | Tool | When to Use | Key Parameters |
@@ -247,7 +261,7 @@ Reddit is a second ad platform with its own connection (own OAuth app, no develo
 | `draft_responsive_search_ad` | Create RSA preview (does NOT publish) | 3-15 headlines (≤30 chars), 2-4 descriptions (≤90 chars), final_url required, path1/path2 (≤15 chars each). Each headline/description may be a plain string (unpinned) or `{"text": "...", "pinned_field": "HEADLINE_1"}` (pinned). Valid pin slots: `HEADLINE_1/2/3`, `DESCRIPTION_1/2`. Google permits ≤2 headlines per slot, ≤1 description per slot. |
 | `draft_callouts` | Create callout assets for a campaign (does NOT publish) | `campaign_id`, `callouts` list with 1-25 chars each |
 | `draft_structured_snippets` | Create structured snippet assets for a campaign (does NOT publish) | `campaign_id`, `snippets` list of `{header, values}` with official header values and 3-10 values |
-| `draft_image_assets` | Create image assets for a campaign from local files or public image URLs (does NOT publish) | `campaign_id`, `image_paths` (local PNG/JPEG/GIF files; not on a hosted server) and/or `image_urls` (public http(s) image links, ≤5120 KB; re-checked at apply — if the image changed since the preview, draft again) |
+| `draft_image_assets` | Create image assets for a campaign from local files, public image URLs or uploads (does NOT publish) | `campaign_id`, `image_paths` (local PNG/JPEG/GIF files; not on a hosted server), `image_urls` (public http(s) image links, ≤5120 KB; re-checked at apply — if the image changed since the preview, draft again) and/or `upload_ids` (`up_...` from `upload_images` / `list_uploads`) |
 | `draft_sitelinks` | Create sitelink extensions for a campaign (does NOT publish) | `campaign_id`, `sitelinks` list of {link_text ≤25 chars, final_url, description1 ≤35 chars, description2 ≤35 chars} |
 | `draft_keywords` | Propose keyword additions (does NOT add) | Each keyword needs `text` and `match_type` (EXACT/PHRASE/BROAD) |
 | `add_negative_keywords` | Propose negative keywords directly on a campaign (does NOT add) | `campaign_id`, keyword list, `match_type` |

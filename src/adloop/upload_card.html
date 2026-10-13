@@ -1,0 +1,247 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AdLoop upload</title>
+<style>
+  :root { color-scheme: light dark; }
+  :root[data-theme="light"] { color-scheme: light; }
+  :root[data-theme="dark"] { color-scheme: dark; }
+  :root {
+    --bg: var(--color-background-primary, #ffffff);
+    --bg-2: var(--color-background-secondary, #f4f4f5);
+    --fg: var(--color-text-primary, #18181b);
+    --fg-2: var(--color-text-secondary, #52525b);
+    --border: var(--color-border-primary, #e4e4e7);
+    --accent: #2563eb;
+    --ok: var(--color-text-success, #15803d);
+    --ok-bg: var(--color-background-success, #f0fdf4);
+    --bad: var(--color-text-danger, #b91c1c);
+    --bad-bg: var(--color-background-danger, #fef2f2);
+    --radius: var(--border-radius-lg, 12px);
+    --font: var(--font-sans, ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif);
+    --mono: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+  }
+  :root[data-theme="dark"] {
+    --bg: var(--color-background-primary, #18181b);
+    --bg-2: var(--color-background-secondary, #27272a);
+    --fg: var(--color-text-primary, #fafafa);
+    --fg-2: var(--color-text-secondary, #a1a1aa);
+    --border: var(--color-border-primary, #3f3f46);
+    --accent: #3b82f6;
+    --ok: var(--color-text-success, #4ade80);
+    --ok-bg: var(--color-background-success, #052e16);
+    --bad: var(--color-text-danger, #f87171);
+    --bad-bg: var(--color-background-danger, #2a0b0b);
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; background: transparent; }
+  body { font: 14px/1.45 var(--font); color: var(--fg); }
+  .card { background: var(--bg); border: 1px solid var(--border); border-radius: var(--radius); padding: 16px; }
+  .head { display: flex; align-items: center; gap: 8px; color: var(--fg-2); font-size: 12px; }
+  h1 { font-size: 16px; font-weight: 600; margin: 10px 0 2px; }
+  .sub { color: var(--fg-2); font-size: 12px; margin: 0 0 12px; }
+  .drop { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 6px; padding: 22px 12px; border: 1.5px dashed var(--border); border-radius: calc(var(--radius) - 4px); background: var(--bg-2); text-align: center; cursor: pointer; }
+  .drop.over { border-color: var(--accent); }
+  .drop small { color: var(--fg-2); font-size: 12px; }
+  .drop button { font: inherit; font-size: 13px; font-weight: 500; border-radius: 8px; padding: 6px 12px; border: 1px solid var(--accent); background: var(--accent); color: #fff; cursor: pointer; }
+  ul { list-style: none; margin: 12px 0 0; padding: 0; display: grid; gap: 6px; }
+  li { display: grid; grid-template-columns: 40px 1fr auto; gap: 10px; align-items: center; padding: 6px 8px; border-radius: 8px; background: var(--bg-2); }
+  li img, li .ph { width: 40px; height: 40px; object-fit: cover; border-radius: 6px; background: var(--border); }
+  li .name { overflow-wrap: anywhere; font-size: 13px; }
+  li .meta { color: var(--fg-2); font-size: 12px; font-family: var(--mono); }
+  li .state { font-size: 12px; }
+  li .state.ok { color: var(--ok); }
+  li .state.bad { color: var(--bad); }
+  .hidden { display: none !important; }
+</style>
+</head>
+<body>
+<div class="card">
+  <div class="head">
+    <svg width="18" height="18" viewBox="0 0 32 32" fill="none" aria-hidden="true"><rect width="32" height="32" rx="7" fill="#09090b"/><path d="M16 16 C 13.5 11.5, 6.5 11.5, 6.5 16 C 6.5 20.5, 13.5 20.5, 16 16 C 18.5 11.5, 25.5 11.5, 25.5 16 C 25.5 20.5, 18.5 20.5, 16 16 Z" stroke="#60a5fa" stroke-width="2.6" stroke-linejoin="round" stroke-linecap="round"/></svg>
+    <span data-t="brand">AdLoop · image upload</span>
+  </div>
+  <h1 data-t="title">Upload images for your ads</h1>
+  <p class="sub" data-t="sub">PNG, JPEG or GIF, up to 5 MB each. Uploads are kept for a day.</p>
+  <label class="drop" id="drop">
+    <span data-t="drop">Drop images here</span>
+    <small data-t="or">or</small>
+    <button type="button" id="pick" data-t="pick">Choose files</button>
+    <input type="file" id="file" accept="image/png,image/jpeg,image/gif" multiple class="hidden">
+  </label>
+  <ul id="list"></ul>
+</div>
+<script>
+(() => {
+  "use strict";
+  const TOOL = "store_image_upload";
+  const MAX_BYTES = 5120 * 1024;
+  const TYPES = ["image/png", "image/jpeg", "image/gif"];
+  const STRINGS = {
+    en: {
+      brand: "AdLoop · image upload", title: "Upload images for your ads",
+      sub: "PNG, JPEG or GIF, up to 5 MB each. Uploads are kept for a day.",
+      drop: "Drop images here", or: "or", pick: "Choose files",
+      uploading: "Uploading…", done: "Uploaded", tooBig: "Over 5 MB", wrongType: "Not PNG, JPEG or GIF",
+      message: "I uploaded images to AdLoop:\n{list}\nUse these upload ids for the ad.",
+    },
+    de: {
+      brand: "AdLoop · Bilder hochladen", title: "Bilder für deine Anzeigen hochladen",
+      sub: "PNG, JPEG oder GIF, bis 5 MB pro Bild. Uploads werden einen Tag aufbewahrt.",
+      drop: "Bilder hierher ziehen", or: "oder", pick: "Dateien auswählen",
+      uploading: "Wird hochgeladen…", done: "Hochgeladen", tooBig: "Größer als 5 MB", wrongType: "Kein PNG, JPEG oder GIF",
+      message: "Ich habe Bilder bei AdLoop hochgeladen:\n{list}\nNutze diese Upload-IDs für die Anzeige.",
+    },
+  };
+
+  let lang = "en";
+  document.documentElement.dataset.theme =
+    window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
+  let nextId = 1;
+  const pending = new Map();
+  const $ = (id) => document.getElementById(id);
+  const t = (key) => (STRINGS[lang] || STRINGS.en)[key] || STRINGS.en[key] || key;
+
+  function post(message) { window.parent.postMessage(message, "*"); }
+  function request(method, params) {
+    const id = nextId++;
+    post({ jsonrpc: "2.0", id, method, params });
+    return new Promise((resolve, reject) => pending.set(id, { resolve, reject }));
+  }
+  function notify(method, params) { post({ jsonrpc: "2.0", method, params }); }
+  function reportSize() {
+    const el = document.documentElement;
+    notify("ui/notifications/size-changed", { width: el.scrollWidth, height: el.scrollHeight });
+  }
+
+  function applyContext(ctx) {
+    if (!ctx) return;
+    if (ctx.theme === "dark" || ctx.theme === "light") document.documentElement.dataset.theme = ctx.theme;
+    const vars = ctx.styles && ctx.styles.variables;
+    if (vars) for (const [k, v] of Object.entries(vars)) if (v) document.documentElement.style.setProperty(k, v);
+    if (typeof ctx.locale === "string" && ctx.locale.toLowerCase().startsWith("de")) lang = "de";
+    for (const el of document.querySelectorAll("[data-t]")) el.textContent = t(el.dataset.t);
+  }
+
+  function payloadOf(result) {
+    if (!result) return {};
+    if (result.structuredContent && typeof result.structuredContent === "object") return result.structuredContent;
+    const text = (result.content || []).filter((c) => c && c.type === "text").map((c) => c.text).join("");
+    try { return JSON.parse(text); } catch (_) { return { error: text }; }
+  }
+
+  function addRow(name, src) {
+    const li = document.createElement("li");
+    const img = document.createElement(src ? "img" : "div");
+    if (src) { img.src = src; img.alt = ""; } else { img.className = "ph"; }
+    const info = document.createElement("div");
+    const n = document.createElement("div"); n.className = "name"; n.textContent = name;
+    const m = document.createElement("div"); m.className = "meta";
+    info.append(n, m);
+    const state = document.createElement("span"); state.className = "state";
+    li.append(img, info, state);
+    $("list").append(li);
+    reportSize();
+    return { meta: m, state };
+  }
+
+  function describe(u) {
+    return u.upload_id + " · " + u.width + "×" + u.height + " · " + u.size_kb + " KB";
+  }
+
+  function readBase64(file) {
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(String(reader.result).split(",", 2)[1] || "");
+      reader.onerror = () => reject(reader.error || new Error("read failed"));
+      reader.readAsDataURL(file);
+    });
+  }
+
+  async function upload(files) {
+    const stored = [];
+    for (const file of files) {
+      const row = addRow(file.name, TYPES.includes(file.type) ? URL.createObjectURL(file) : "");
+      if (!TYPES.includes(file.type)) { row.state.textContent = t("wrongType"); row.state.classList.add("bad"); continue; }
+      if (file.size > MAX_BYTES) { row.state.textContent = t("tooBig"); row.state.classList.add("bad"); continue; }
+      row.state.textContent = t("uploading");
+      try {
+        const result = await request("tools/call", { name: TOOL, arguments: { name: file.name, data_base64: await readBase64(file) } });
+        const r = payloadOf(result);
+        if ((result && result.isError) || r.error || !r.upload_id) throw new Error(r.error || "upload failed");
+        row.meta.textContent = describe(r);
+        row.state.textContent = t("done");
+        row.state.classList.add("ok");
+        stored.push(r);
+      } catch (err) {
+        row.state.textContent = err && err.message ? err.message : String(err);
+        row.state.classList.add("bad");
+      }
+      reportSize();
+    }
+    if (stored.length) {
+      const list = stored.map((u) => "- " + u.name + ": " + describe(u)).join("\n");
+      request("ui/message", { role: "user", content: { type: "text", text: t("message").replace("{list}", list) } }).catch(() => {});
+    }
+  }
+
+  const drop = $("drop");
+  $("pick").addEventListener("click", (e) => { e.preventDefault(); $("file").click(); });
+  $("file").addEventListener("change", () => { upload(Array.from($("file").files || [])); $("file").value = ""; });
+  drop.addEventListener("dragover", (e) => { e.preventDefault(); drop.classList.add("over"); });
+  drop.addEventListener("dragleave", () => drop.classList.remove("over"));
+  drop.addEventListener("drop", (e) => {
+    e.preventDefault();
+    drop.classList.remove("over");
+    upload(Array.from((e.dataTransfer && e.dataTransfer.files) || []));
+  });
+
+  let shownExisting = false;
+  function onToolResult(result) {
+    if (shownExisting || !result) return;
+    shownExisting = true;
+    const r = payloadOf(result);
+    for (const u of r.uploads || []) {
+      const row = addRow(u.name, "");
+      row.meta.textContent = describe(u);
+      row.state.textContent = t("done");
+      row.state.classList.add("ok");
+    }
+  }
+
+  window.addEventListener("message", (event) => {
+    if (event.source !== window.parent) return;
+    const msg = event.data;
+    if (!msg || msg.jsonrpc !== "2.0") return;
+    if (msg.id !== undefined && pending.has(msg.id) && !msg.method) {
+      const { resolve, reject } = pending.get(msg.id);
+      pending.delete(msg.id);
+      if (msg.error) reject(new Error(msg.error.message || "error")); else resolve(msg.result);
+      return;
+    }
+    switch (msg.method) {
+      case "ui/notifications/tool-result": onToolResult(msg.params); break;
+      case "ui/notifications/host-context-changed": applyContext(msg.params); break;
+      case "ui/resource-teardown": post({ jsonrpc: "2.0", id: msg.id, result: {} }); break;
+      case "ping": post({ jsonrpc: "2.0", id: msg.id, result: {} }); break;
+      default:
+        if (msg.id !== undefined && msg.method) post({ jsonrpc: "2.0", id: msg.id, error: { code: -32601, message: "Method not found" } });
+    }
+  });
+
+  new ResizeObserver(reportSize).observe(document.documentElement);
+  request("ui/initialize", {
+    protocolVersion: "2026-01-26",
+    appCapabilities: { availableDisplayModes: ["inline"] },
+    clientInfo: { name: "AdLoop upload card", version: "1" },
+  }).then((result) => {
+    applyContext(result && result.hostContext);
+    notify("ui/notifications/initialized", {});
+    reportSize();
+  }).catch(() => notify("ui/notifications/initialized", {}));
+})();
+</script>
+</body>
+</html>
