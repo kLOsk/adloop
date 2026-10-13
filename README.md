@@ -309,6 +309,10 @@ AdLoop includes pre-built slash commands in `.claude/commands/` for common workf
 
 AdLoop manages real ad spend, so safety is not optional.
 
+<p align="center"><img src="https://raw.githubusercontent.com/kLOsk/adloop/main/assets/approval-card.gif" alt="An AdLoop approval card in an AI chat: the user clicks Test run, Google validates the change, then Apply makes it live and the card reports back to the chat" width="760"></p>
+
+- **Approval cards.** In apps that show MCP Apps (Claude, ChatGPT, VS Code and others), every change appears as a card with Test run and Apply. Only the click applies it: the AI's own `confirm_and_apply(dry_run=false)` is refused with `APPROVE_ON_CARD`, whatever it was told in the chat.
+- **Confirmation dialogs.** Apps without cards that support elicitation (Claude Code, for example) get a dialog from AdLoop itself before every real change. The AI cannot answer it; declining changes nothing.
 - **Two-step writes.** Every mutation returns a preview first. A separate `confirm_and_apply` call is required to execute.
 - **Dry-run by default.** Even `confirm_and_apply` defaults to `dry_run=true`. Real changes require explicit `dry_run=false`.
 - **Two-phase apply (optional).** With `safety.two_phase_apply: true`, `confirm_and_apply` refuses `dry_run=false` until the plan has completed one dry-run pass — preview-then-apply becomes server-enforced instead of a convention.
