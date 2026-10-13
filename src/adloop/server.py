@@ -4240,6 +4240,28 @@ def get_reddit_pixels(ad_account_id: str = "") -> dict:
     return _impl(current_config(), ad_account_id=_reddit_account(ad_account_id))
 
 
+@_tool(title="Reddit audiences", annotations=_READONLY, tags={"reddit"})
+@_safe
+def get_reddit_audiences(ad_account_id: str = "") -> dict:
+    """Reddit custom and saved audiences of the account, and which ad groups use them.
+
+    Returns each custom audience's audience_id, name, type (PIXEL_RETARGETING,
+    ENGAGEMENT_RETARGETING, CUSTOMER_LIST, LOOKALIKE, ...), status, estimated
+    size_range, its source (pixel events or campaigns, lookback days) and the
+    ad groups that target or exclude it; saved audiences with their
+    targeting; and insights that flag audiences Reddit cannot use yet or that
+    are too small to deliver. The audience_id goes into custom_audience_ids or
+    excluded_custom_audience_ids on an ad group.
+
+    Args:
+        ad_account_id: Reddit ad account id (from list_reddit_accounts).
+            Empty uses reddit.ad_account_id from the config.
+    """
+    from adloop.reddit.read import get_reddit_audiences as _impl
+
+    return _impl(current_config(), ad_account_id=_reddit_account(ad_account_id))
+
+
 @_tool(title="Search Reddit targeting", annotations=_READONLY, tags={"reddit"})
 @_safe
 def search_reddit_targeting(
@@ -4626,6 +4648,8 @@ def update_reddit_ad_group(
     devices: _DictListOpt = None,
     carriers: _StrListOpt = None,
     view_modes: _StrListOpt = None,
+    custom_audience_ids: _StrListOpt = None,
+    excluded_custom_audience_ids: _StrListOpt = None,
 ) -> dict:
     """Draft changes to a Reddit ad group — budget, bid, run dates, weekly schedule, targeting.
 
@@ -4691,6 +4715,11 @@ def update_reddit_ad_group(
             checked against Reddit's carrier list. [] clears it.
         view_modes: Full list of feed layouts: ALL, CARD, CLASSIC, COMPACT
             or IMMERSIVE. [] clears it.
+        custom_audience_ids: Full list of custom audiences to target (from
+            get_reddit_audiences). It narrows the ad group to those people.
+            [] clears it.
+        excluded_custom_audience_ids: Full list of custom audiences to
+            exclude, e.g. existing customers. [] clears it.
     """
     from adloop.reddit.write import update_reddit_ad_group as _impl
 
@@ -4723,6 +4752,8 @@ def update_reddit_ad_group(
         devices=devices,
         carriers=carriers,
         view_modes=view_modes,
+        custom_audience_ids=custom_audience_ids,
+        excluded_custom_audience_ids=excluded_custom_audience_ids,
     )
 
 
@@ -4762,6 +4793,68 @@ def update_reddit_ad(
         name=name,
         click_url=click_url,
         allow_comments=allow_comments,
+    )
+
+
+@_tool(title="Draft a Reddit retargeting audience", annotations=_WRITE, tags={"reddit"})
+@_safe
+def draft_reddit_custom_audience(
+    name: str,
+    audience_type: str,
+    ad_account_id: str = "",
+    pixel_id: str = "",
+    events: _StrListOpt = None,
+    custom_events: _StrListOpt = None,
+    campaign_ids: _StrListOpt = None,
+    engagements: _StrListOpt = None,
+    lookback_window_days: int | None = None,
+) -> dict:
+    """Draft a Reddit retargeting audience (website visitors or engaged people) — PREVIEW.
+
+    Builds the audience from data Reddit already has: people the pixel saw
+    on the website, or people who saw or engaged with the account's
+    campaigns. No personal data is uploaded. Nothing changes until
+    confirm_and_apply applies the plan_id; Reddit then fills the audience
+    (status PENDING, up to a day), and an ad group uses it through
+    update_reddit_ad_group custom_audience_ids (target) or
+    excluded_custom_audience_ids (exclude).
+
+    Args:
+        name: Audience name, 3 to 500 characters.
+        audience_type: PIXEL_RETARGETING (website visitors, from the pixel)
+            or ENGAGEMENT_RETARGETING (people who saw or engaged with
+            campaigns).
+        ad_account_id: Reddit ad account id (from list_reddit_accounts).
+            Empty uses reddit.ad_account_id from the config.
+        pixel_id: Pixel to build a website audience from (get_reddit_pixels).
+        events: Website audiences: the pixel events that qualify, any of
+            PAGE_VISIT (default), VIEW_CONTENT, SEARCH, ADD_TO_CART,
+            ADD_TO_WISHLIST, PURCHASE, LEAD, SIGN_UP, CUSTOM.
+        custom_events: Website audiences: custom pixel event names to
+            include (adds CUSTOM to events), at most 50.
+        campaign_ids: Engagement audiences: the campaigns whose audience to
+            reuse (get_reddit_campaigns).
+        engagements: Engagement audiences: what people did, any of CLICKS
+            (default), IMPRESSIONS, UPVOTES, COMMENT_SUBMISSIONS,
+            VIDEO_STARTED, VIDEO_WATCHED_50_PERCENT,
+            VIDEO_WATCHED_100_PERCENT.
+        lookback_window_days: How far back an action counts: 1 to 90 days for
+            website audiences (default 30), 1 to 180 for engagement audiences
+            (default 90).
+    """
+    from adloop.reddit.write import draft_reddit_custom_audience as _impl
+
+    return _impl(
+        current_config(),
+        ad_account_id=_reddit_account(ad_account_id),
+        name=name,
+        audience_type=audience_type,
+        pixel_id=pixel_id,
+        events=events,
+        custom_events=custom_events,
+        campaign_ids=campaign_ids,
+        engagements=engagements,
+        lookback_window_days=lookback_window_days,
     )
 
 
@@ -4888,6 +4981,8 @@ def draft_reddit_ad_group(
     devices: _DictListOpt = None,
     carriers: _StrListOpt = None,
     view_modes: _StrListOpt = None,
+    custom_audience_ids: _StrListOpt = None,
+    excluded_custom_audience_ids: _StrListOpt = None,
 ) -> dict:
     """Draft a new Reddit ad group (created PAUSED) — returns a PREVIEW.
 
@@ -4961,6 +5056,10 @@ def draft_reddit_ad_group(
             carrier list. Omitted means every carrier.
         view_modes: Feed layouts: ALL, CARD, CLASSIC, COMPACT or IMMERSIVE.
             Omitted uses Reddit's default.
+        custom_audience_ids: Custom audiences to target (from
+            get_reddit_audiences), e.g. website visitors for retargeting.
+        excluded_custom_audience_ids: Custom audiences to exclude, e.g.
+            people who already bought.
     """
     from adloop.reddit.write import draft_reddit_ad_group as _impl
 
@@ -4995,6 +5094,8 @@ def draft_reddit_ad_group(
         devices=devices,
         carriers=carriers,
         view_modes=view_modes,
+        custom_audience_ids=custom_audience_ids,
+        excluded_custom_audience_ids=excluded_custom_audience_ids,
     )
 
 
@@ -5014,11 +5115,14 @@ def draft_reddit_ad(
     display_url: str = "",
     allow_comments: bool = True,
     post_id: str = "",
+    video_url: str = "",
+    thumbnail_url: str = "",
+    carousel_cards: list[dict] | None = None,
 ) -> dict:
     """Draft a Reddit ad: creates a post on the profile, then the ad (PAUSED) — PREVIEW.
 
-    click_url (and image_url) are verified to be reachable before drafting,
-    so ads do not point at unverified pages. Comments are public on Reddit
+    click_url and the media URLs are checked before drafting, so ads do not
+    point at unverified pages and Reddit gets real image and video files. Comments are public on Reddit
     ads. With post_id an EXISTING post is promoted instead, keeping its
     upvotes and comments: no post is created and the copy arguments are
     ignored. Returns a preview with a plan_id; nothing changes until
@@ -5040,20 +5144,35 @@ def draft_reddit_ad(
             Empty uses reddit.ad_account_id from the config.
         ad_name: Ad name; empty uses the headline. Truncated to 200
             characters.
-        post_type: TEXT (headline + optional body; default) or IMAGE
-            (headline + public image_url).
-        body: Post body text for TEXT posts, up to 40,000 characters.
+        post_type: TEXT (headline + optional body; default), IMAGE
+            (public image_url), VIDEO (public video_url + thumbnail_url) or
+            CAROUSEL (2 to 6 carousel_cards).
+        body: Post body text, up to 40,000 characters. Optional for media
+            posts.
         image_url: Publicly reachable image URL, required for IMAGE posts.
-        call_to_action: One of Reddit's fixed labels for IMAGE posts: Apply
-            Now, Book Now, Contact Us, Download, Get a Quote, Get Showtimes,
-            Install, Learn More, Order Now, Play Now, Pre-order Now, See Menu,
-            Shop Now, Sign Up, View More, Watch Now.
-        display_url: Optional display URL shown with IMAGE posts.
+        call_to_action: One of Reddit's fixed labels for media posts: Apply
+            Now, Book Now, Buy Tickets, Contact Us, Donate Now, Download, Get
+            a Quote, Get Directions, Get Showtimes, Install, Learn More,
+            Listen Now, Order Now, Play Now, Pre-order Now, Read More, Remind
+            Me, See Menu, Shop Now, Sign Up, Subscribe, View More, Visit
+            Store, Watch Now. On a carousel it is the default for every card.
+        display_url: Optional display URL shown with media posts; must be on
+            the click_url's domain.
         allow_comments: Whether Redditors can comment publicly on the ad
             (default true); false disables them.
-        post_id: Existing post to promote (t3_...); headline, body,
-            image_url, call_to_action and display_url are then ignored. Empty
-            creates a new post.
+        post_id: Existing post to promote (t3_...); headline, body, the
+            media arguments, call_to_action and display_url are then ignored.
+            Empty creates a new post.
+        video_url: Direct link to the video file (MP4 or MOV, up to 1 GB),
+            required for VIDEO posts. Reddit downloads it when the post is
+            created; a page that embeds the video does not work.
+        thumbnail_url: Publicly reachable image Reddit shows before the video
+            plays, required for VIDEO posts.
+        carousel_cards: For CAROUSEL posts, 2 to 6 cards, each
+            {"image_url": "...", "caption": "...", "click_url": "...",
+            "call_to_action": "..."}. Only image_url is required; caption is
+            at most 180 characters, click_url and call_to_action default to
+            the ad's.
     """
     from adloop.reddit.write import draft_reddit_ad as _impl
 
@@ -5072,6 +5191,9 @@ def draft_reddit_ad(
         display_url=display_url,
         allow_comments=allow_comments,
         post_id=post_id,
+        video_url=video_url,
+        thumbnail_url=thumbnail_url,
+        carousel_cards=carousel_cards,
     )
 
 

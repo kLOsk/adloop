@@ -766,7 +766,119 @@ class TestCreationDrafts:
             _config(), ad_group_id="g1", profile_id="p1", headline="x",
             click_url="https://example.com", post_type="video",
         )
-        assert any("post_type" in d for d in video["details"])
+        assert any("video_url" in d for d in video["details"])
+        assert any("thumbnail_url" in d for d in video["details"])
+        unknown = write.draft_reddit_ad(
+            _config(), ad_group_id="g1", profile_id="p1", headline="x",
+            click_url="https://example.com", post_type="gallery",
+        )
+        assert any("post_type must be one of" in d for d in unknown["details"])
+
+    def test_video_ad_draft_carries_media_and_thumbnail(self):
+        _, ctx = _fake_api({("GET", "ad_groups/g1"): _AD_GROUP})
+        with ctx, patch("adloop.ads.write._validate_urls", return_value=({"https://example.com/x": None}, {})), \
+                patch("adloop.reddit.write._check_media", return_value=(None, None)) as media:
+            preview = write.draft_reddit_ad(
+                _config(), ad_group_id="g1", profile_id="p1", headline="Watch", post_type="VIDEO",
+                click_url="https://example.com/x", video_url="https://cdn.example.com/a.mp4",
+                thumbnail_url="https://cdn.example.com/a.jpg", call_to_action="Watch Now",
+            )
+        post = preview["changes"]["post"]
+        assert post["type"] == "VIDEO"
+        assert post["thumbnail_url"] == "https://cdn.example.com/a.jpg"
+        assert post["content"] == [{
+            "destination_url": "https://example.com/x", "media_url": "https://cdn.example.com/a.mp4",
+            "call_to_action": "Watch Now",
+        }]
+        assert preview["changes"]["ad"]["click_url"] == "https://example.com/x"
+        assert [c.args for c in media.call_args_list] == [
+            ("https://cdn.example.com/a.mp4", "video"), ("https://cdn.example.com/a.jpg", "image"),
+        ]
+
+    def test_carousel_ad_draft_builds_one_item_per_card(self):
+        _, ctx = _fake_api({("GET", "ad_groups/g1"): _AD_GROUP})
+        validated = {}
+
+        def fake_validate(urls):
+            validated["urls"] = urls
+            return {u: None for u in urls}, {}
+
+        cards = [
+            {"image_url": "https://cdn.example.com/1.jpg", "caption": "One"},
+            {"image_url": "https://cdn.example.com/2.jpg", "click_url": "https://example.com/two",
+             "call_to_action": "Shop Now"},
+        ]
+        with ctx, patch("adloop.ads.write._validate_urls", side_effect=fake_validate), \
+                patch("adloop.reddit.write._check_media", return_value=(None, None)):
+            preview = write.draft_reddit_ad(
+                _config(), ad_group_id="g1", profile_id="p1", headline="Swipe", post_type="carousel",
+                click_url="https://example.com/x", call_to_action="Learn More", carousel_cards=cards,
+            )
+        assert preview["changes"]["post"]["content"] == [
+            {"media_url": "https://cdn.example.com/1.jpg", "destination_url": "https://example.com/x",
+             "caption": "One", "call_to_action": "Learn More"},
+            {"media_url": "https://cdn.example.com/2.jpg", "destination_url": "https://example.com/two",
+             "call_to_action": "Shop Now"},
+        ]
+        assert validated["urls"] == ["https://example.com/x", "https://example.com/two"]
+        assert preview["changes"]["display"]["carousel_cards"] == 2
+
+    def test_carousel_cards_are_validated(self):
+        one = write.draft_reddit_ad(
+            _config(), ad_group_id="g1", profile_id="p1", headline="x", post_type="CAROUSEL",
+            click_url="https://example.com", carousel_cards=[{"image_url": "https://a.example/1.jpg"}],
+        )
+        assert any("2 to 6 carousel_cards" in d for d in one["details"])
+        bad = write.draft_reddit_ad(
+            _config(), ad_group_id="g1", profile_id="p1", headline="x", post_type="CAROUSEL",
+            click_url="https://example.com",
+            carousel_cards=[{"caption": "c" * 181}, {"image_url": "https://a.example/2.jpg", "cta": "x"}],
+        )
+        details = " ".join(bad["details"])
+        assert "carousel_cards[0].image_url is required" in details
+        assert "181 characters" in details
+        assert "unsupported keys ['cta']" in details
+
+    def test_media_arguments_must_match_the_post_type(self):
+        result = write.draft_reddit_ad(
+            _config(), ad_group_id="g1", profile_id="p1", headline="x", post_type="IMAGE",
+            click_url="https://example.com", image_url="https://a.example/1.jpg",
+            video_url="https://a.example/1.mp4",
+        )
+        assert any("video_url do not apply to IMAGE posts" in d for d in result["details"])
+
+    def test_media_check_refuses_pages_and_oversized_files(self):
+        class _Resp:
+            def __init__(self, headers):
+                self.headers = headers
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                return False
+
+        class _Opener:
+            def __init__(self, headers):
+                self._headers = headers
+
+            def open(self, req, timeout):
+                return _Resp(self._headers)
+
+        cases = [
+            ({"Content-Type": "text/html; charset=utf-8"}, "video", "serves text/html"),
+            ({"Content-Type": "video/mp4", "Content-Length": str(2 * 1024 ** 3)}, "video", "2048 MB"),
+            ({"Content-Type": "image/png", "Content-Length": str(25 * 1024 ** 2)}, "image", "up to 20 MB"),
+        ]
+        for headers, kind, expected in cases:
+            with patch("adloop.ads.write._ssrf_error", return_value=None), \
+                    patch("adloop.ads.write._build_public_only_opener", return_value=_Opener(headers)):
+                problem, note = write._check_media("https://cdn.example.com/f", kind)
+            assert expected in (problem or ""), (headers, problem)
+            assert note is None
+        with patch("adloop.ads.write._ssrf_error", return_value=None), \
+                patch("adloop.ads.write._build_public_only_opener", return_value=_Opener({"Content-Type": "video/mp4"})):
+            assert write._check_media("https://cdn.example.com/f", "video") == (None, None)
 
 
 class TestConfirmAndApplyIntegration:
@@ -915,6 +1027,7 @@ class TestServerWrappers:
             "pause_reddit_entity", "enable_reddit_entity", "remove_reddit_entity",
             "update_reddit_campaign", "update_reddit_ad_group", "update_reddit_ad",
             "draft_reddit_campaign", "draft_reddit_ad_group", "draft_reddit_ad",
+            "draft_reddit_custom_audience",
         }
         destructive = {t.name for t in reddit if t.annotations.destructiveHint}
         assert destructive == {"remove_reddit_entity"}
@@ -926,7 +1039,10 @@ class TestServerWrappers:
         tools = {t.name: t for t in await mcp.list_tools()}
         for name in ("draft_reddit_ad_group", "update_reddit_ad_group"):
             params = tools[name].parameters["properties"]
-            for key in ("devices", "carriers", "excluded_interests", "view_modes"):
+            for key in (
+                "devices", "carriers", "excluded_interests", "view_modes",
+                "custom_audience_ids", "excluded_custom_audience_ids",
+            ):
                 assert key in params, f"{name}.{key}"
         estimate = tools["estimate_reddit_ad_group"].parameters["properties"]
         assert "devices" in estimate and "carriers" in estimate
@@ -1007,3 +1123,107 @@ class TestServerWrappers:
         finally:
             runtime.set_default_config(None)
         assert status["reddit"] == "not_configured"
+
+
+class TestCustomAudiences:
+    _PIXELS = {"data": [{"id": "px1", "name": "Site"}], "pagination": {}}
+
+    def test_website_audience_draft_builds_pixel_config(self):
+        _, ctx = _fake_api({("GET", "ad_accounts/a2_acct/pixels"): self._PIXELS})
+        with ctx:
+            preview = write.draft_reddit_custom_audience(
+                _config(), name="Pricing visitors", audience_type="website", pixel_id="px1",
+                events=["page_visit"], custom_events=["pricing_view"], lookback_window_days=60,
+            )
+        payload = preview["changes"]["payload"]
+        assert payload == {
+            "name": "Pricing visitors", "type": "PIXEL_RETARGETING",
+            "pixel_audience_config": {
+                "pixel_ids": ["px1"], "targetings": ["PAGE_VISIT", "CUSTOM"],
+                "lookback_window_days": 60, "custom_targetings": ["pricing_view"],
+            },
+        }
+        assert preview["operation"] == "reddit_create_custom_audience"
+        assert any("1,000 matched people" in w for w in preview["warnings"])
+
+    def test_website_audience_needs_a_pixel_of_the_account(self):
+        _, ctx = _fake_api({("GET", "ad_accounts/a2_acct/pixels"): self._PIXELS})
+        with ctx:
+            wrong = write.draft_reddit_custom_audience(
+                _config(), name="Visitors", audience_type="PIXEL_RETARGETING", pixel_id="px9",
+            )
+        assert any("not a pixel of ad account" in d for d in wrong["details"])
+        too_long = write.draft_reddit_custom_audience(
+            _config(), name="Visitors", audience_type="PIXEL_RETARGETING", pixel_id="px1",
+            lookback_window_days=120,
+        )
+        assert any("1 to 90" in d for d in too_long["details"])
+
+    def test_customer_lists_are_refused(self):
+        result = write.draft_reddit_custom_audience(
+            _config(), name="Buyers", audience_type="CUSTOMER_LIST",
+        )
+        assert any("Customer lists are not supported" in d for d in result["details"])
+
+    def test_engagement_audience_checks_campaigns_and_applies(self):
+        from adloop.ads import write as ads_write
+        from adloop.reddit.auth import RedditApiError
+
+        def campaign_or_404(body=None):
+            raise RedditApiError("Reddit Ads API returned 404", status=404)
+
+        _, ctx = _fake_api({("GET", "campaigns/c1"): _CAMPAIGN, ("GET", "campaigns/c2"): campaign_or_404})
+        with ctx:
+            missing = write.draft_reddit_custom_audience(
+                _config(), name="Engaged", audience_type="engagement", campaign_ids=["c1", "c2"],
+            )
+        assert any("campaigns not found in this account: c2" in d for d in missing["details"])
+
+        _, ctx = _fake_api({("GET", "campaigns/c1"): _CAMPAIGN})
+        with ctx:
+            preview = write.draft_reddit_custom_audience(
+                _config(), name="Engaged", audience_type="ENGAGEMENT_RETARGETING", campaign_ids=["c1"],
+                engagements=["clicks", "upvotes"],
+            )
+        assert preview["changes"]["payload"]["engagement_audience_config"] == {
+            "campaign_ids": ["c1"], "tracking_types": ["CLICKS", "UPVOTES"], "lookback_window_days": 90,
+        }
+
+        calls, ctx = _fake_api({
+            ("GET", "campaigns/c1"): _CAMPAIGN, ("GET", "ad_accounts/a2_acct"): _ACCOUNT,
+            ("POST", "ad_accounts/a2_acct/custom_audiences"): lambda body: {"data": {
+                "id": "aud1", "name": body["data"]["name"], "type": body["data"]["type"], "status": "PENDING"}},
+        })
+        with ctx, _no_scope_check():
+            dry = ads_write.confirm_and_apply(_config(), plan_id=preview["plan_id"], dry_run=True)
+            assert dry["status"] == "DRY_RUN_SUCCESS"
+            assert dry["checks"]["status_on_create"] is None
+            result = ads_write.confirm_and_apply(_config(), plan_id=preview["plan_id"], dry_run=False)
+        assert result["status"] == "APPLIED"
+        assert result["result"]["audience_id"] == "aud1"
+        assert calls[-1][2]["data"]["type"] == "ENGAGEMENT_RETARGETING"
+
+    def test_ad_group_update_targets_and_excludes_audiences(self):
+        audiences = {"data": [
+            {"id": "aud1", "name": "Visitors", "status": "VALID"},
+            {"id": "aud2", "name": "Buyers", "status": "PENDING"},
+        ], "pagination": {}}
+        _, ctx = _fake_api({
+            ("GET", "ad_groups/g1"): _AD_GROUP, ("GET", "ad_accounts/a2_acct"): _ACCOUNT,
+            ("GET", "ad_accounts/a2_acct/custom_audiences"): audiences,
+        })
+        with ctx:
+            preview = write.update_reddit_ad_group(
+                _config(), ad_group_id="g1", custom_audience_ids=["aud2"],
+                excluded_custom_audience_ids=["aud1"],
+            )
+            unknown = write.update_reddit_ad_group(_config(), ad_group_id="g1", custom_audience_ids=["aud9"])
+            clash = write.update_reddit_ad_group(
+                _config(), ad_group_id="g1", custom_audience_ids=["aud1"], excluded_custom_audience_ids=["aud1"],
+            )
+        targeting = preview["changes"]["patch"]["targeting"]
+        assert targeting["custom_audience_ids"] == ["aud2"]
+        assert targeting["excluded_custom_audience_ids"] == ["aud1"]
+        assert any("Buyers is PENDING" in w for w in preview["warnings"])
+        assert any("Unknown custom audience ids: aud9" in d for d in unknown["details"])
+        assert any("targeted and excluded at once" in d for d in clash["details"])

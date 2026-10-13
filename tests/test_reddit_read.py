@@ -326,6 +326,40 @@ class TestReportWindow:
 
 
 class TestPixels:
+    def test_audiences_show_source_usage_and_problems(self, config):
+        _, ctx = _fake_api({
+            ("GET", "ad_accounts/a2_acct/custom_audiences"): {"data": [
+                {"id": "aud1", "name": "Visitors", "type": "PIXEL_RETARGETING", "status": "VALID",
+                 "size_range_lower": 2000, "size_range_upper": 5000,
+                 "pixel_audience_config": {"pixel_ids": ["px1"], "targetings": ["PAGE_VISIT"],
+                                           "lookback_window_days": 30}},
+                {"id": "aud2", "name": "Tiny", "type": "ENGAGEMENT_RETARGETING", "status": "NOT_ENOUGH_MATCHES_ERROR",
+                 "engagement_audience_config": {"campaign_ids": ["c1"], "tracking_types": ["CLICKS"],
+                                                "lookback_window_days": 90}},
+            ]},
+            ("GET", "ad_accounts/a2_acct/saved_audiences"): {"data": [
+                {"id": "s1", "name": "DE devs", "status": "ACTIVE", "active_ad_groups_count": 1,
+                 "targeting": {"geolocations": ["DE"]}},
+            ]},
+            ("GET", "ad_accounts/a2_acct/ad_groups"): {"data": [
+                {"id": "g1", "name": "Retarget", "configured_status": "ACTIVE",
+                 "targeting": {"custom_audience_ids": ["aud2"], "excluded_custom_audience_ids": ["aud1"]}},
+                {"id": "g2", "name": "Old", "configured_status": "ARCHIVED",
+                 "targeting": {"custom_audience_ids": ["aud1"]}},
+            ]},
+        })
+        with ctx:
+            result = read.get_reddit_audiences(config)
+        visitors, tiny = result["custom_audiences"]
+        assert visitors["source"]["events"] == ["PAGE_VISIT"]
+        assert visitors["size_range"] == [2000, 5000]
+        assert visitors["ad_groups"] == {"excluded_by": ["Retarget"]}
+        assert tiny["ad_groups"] == {"targeted_by": ["Retarget"]}
+        assert result["saved_audiences"][0]["targeting"]["geolocations"] == ["DE"]
+        insights = " ".join(result["insights"])
+        assert "Tiny (NOT_ENOUGH_MATCHES_ERROR)" in insights
+        assert "Tiny → Retarget" in insights
+
     def test_pixels_report_last_fired_and_cross_check_ad_groups(self, config):
         _, ctx = _fake_api({
             ("GET", "ad_accounts/a2_acct/pixels"): {"data": [

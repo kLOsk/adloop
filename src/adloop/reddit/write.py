@@ -57,7 +57,7 @@ _CAMPAIGN_BID_STRATEGIES = {"BIDLESS", "MAXIMIZE_VOLUME", "TARGET_CPX"}
 _AD_GROUP_BID_STRATEGIES = {"BIDLESS", "MANUAL_BIDDING", "MAXIMIZE_VOLUME", "TARGET_CPX"}
 _BID_TYPES = {"CPC", "CPM", "CPV", "CPV6", "CPV15"}
 _GOAL_TYPES = {"DAILY_SPEND", "LIFETIME_SPEND"}
-_POST_TYPES = {"TEXT", "IMAGE"}
+_POST_TYPES = {"TEXT", "IMAGE", "VIDEO", "CAROUSEL"}
 _GENDERS = {"FEMALE", "MALE"}
 _PLATFORMS = {"ALL", "DESKTOP", "DESKTOP_LEGACY", "MOBILE_NATIVE", "MOBILE_WEB", "MOBILE_WEB_3X", "SHREDTOP"}
 # Reddit calls placements "locations": the feed, or conversation (comments) pages.
@@ -75,7 +75,19 @@ _CALL_TO_ACTIONS = {
     "Apply Now", "Contact Us", "Download", "Get a Quote", "Get Showtimes",
     "Install", "Learn More", "Order Now", "Play Now", "Pre-order Now",
     "See Menu", "Shop Now", "Sign Up", "View More", "Watch Now", "Book Now",
+    "Buy Tickets", "Get Directions", "Listen Now", "Read More", "Subscribe",
+    "Visit Store", "Donate Now", "Remind Me",
 }
+# Carousel ads take 2 to 6 cards in Ads Manager; the API's own cap (40) is
+# for organic posts. Captions are cut at 180 characters by the API.
+_MIN_CAROUSEL_CARDS = 2
+_MAX_CAROUSEL_CARDS = 6
+_MAX_CAPTION_CHARS = 180
+_CAROUSEL_CARD_KEYS = {"image_url", "click_url", "caption", "call_to_action"}
+# Reddit's limits for media fetched from a URL: videos (MP4/MOV) up to 1 GB,
+# images up to 20 MB. Only checked when the server reports a size.
+_MAX_VIDEO_BYTES = 1024 ** 3
+_MAX_IMAGE_BYTES = 20 * 1024 ** 2
 # Reddit truncates titles around 300 characters; headlines beyond that
 # are almost always a mistake.
 _MAX_HEADLINE_CHARS = 300
@@ -85,6 +97,22 @@ _SCHEDULE_NOTE = (
     "the schedule get no delivery."
 )
 _MAX_TEXT_BODY_CHARS = 40_000
+# Custom audiences built without personal data: website visitors from the
+# pixel, or people who engaged with the account's campaigns. Customer lists
+# (hashed emails) are left out on purpose.
+_AUDIENCE_TYPES = {"PIXEL_RETARGETING", "ENGAGEMENT_RETARGETING"}
+_AUDIENCE_TYPE_ALIASES = {"WEBSITE": "PIXEL_RETARGETING", "PIXEL": "PIXEL_RETARGETING", "ENGAGEMENT": "ENGAGEMENT_RETARGETING"}
+_PIXEL_AUDIENCE_EVENTS = {
+    "PAGE_VISIT", "VIEW_CONTENT", "SEARCH", "ADD_TO_CART", "ADD_TO_WISHLIST",
+    "PURCHASE", "LEAD", "SIGN_UP", "CUSTOM",
+}
+_ENGAGEMENT_TYPES = {
+    "IMPRESSIONS", "CLICKS", "UPVOTES", "COMMENT_SUBMISSIONS",
+    "VIDEO_STARTED", "VIDEO_WATCHED_50_PERCENT", "VIDEO_WATCHED_100_PERCENT",
+}
+_MAX_PIXEL_LOOKBACK_DAYS = 90
+_MAX_ENGAGEMENT_LOOKBACK_DAYS = 180
+_MAX_AUDIENCE_CAMPAIGNS = 500
 
 
 class _Invalid(Exception):
@@ -189,6 +217,18 @@ def _store(plan_kwargs: dict, *, warnings: list[str] | None = None) -> dict:
 def _fetch(config: AdLoopConfig, entity_type: str, entity_id: str) -> dict:
     collection = _COLLECTIONS[entity_type]
     return data_of(reddit_get(config, f"{collection}/{entity_id}"))
+
+
+def _exists(config: AdLoopConfig, entity_type: str, entity_id: str) -> bool:
+    """Whether the entity exists; a 404 is a no, other errors propagate."""
+    from adloop.reddit.auth import RedditApiError
+
+    try:
+        return bool(_fetch(config, entity_type, entity_id))
+    except RedditApiError as e:
+        if getattr(e, "status", None) == 404:
+            return False
+        raise
 
 
 def _require_scope_for_writes(config: AdLoopConfig) -> None:
@@ -478,6 +518,8 @@ def _targeting_payload(
     devices: list | None = None,
     carriers: list | None = None,
     view_modes: list | None = None,
+    custom_audience_ids: list | None = None,
+    excluded_custom_audience_ids: list | None = None,
 ) -> dict:
     targeting: dict[str, Any] = {}
 
@@ -537,6 +579,13 @@ def _targeting_payload(
         if bad:
             errors.append(f"view_modes contains unsupported values {bad}; use {sorted(_VIEW_MODES)}")
         targeting["view_modes"] = cleaned
+    if custom_audience_ids is not None:
+        targeting["custom_audience_ids"] = list(dict.fromkeys(_clean(custom_audience_ids)))
+    if excluded_custom_audience_ids is not None:
+        targeting["excluded_custom_audience_ids"] = list(dict.fromkeys(_clean(excluded_custom_audience_ids)))
+    both = set(targeting.get("custom_audience_ids") or []) & set(targeting.get("excluded_custom_audience_ids") or [])
+    if both:
+        errors.append(f"audiences cannot be targeted and excluded at once: {', '.join(sorted(both))}")
     return targeting
 
 
@@ -547,7 +596,9 @@ _EXCLUDED_INTERESTS_NOTE = (
 )
 
 
-def _targeting_notes(config: AdLoopConfig, targeting: dict, errors: list[str], warnings: list[str]) -> None:
+def _targeting_notes(
+    config: AdLoopConfig, targeting: dict, errors: list[str], warnings: list[str], account: str = ""
+) -> None:
     """Checks for the device/carrier/interest-exclusion keys shared by draft and update.
 
     Carrier ids are checked against Reddit's carrier list (Reddit itself only
@@ -570,6 +621,36 @@ def _targeting_notes(config: AdLoopConfig, targeting: dict, errors: list[str], w
             if unknown:
                 errors.append(
                     f"Unknown carrier ids: {', '.join(unknown)} (use ids from search_reddit_targeting kind \"carriers\")"
+                )
+    audience_ids = list(targeting.get("custom_audience_ids") or []) + list(
+        targeting.get("excluded_custom_audience_ids") or []
+    )
+    if audience_ids and account:
+        from adloop.reddit.client import reddit_get_all
+
+        try:
+            audiences = {
+                str(a.get("id")): a for a in reddit_get_all(config, f"ad_accounts/{account}/custom_audiences")
+            }
+        except Exception as exc:
+            warnings.append(f"Audiences could not be pre-validated with Reddit ({exc}); the apply may still refuse them.")
+        else:
+            unknown = [a for a in audience_ids if a not in audiences]
+            if unknown:
+                errors.append(
+                    f"Unknown custom audience ids: {', '.join(unknown)} (see get_reddit_audiences)"
+                )
+            for audience_id in targeting.get("custom_audience_ids") or []:
+                status = str((audiences.get(audience_id) or {}).get("status") or "")
+                if status and status not in ("VALID", "SUCCESSFUL"):
+                    warnings.append(
+                        f"Audience {audiences[audience_id].get('name') or audience_id} is {status}; "
+                        "the ad group may not deliver until Reddit has filled it."
+                    )
+            if targeting.get("custom_audience_ids"):
+                warnings.append(
+                    "Targeting a custom audience narrows the ad group to those people, on top of "
+                    "the other targeting. Exclusions (excluded_custom_audience_ids) only remove people."
                 )
 
 
@@ -666,6 +747,8 @@ def update_reddit_ad_group(
     devices: list | None = None,
     carriers: list | None = None,
     view_modes: list | None = None,
+    custom_audience_ids: list | None = None,
+    excluded_custom_audience_ids: list | None = None,
 ) -> dict:
     """Draft ad group changes: budget, bid, run dates, weekly schedule, targeting (lists REPLACE)."""
     blocked = _guard("update_reddit_ad_group", config)
@@ -698,12 +781,13 @@ def update_reddit_ad_group(
         languages=languages, gender=gender, platforms=platforms,
         expand_targeting=expand_targeting, errors=errors, locations=locations,
         excluded_interests=excluded_interests, devices=devices, carriers=carriers,
-        view_modes=view_modes,
+        view_modes=view_modes, custom_audience_ids=custom_audience_ids,
+        excluded_custom_audience_ids=excluded_custom_audience_ids,
     )
     if errors:
         return _validation_error(errors)
     targeting_warnings: list[str] = []
-    _targeting_notes(config, targeting, errors, targeting_warnings)
+    _targeting_notes(config, targeting, errors, targeting_warnings, account)
     if errors:
         return _validation_error(errors)
 
@@ -1130,6 +1214,8 @@ def draft_reddit_ad_group(
     devices: list | None = None,
     carriers: list | None = None,
     view_modes: list | None = None,
+    custom_audience_ids: list | None = None,
+    excluded_custom_audience_ids: list | None = None,
 ) -> dict:
     """Draft a new ad group (created PAUSED) with budget, bid, pixel, schedule and targeting."""
     blocked = _guard("draft_reddit_ad_group", config)
@@ -1177,7 +1263,8 @@ def draft_reddit_ad_group(
         languages=languages, gender=gender, platforms=platforms,
         expand_targeting=expand_targeting, errors=errors, locations=locations,
         excluded_interests=excluded_interests, devices=devices, carriers=carriers,
-        view_modes=view_modes,
+        view_modes=view_modes, custom_audience_ids=custom_audience_ids,
+        excluded_custom_audience_ids=excluded_custom_audience_ids,
     )
     if not any(targeting.get(k) for k in ("geolocations", "communities", "interests", "keywords")):
         errors.append(
@@ -1247,7 +1334,7 @@ def draft_reddit_ad_group(
             errors.append(f"geolocation '{geo_id}': {problem} (use ids from search_reddit_targeting)")
     except Exception as exc:  # validation endpoints down: warn, don't block
         warnings.append(f"Targeting could not be pre-validated with Reddit ({exc}); the apply may still refuse it.")
-    _targeting_notes(config, targeting, errors, warnings)
+    _targeting_notes(config, targeting, errors, warnings, account)
     if campaign.get("objective") == "APP_INSTALLS" and len(targeting.get("devices") or []) != 1:
         errors.append(
             "APP_INSTALLS campaigns need exactly one device target (Reddit rule), e.g. "
@@ -1467,6 +1554,89 @@ def _draft_ad_from_post(
     )
 
 
+def _check_media(url: str, kind: str, timeout: int = 10) -> tuple[str | None, str | None]:
+    """HEAD a media URL Reddit will download: (error, warning).
+
+    Reddit fetches ``media_url`` and ``thumbnail_url`` itself when the post is
+    created, so a page URL or a file over Reddit's size limit only fails at
+    apply. The check refuses a declared content type of the wrong kind or a
+    declared size over the limit; a server that answers without those headers,
+    or not at all, gets a warning instead.
+    """
+    import urllib.error
+    import urllib.request
+
+    from adloop.ads.write import _build_public_only_opener, _ssrf_error
+
+    blocked = _ssrf_error(url)
+    if blocked:
+        return f"is not reachable: {blocked}", None
+    limit = _MAX_VIDEO_BYTES if kind == "video" else _MAX_IMAGE_BYTES
+    try:
+        req = urllib.request.Request(url, method="HEAD", headers={"User-Agent": "AdLoop/1.0"})
+        with _build_public_only_opener().open(req, timeout=timeout) as resp:
+            content_type = (resp.headers.get("Content-Type") or "").split(";")[0].strip().lower()
+            length = resp.headers.get("Content-Length")
+    except urllib.error.HTTPError as e:
+        if e.code in (404, 410):
+            return f"is not reachable: HTTP {e.code}", None
+        return None, f"'{url}' answered HTTP {e.code}; Reddit downloads it at apply, so confirm it is public."
+    except Exception as e:  # network trouble: let Reddit be the judge
+        return None, f"'{url}' could not be checked ({e}); Reddit downloads it at apply."
+    if content_type and not content_type.startswith(f"{kind}/") and content_type != "application/octet-stream":
+        noun = "an image" if kind == "image" else "a video"
+        return (
+            f"serves {content_type}, not {noun} file. Use a direct link to the file "
+            "itself, not a page that shows it",
+            None,
+        )
+    if length and length.isdigit() and int(length) > limit:
+        return f"is {int(length) / 1024 ** 2:.0f} MB; Reddit takes {kind}s up to {limit // 1024 ** 2} MB", None
+    return None, None
+
+
+def _carousel_content(
+    cards: list | None, *, click_url: str, call_to_action: str, display_url: str, errors: list[str]
+) -> list[dict]:
+    """Validate carousel cards and build Reddit's content items."""
+    items = list(cards or [])
+    if not (_MIN_CAROUSEL_CARDS <= len(items) <= _MAX_CAROUSEL_CARDS):
+        errors.append(
+            f"CAROUSEL posts need {_MIN_CAROUSEL_CARDS} to {_MAX_CAROUSEL_CARDS} carousel_cards "
+            f"(got {len(items)})"
+        )
+    content: list[dict] = []
+    for i, card in enumerate(items):
+        label = f"carousel_cards[{i}]"
+        if not isinstance(card, dict):
+            errors.append(f'{label} must be an object like {{"image_url": "https://...", "caption": "..."}}')
+            continue
+        unknown = sorted(set(card) - _CAROUSEL_CARD_KEYS)
+        if unknown:
+            errors.append(f"{label} has unsupported keys {unknown}; use {sorted(_CAROUSEL_CARD_KEYS)}")
+        image = str(card.get("image_url") or "").strip()
+        if not image:
+            errors.append(f"{label}.image_url is required (a publicly reachable image)")
+        destination = str(card.get("click_url") or "").strip() or click_url
+        if destination and not destination.startswith(("http://", "https://")):
+            errors.append(f"{label}.click_url must start with http:// or https://")
+        item: dict[str, Any] = {"media_url": image, "destination_url": destination}
+        caption = str(card.get("caption") or "").strip()
+        if len(caption) > _MAX_CAPTION_CHARS:
+            errors.append(f"{label}.caption is {len(caption)} characters; Reddit allows {_MAX_CAPTION_CHARS}")
+        if caption:
+            item["caption"] = caption
+        cta = str(card.get("call_to_action") or "").strip() or call_to_action
+        if cta and cta not in _CALL_TO_ACTIONS:
+            errors.append(f"{label}.call_to_action must be one of {sorted(_CALL_TO_ACTIONS)}")
+        if cta:
+            item["call_to_action"] = cta
+        if display_url:
+            item["display_url"] = display_url
+        content.append(item)
+    return content
+
+
 def draft_reddit_ad(
     config: AdLoopConfig,
     *,
@@ -1483,8 +1653,15 @@ def draft_reddit_ad(
     display_url: str = "",
     allow_comments: bool = True,
     post_id: str = "",
+    video_url: str = "",
+    thumbnail_url: str = "",
+    carousel_cards: list | None = None,
 ) -> dict:
-    """Draft a post + ad pair (created PAUSED). IMAGE posts take a public image_url.
+    """Draft a post + ad pair (created PAUSED).
+
+    IMAGE posts take a public image_url, VIDEO posts a public video_url plus
+    thumbnail_url, CAROUSEL posts 2 to 6 carousel_cards. Reddit downloads the
+    media from those URLs when the post is created.
 
     With ``post_id`` an existing post is promoted instead: no post is created,
     the copy arguments are ignored, and the ad points at that post.
@@ -1503,7 +1680,10 @@ def draft_reddit_ad(
             config, errors=errors, warnings=warnings, ad_account_id=ad_account_id,
             ad_group_id=ad_group_id, ad_name=ad_name, profile_id=profile_id,
             post_id=post_id, click_url=click_url,
-            copy_given=bool(headline or body or image_url or call_to_action or display_url),
+            copy_given=bool(
+                headline or body or image_url or call_to_action or display_url
+                or video_url or thumbnail_url or carousel_cards
+            ),
         )
     profile_id = (profile_id or "").strip()
     if not profile_id:
@@ -1518,17 +1698,33 @@ def draft_reddit_ad(
         errors.append(f"headline is {len(headline)} characters; keep it under {_MAX_HEADLINE_CHARS}")
     post_type = (post_type or "TEXT").strip().upper()
     if post_type not in _POST_TYPES:
-        errors.append(
-            f"post_type must be one of {sorted(_POST_TYPES)} (VIDEO/CAROUSEL are not supported yet)"
-        )
+        errors.append(f"post_type must be one of {sorted(_POST_TYPES)}")
     click_url = (click_url or "").strip()
     if not click_url:
         errors.append("click_url is required — the landing page users should reach")
     elif not click_url.startswith(("http://", "https://")):
         errors.append("click_url must start with http:// or https://")
     image_url = (image_url or "").strip()
+    video_url = (video_url or "").strip()
+    thumbnail_url = (thumbnail_url or "").strip()
     if post_type == "IMAGE" and not image_url:
         errors.append("IMAGE posts need image_url (a publicly reachable image)")
+    if post_type == "VIDEO":
+        if not video_url:
+            errors.append("VIDEO posts need video_url (a direct link to an MP4 or MOV file)")
+        if not thumbnail_url:
+            errors.append("VIDEO posts need thumbnail_url (a publicly reachable image; Reddit requires one)")
+    unused = [
+        name for name, value, types in (
+            ("image_url", image_url, {"IMAGE"}),
+            ("video_url", video_url, {"VIDEO"}),
+            ("thumbnail_url", thumbnail_url, {"VIDEO"}),
+            ("carousel_cards", carousel_cards, {"CAROUSEL"}),
+        )
+        if value and post_type in _POST_TYPES and post_type not in types
+    ]
+    if unused:
+        errors.append(f"{', '.join(unused)} do not apply to {post_type} posts")
     if body and len(body) > _MAX_TEXT_BODY_CHARS:
         errors.append("body is too long")
     if post_type == "TEXT" and click_url and click_url not in (body or ""):
@@ -1542,6 +1738,13 @@ def draft_reddit_ad(
     call_to_action = (call_to_action or "").strip()
     if call_to_action and call_to_action not in _CALL_TO_ACTIONS:
         errors.append(f"call_to_action must be one of {sorted(_CALL_TO_ACTIONS)}")
+    display_url = (display_url or "").strip()
+    cards: list[dict] = []
+    if post_type == "CAROUSEL":
+        cards = _carousel_content(
+            carousel_cards, click_url=click_url, call_to_action=call_to_action,
+            display_url=display_url, errors=errors,
+        )
     try:
         account = resolve_account(config, ad_account_id)
     except ValueError as e:
@@ -1553,11 +1756,20 @@ def draft_reddit_ad(
     # Never send traffic to a page nobody verified: same rule as RSAs.
     from adloop.ads.write import _validate_urls
 
-    url_errors, url_warnings = _validate_urls([click_url] + ([image_url] if image_url else []))
+    landing = list(dict.fromkeys([click_url] + [c["destination_url"] for c in cards]))
+    url_errors, url_warnings = _validate_urls(landing + ([image_url] if image_url else []))
     for url, problem in url_errors.items():
         if problem:
             errors.append(f"'{url}' is not reachable: {problem}")
     warnings.extend(url_warnings.values())
+    media = [(video_url, "video"), (thumbnail_url, "image")] if post_type == "VIDEO" else []
+    media += [(c["media_url"], "image") for c in cards]
+    for url, kind in media:
+        problem, note = _check_media(url, kind)
+        if problem:
+            errors.append(f"'{url}' {problem}")
+        if note:
+            warnings.append(note)
     if errors:
         return _validation_error(errors)
 
@@ -1570,13 +1782,20 @@ def draft_reddit_ad(
         "headline": headline,
         "allow_comments": bool(allow_comments),
     }
-    if post_type == "IMAGE":
-        content_item: dict[str, Any] = {"destination_url": click_url, "media_url": image_url}
+    if post_type in ("IMAGE", "VIDEO"):
+        content_item: dict[str, Any] = {
+            "destination_url": click_url,
+            "media_url": image_url if post_type == "IMAGE" else video_url,
+        }
         if call_to_action:
             content_item["call_to_action"] = call_to_action
         if display_url:
-            content_item["display_url"] = display_url.strip()
+            content_item["display_url"] = display_url
         post_payload["content"] = [content_item]
+        if post_type == "VIDEO":
+            post_payload["thumbnail_url"] = thumbnail_url
+    elif post_type == "CAROUSEL":
+        post_payload["content"] = cards
     else:
         # TEXT posts must not carry a content block ("Post content must be
         # empty for this post type", verified live); the click_url lives on
@@ -1590,7 +1809,7 @@ def draft_reddit_ad(
         "configured_status": "PAUSED",
         "profile_id": profile_id,
     }
-    if post_type == "IMAGE":
+    if post_type != "TEXT":
         ad_payload["click_url"] = click_url
     else:
         warnings.append(
@@ -1624,10 +1843,145 @@ def draft_reddit_ad(
                     "post_type": post_type,
                     "click_url": click_url,
                     "image_url": image_url or None,
+                    "video_url": video_url or None,
+                    "thumbnail_url": thumbnail_url or None,
+                    "carousel_cards": len(cards) or None,
                     "call_to_action": call_to_action or None,
                     "status_on_create": "PAUSED",
                 },
             },
+        },
+        warnings=warnings,
+    )
+
+
+def draft_reddit_custom_audience(
+    config: AdLoopConfig,
+    *,
+    ad_account_id: str = "",
+    name: str = "",
+    audience_type: str = "",
+    pixel_id: str = "",
+    events: list | None = None,
+    custom_events: list | None = None,
+    campaign_ids: list | None = None,
+    engagements: list | None = None,
+    lookback_window_days: int | None = None,
+) -> dict:
+    """Draft a retargeting audience: website visitors or people who engaged.
+
+    Nothing serves from an audience on its own; ad groups use it through
+    ``custom_audience_ids`` (or exclude it through
+    ``excluded_custom_audience_ids``) once Reddit has filled it.
+    """
+    blocked = _guard("draft_reddit_custom_audience", config)
+    if blocked:
+        return blocked
+    errors: list[str] = []
+    warnings: list[str] = []
+    name = (name or "").strip()
+    if not (3 <= len(name) <= 500):
+        errors.append("name is required, 3 to 500 characters")
+    kind = (audience_type or "").strip().upper()
+    kind = _AUDIENCE_TYPE_ALIASES.get(kind, kind)
+    if kind not in _AUDIENCE_TYPES:
+        errors.append(
+            "audience_type must be PIXEL_RETARGETING (website visitors, from the pixel) or "
+            "ENGAGEMENT_RETARGETING (people who saw or engaged with your campaigns). "
+            "Customer lists are not supported here: they upload personal data."
+        )
+
+    def _clean(items: list | None) -> list[str]:
+        return list(dict.fromkeys(str(x).strip() for x in (items or []) if str(x).strip()))
+
+    try:
+        lookback = int(lookback_window_days) if lookback_window_days is not None else None
+    except (TypeError, ValueError):
+        lookback = None
+        errors.append("lookback_window_days must be a whole number of days")
+    payload: dict[str, Any] = {"name": name, "type": kind}
+    display: dict[str, Any] = {"name": name, "audience_type": kind}
+    if kind == "PIXEL_RETARGETING":
+        pixel_id = (pixel_id or "").strip()
+        if not pixel_id:
+            errors.append("pixel_id is required for website audiences (see get_reddit_pixels)")
+        chosen = [e.upper() for e in _clean(events)] or ["PAGE_VISIT"]
+        bad = sorted(set(chosen) - _PIXEL_AUDIENCE_EVENTS)
+        if bad:
+            errors.append(f"events contains unsupported values {bad}; use {sorted(_PIXEL_AUDIENCE_EVENTS)}")
+        custom = _clean(custom_events)
+        if custom and "CUSTOM" not in chosen:
+            chosen.append("CUSTOM")
+        if "CUSTOM" in chosen and not custom:
+            errors.append("events includes CUSTOM, so custom_events needs the custom event names")
+        if len(custom) > 50:
+            errors.append("custom_events takes at most 50 names")
+        lookback = 30 if lookback is None else lookback
+        if not 1 <= lookback <= _MAX_PIXEL_LOOKBACK_DAYS:
+            errors.append(f"lookback_window_days must be 1 to {_MAX_PIXEL_LOOKBACK_DAYS} for website audiences")
+        config_block: dict[str, Any] = {
+            "pixel_ids": [pixel_id], "targetings": chosen, "lookback_window_days": lookback,
+        }
+        if custom:
+            config_block["custom_targetings"] = custom
+        payload["pixel_audience_config"] = config_block
+        display.update({"pixel_id": pixel_id, "events": chosen, "custom_events": custom, "lookback_window_days": lookback})
+        if campaign_ids or engagements:
+            warnings.append("campaign_ids and engagements only apply to ENGAGEMENT_RETARGETING; ignored.")
+    elif kind == "ENGAGEMENT_RETARGETING":
+        campaigns = _clean(campaign_ids)
+        if not campaigns:
+            errors.append("campaign_ids is required for engagement audiences (see get_reddit_campaigns)")
+        if len(campaigns) > _MAX_AUDIENCE_CAMPAIGNS:
+            errors.append(f"campaign_ids takes at most {_MAX_AUDIENCE_CAMPAIGNS} campaigns")
+        chosen = [e.upper() for e in _clean(engagements)] or ["CLICKS"]
+        bad = sorted(set(chosen) - _ENGAGEMENT_TYPES)
+        if bad:
+            errors.append(f"engagements contains unsupported values {bad}; use {sorted(_ENGAGEMENT_TYPES)}")
+        lookback = 90 if lookback is None else lookback
+        if not 1 <= lookback <= _MAX_ENGAGEMENT_LOOKBACK_DAYS:
+            errors.append(
+                f"lookback_window_days must be 1 to {_MAX_ENGAGEMENT_LOOKBACK_DAYS} for engagement audiences"
+            )
+        payload["engagement_audience_config"] = {
+            "campaign_ids": campaigns, "tracking_types": chosen, "lookback_window_days": lookback,
+        }
+        display.update({"campaign_ids": campaigns, "engagements": chosen, "lookback_window_days": lookback})
+        if pixel_id or events or custom_events:
+            warnings.append("pixel_id, events and custom_events only apply to PIXEL_RETARGETING; ignored.")
+    try:
+        account = resolve_account(config, ad_account_id)
+    except ValueError as e:
+        errors.append(str(e))
+        account = ""
+    if errors:
+        return _validation_error(errors)
+
+    if kind == "PIXEL_RETARGETING":
+        from adloop.reddit.client import reddit_get_all
+
+        pixels = {str(p.get("id")) for p in reddit_get_all(config, f"ad_accounts/{account}/pixels")}
+        if pixel_id not in pixels:
+            return _validation_error([
+                f"pixel '{pixel_id}' is not a pixel of ad account {account} "
+                f"(known: {', '.join(sorted(pixels)) or 'none'})"
+            ])
+    else:
+        missing = [c for c in payload["engagement_audience_config"]["campaign_ids"] if not _exists(config, "campaign", c)]
+        if missing:
+            return _validation_error([f"campaigns not found in this account: {', '.join(missing)}"])
+
+    warnings.append(
+        "Reddit fills the audience after it is created (status PENDING), which can take up to "
+        "a day. It needs about 1,000 matched people before ad groups deliver to it."
+    )
+    return _store(
+        {
+            "operation": "reddit_create_custom_audience",
+            "entity_type": "custom_audience",
+            "entity_id": "",
+            "customer_id": account,
+            "changes": {"ad_account_id": account, "payload": payload, "display": display},
         },
         warnings=warnings,
     )
@@ -1711,9 +2065,27 @@ def preflight(config: AdLoopConfig, plan: ChangePlan) -> dict:
             if not get_reddit_post(config, str(changes["existing_post_id"])):
                 raise ValueError(f"post '{changes['existing_post_id']}' no longer exists.")
             checks["existing_post_id"] = changes["existing_post_id"]
+    elif plan.operation == "reddit_create_custom_audience":
+        from adloop.reddit.client import reddit_get_all
+
+        payload = changes.get("payload") or {}
+        pixel_ids = (payload.get("pixel_audience_config") or {}).get("pixel_ids") or []
+        if pixel_ids:
+            pixels = {str(p.get("id")) for p in reddit_get_all(config, f"ad_accounts/{account}/pixels")}
+            if pixel_ids[0] not in pixels:
+                raise ValueError(f"pixel '{pixel_ids[0]}' is no longer available to this ad account.")
+            checks["pixel_id"] = pixel_ids[0]
+        for campaign_id in (payload.get("engagement_audience_config") or {}).get("campaign_ids") or []:
+            if not _exists(config, "campaign", campaign_id):
+                raise ValueError(f"campaign '{campaign_id}' no longer exists.")
+        checks["audience_name"] = payload.get("name")
     else:
         raise ValueError(f"Unknown Reddit operation: {plan.operation}")
-    checks["status_on_create"] = "PAUSED" if plan.operation.startswith("reddit_create_") else None
+    checks["status_on_create"] = (
+        "PAUSED"
+        if plan.operation.startswith("reddit_create_") and plan.operation != "reddit_create_custom_audience"
+        else None
+    )
     return checks
 
 
@@ -1789,6 +2161,22 @@ def apply_plan(config: AdLoopConfig, plan: ChangePlan) -> dict:
             "configured_status": data.get("configured_status", "PAUSED"),
             "effective_status": data.get("effective_status"),
             "next_steps": "Create an ad with draft_reddit_ad, then enable the ad group and campaign.",
+        }
+
+    if op == "reddit_create_custom_audience":
+        data = data_of(
+            reddit_post(config, f"ad_accounts/{account}/custom_audiences", {"data": changes["payload"]})
+        )
+        return {
+            "audience_id": data.get("id"),
+            "name": data.get("name", changes["payload"].get("name")),
+            "type": data.get("type", changes["payload"].get("type")),
+            "status": data.get("status"),
+            "next_steps": (
+                "Reddit fills the audience over the next hours. Check it with get_reddit_audiences, "
+                "then target it with update_reddit_ad_group(custom_audience_ids=[...]) or exclude it "
+                "with excluded_custom_audience_ids."
+            ),
         }
 
     if op == "reddit_create_ad":

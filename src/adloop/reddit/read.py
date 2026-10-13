@@ -302,6 +302,7 @@ def _targeting_summary(t: dict | None) -> dict:
         "excluded_interests": _names(t.get("excluded_interests")),
         "expand_targeting": t.get("expand_targeting"),
         "custom_audience_ids": list(t.get("custom_audience_ids") or []),
+        "excluded_custom_audience_ids": list(t.get("excluded_custom_audience_ids") or []),
     }
 
 
@@ -340,7 +341,7 @@ def _post_summary(p: dict) -> dict:
     content = p.get("content") or []
     first = content[0] if content and isinstance(content[0], dict) else {}
     body = str(p.get("body") or "")
-    return {
+    summary = {
         "post_id": p.get("id"),
         "type": p.get("type"),
         "headline": p.get("headline"),
@@ -359,6 +360,18 @@ def _post_summary(p: dict) -> dict:
         "profile_id": p.get("profile_id"),
         "created_at": p.get("created_at"),
     }
+    if len(content) > 1:
+        # Carousel: every card has its own image, caption and destination.
+        summary["cards"] = [
+            {
+                key: item.get(key)
+                for key in ("media_url", "caption", "destination_url", "call_to_action")
+                if item.get(key)
+            }
+            for item in content
+            if isinstance(item, dict)
+        ]
+    return summary
 
 
 def get_reddit_post(config: AdLoopConfig, post_id: str) -> dict | None:
@@ -977,6 +990,115 @@ def get_reddit_pixels(config: AdLoopConfig, *, ad_account_id: str = "") -> dict:
 # ---------------------------------------------------------------------------
 # Targeting lookups
 # ---------------------------------------------------------------------------
+
+
+# Audiences Reddit refuses to target are below this many matched users.
+_MIN_AUDIENCE_SIZE = 1000
+_USABLE_AUDIENCE_STATUSES = {"VALID", "SUCCESSFUL"}
+
+
+def _audience_summary(a: dict) -> dict:
+    summary: dict[str, Any] = {
+        "audience_id": a.get("id"),
+        "name": a.get("name"),
+        "type": a.get("type"),
+        "status": a.get("status"),
+        "size_range": [a.get("size_range_lower"), a.get("size_range_upper")],
+        "delivery_status": a.get("delivery_status"),
+        "modified_at": a.get("modified_at"),
+    }
+    pixel = a.get("pixel_audience_config") or {}
+    if pixel:
+        summary["source"] = {
+            "pixel_ids": pixel.get("pixel_ids"),
+            "events": pixel.get("targetings"),
+            "custom_events": pixel.get("custom_targetings") or [],
+            "lookback_window_days": pixel.get("lookback_window_days"),
+        }
+    engagement = a.get("engagement_audience_config") or {}
+    if engagement:
+        summary["source"] = {
+            "campaign_ids": engagement.get("campaign_ids"),
+            "engagements": engagement.get("tracking_types"),
+            "lookback_window_days": engagement.get("lookback_window_days"),
+        }
+    lookalike = a.get("lookalike_config") or {}
+    if lookalike:
+        summary["source"] = lookalike
+    return summary
+
+
+def get_reddit_audiences(config: AdLoopConfig, *, ad_account_id: str = "") -> dict:
+    """Custom and saved audiences of the account, and which ad groups use them."""
+    account = resolve_account(config, ad_account_id)
+    custom = [_audience_summary(a) for a in reddit_get_all(config, f"ad_accounts/{account}/custom_audiences")]
+    saved: list[dict] = []
+    saved_error = ""
+    try:
+        for s in reddit_get_all(config, f"ad_accounts/{account}/saved_audiences"):
+            saved.append({
+                "saved_audience_id": s.get("id"),
+                "name": s.get("name"),
+                "status": s.get("status"),
+                "size_range": [s.get("size_range_lower"), s.get("size_range_upper")],
+                "active_ad_groups_count": s.get("active_ad_groups_count"),
+                "targeting": _targeting_summary(s.get("targeting")),
+            })
+    except Exception as exc:  # saved audiences are a convenience; never fail the listing
+        saved_error = str(exc)
+
+    try:
+        ad_groups = reddit_get_all(config, f"ad_accounts/{account}/ad_groups")
+    except Exception:
+        ad_groups = []
+    used: dict[str, dict[str, list[str]]] = {}
+    for g in ad_groups:
+        if g.get("configured_status") in ("ARCHIVED", "DELETED"):
+            continue
+        targeting = g.get("targeting") or {}
+        for key, role in (("custom_audience_ids", "targeted_by"), ("excluded_custom_audience_ids", "excluded_by")):
+            for audience_id in targeting.get(key) or []:
+                used.setdefault(str(audience_id), {}).setdefault(role, []).append(str(g.get("name") or g.get("id")))
+    for audience in custom:
+        audience["ad_groups"] = used.get(str(audience["audience_id"]), {})
+
+    insights: list[str] = []
+    if not custom:
+        insights.append(
+            "No custom audiences yet. draft_reddit_custom_audience builds website "
+            "visitors (from the pixel) or people who engaged with past campaigns."
+        )
+    broken = [a for a in custom if a["status"] and a["status"] not in _USABLE_AUDIENCE_STATUSES | {"PENDING"}]
+    if broken:
+        insights.append(
+            "Not usable: " + ", ".join(f"{a['name']} ({a['status']})" for a in broken)
+            + ". NOT_ENOUGH_MATCHES_ERROR means too few people; widen the events or the lookback."
+        )
+    small = [
+        a for a in custom
+        if a["status"] in _USABLE_AUDIENCE_STATUSES
+        and isinstance(a["size_range"][1], int) and a["size_range"][1] < _MIN_AUDIENCE_SIZE
+    ]
+    if small:
+        insights.append(
+            f"Under {_MIN_AUDIENCE_SIZE:,} people: " + ", ".join(a["name"] for a in small)
+            + ". Reddit may not deliver to audiences this small."
+        )
+    targeted_unusable = [a for a in broken if a["ad_groups"].get("targeted_by")]
+    if targeted_unusable:
+        insights.append(
+            "Ad groups target an unusable audience and may not deliver: "
+            + "; ".join(f"{a['name']} → {', '.join(a['ad_groups']['targeted_by'])}" for a in targeted_unusable)
+        )
+    result: dict[str, Any] = {
+        "ad_account_id": account,
+        "custom_audiences": custom,
+        "saved_audiences": saved,
+        "insights": insights,
+    }
+    if saved_error:
+        result["saved_audiences_error"] = saved_error
+    return result
 
 
 def validate_reddit_keywords(config: AdLoopConfig, keywords: list[str]) -> list[str]:
