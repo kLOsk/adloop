@@ -229,7 +229,7 @@ Reddit is a second ad platform with its own connection (own OAuth app, no develo
 
 ### Image Uploads
 
-For images that have no public URL: a file on the user's computer, or an image they attached in the chat (you can see it, but you cannot pass its bytes to a tool).
+For images that have no public URL: a file on the user's computer, or an image they attached in the chat. **Attaching an image to the chat does not get it into an ad:** you can see it, but no tool can receive it. Never suggest attaching as the way in; offer `upload_images` (card or link) or a public image URL, and when the user already attached one, ask them to drop the same file on the upload card.
 
 | Tool | When to Use | Key Parameters |
 |------|-------------|----------------|

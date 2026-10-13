@@ -146,9 +146,12 @@ def _build_orchestration_instructions() -> str:
         "come back as `row_errors` with DRY_RUN_SUCCESS, and the apply would "
         "carry out the other rows.\n"
         "- One change at a time — don't batch unrelated writes.\n"
-        "- Images without a public URL (a file on the user's computer, an image "
+        "- Images without a public URL (a file on the user's computer, or one "
         "attached in the chat): call `upload_images`, which shows an upload card "
-        "or returns an upload link, then use the upload ids it yields.\n\n"
+        "or returns an upload link, then use the upload ids it yields. An image "
+        "attached to the chat cannot be passed to any tool, so don't suggest "
+        "attaching as the way to get it into an ad; offer the upload or a public "
+        "image URL.\n\n"
         "PRE-WRITE CHECKS (before any `draft_*`):\n"
         "- BROAD match keywords require Smart Bidding (MAXIMIZE_CONVERSIONS, "
         "tCPA, tROAS). Refuse BROAD on MANUAL_CPC. This is the #1 cause of "
@@ -4039,9 +4042,10 @@ def upload_images() -> dict:
     """Let the user upload images (PNG, JPEG, GIF up to 5 MB) for ad assets.
 
     For images without a public URL, such as a file on the user's computer
-    or an image attached in the chat. Apps that show AdLoop's cards display
-    an upload card where the user drops the files; the card then posts the
-    upload ids into the chat. On AdLoop Cloud in other apps the result
+    or an image attached in the chat. An attached image cannot reach a tool,
+    so the user drops the same file on the card. Apps that show AdLoop's
+    cards display an upload card where the user drops the files; the card
+    then posts the upload ids into the chat. On AdLoop Cloud in other apps the result
     carries an upload link for the user (or a coding agent, with curl).
     Uploads expire after a day. The ids go into upload_ids of
     draft_image_assets, or as "upload:<id>" into the image fields of
