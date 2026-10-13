@@ -3301,23 +3301,19 @@ def _validate_structured_snippets(
     return validated, errors
 
 
-def _validate_image_assets(
-    campaign_id: str,
+def image_payloads(
     image_paths: list[str],
     image_urls: list[str] | None = None,
     upload_ids: list[str] | None = None,
 ) -> tuple[list[dict[str, object]], list[str]]:
+    """Validate images from local paths, public URLs and uploads.
+
+    Returns (payloads, errors). URL images are fetched now and uploads read,
+    and their sha256 is kept, so apply refuses an image that changed.
+    """
     errors = []
     validated = []
-    image_urls = image_urls or []
-    upload_ids = upload_ids or []
-
-    if not campaign_id:
-        errors.append("campaign_id is required")
-    if not image_paths and not image_urls and not upload_ids:
-        errors.append("At least one image (image_paths, image_urls or upload_ids) is required")
-
-    for index, upload_id in enumerate(upload_ids):
+    for index, upload_id in enumerate(upload_ids or []):
         from adloop.uploads import UploadError, current_tenant, get_upload_store
 
         try:
@@ -3341,13 +3337,28 @@ def _validate_image_assets(
         except ValueError as exc:
             errors.append(f"Image {index + 1}: {exc}")
 
-    for index, image_url in enumerate(image_urls):
+    for index, image_url in enumerate(image_urls or []):
         try:
             validated.append(_parse_image_url_metadata(image_url))
         except ValueError as exc:
             errors.append(f"Image URL {index + 1} ({image_url}): {exc}")
 
     return validated, errors
+
+
+def _validate_image_assets(
+    campaign_id: str,
+    image_paths: list[str],
+    image_urls: list[str] | None = None,
+    upload_ids: list[str] | None = None,
+) -> tuple[list[dict[str, object]], list[str]]:
+    errors = []
+    if not campaign_id:
+        errors.append("campaign_id is required")
+    if not image_paths and not image_urls and not upload_ids:
+        errors.append("At least one image (image_paths, image_urls or upload_ids) is required")
+    validated, image_errors = image_payloads(image_paths, image_urls, upload_ids)
+    return validated, errors + image_errors
 
 
 def _check_broad_match_safety(
@@ -3933,6 +3944,7 @@ def _dispatch_ads_plan(client: object, cid: str, plan: object) -> dict:
         _apply_upload_enhanced_conversions_for_leads,
     )
     from adloop.ads.shopping import apply_create_shopping_campaign as _apply_create_shopping_campaign
+    from adloop.ads.pmax import apply_asset_group_assets as _apply_asset_group_assets
     # Custom conversion goals live in their own module for the same reason.
     from adloop.ads.custom_conversion_goals import (
         _apply_assign_custom_conversion_goal,
@@ -3944,6 +3956,7 @@ def _dispatch_ads_plan(client: object, cid: str, plan: object) -> dict:
     dispatch = {
         "create_campaign": _apply_create_campaign,
         "create_shopping_campaign": _apply_create_shopping_campaign,
+        "update_asset_group_assets": _apply_asset_group_assets,
         "create_ad_group": _apply_create_ad_group,
         "update_campaign": _apply_update_campaign,
         "update_ad_group": _apply_update_ad_group,
@@ -4929,6 +4942,46 @@ def _apply_create_structured_snippets(
     )
 
 
+def load_image_bytes(payload: dict) -> tuple[bytes, PurePath]:
+    """The approved bytes of a drafted image (URL, upload or local path) and a name source.
+
+    URLs are re-fetched and uploads re-read, and both must still match the
+    sha256 from the preview.
+    """
+    from adloop.runtime import deployment_mode
+
+    if payload.get("url"):
+        return _fetch_approved_image_url(payload), _url_path(str(payload["url"]))
+    if payload.get("upload_id"):
+        from adloop.uploads import current_tenant, get_upload_store
+
+        upload, image_bytes = get_upload_store().get(current_tenant(), str(payload["upload_id"]))
+        if upload.sha256 != payload.get("sha256"):
+            raise ValueError(f"upload {upload.upload_id} changed since the preview; draft again.")
+        return image_bytes, PurePosixPath(upload.name)
+    if deployment_mode() == "server":
+        # Drafts refuse paths on a server; never read server files even
+        # if a path-based plan reached apply some other way.
+        raise ValueError(
+            "local file paths aren't available on a hosted server; "
+            "pass image_urls"
+        )
+    path = Path(str(payload["path"]))
+    return path.read_bytes(), path
+
+
+def populate_image_asset(client: object, asset: object, payload: dict) -> None:
+    """Fill an image Asset from a drafted image payload."""
+    image_bytes, name_source = load_image_bytes(payload)
+    mime_type_name = _VALID_IMAGE_MIME_TYPES[str(payload["mime_type"])]
+    asset.name = str(payload.get("name") or _build_image_asset_name(name_source, image_bytes))
+    asset.type_ = client.enums.AssetTypeEnum.IMAGE
+    asset.image_asset.data = image_bytes
+    asset.image_asset.mime_type = getattr(client.enums.MimeTypeEnum, mime_type_name)
+    asset.image_asset.full_size.width_pixels = int(payload["width"])
+    asset.image_asset.full_size.height_pixels = int(payload["height"])
+
+
 def _apply_create_image_assets(client: object, cid: str, changes: dict) -> dict:
     """Create image assets from local files or URLs and link them to a campaign.
 
@@ -4936,36 +4989,8 @@ def _apply_create_image_assets(client: object, cid: str, changes: dict) -> dict:
     the sha256 approved in the preview.
     """
 
-    from adloop.runtime import deployment_mode
-
     def populate(asset: object, payload: dict) -> None:
-        if payload.get("url"):
-            image_bytes = _fetch_approved_image_url(payload)
-            name_source = _url_path(str(payload["url"]))
-        elif payload.get("upload_id"):
-            from adloop.uploads import current_tenant, get_upload_store
-
-            upload, image_bytes = get_upload_store().get(current_tenant(), str(payload["upload_id"]))
-            if upload.sha256 != payload.get("sha256"):
-                raise ValueError(f"upload {upload.upload_id} changed since the preview; draft again.")
-            name_source = PurePosixPath(upload.name)
-        elif deployment_mode() == "server":
-            # Drafts refuse paths on a server; never read server files even
-            # if a path-based plan reached apply some other way.
-            raise ValueError(
-                "local file paths aren't available on a hosted server; "
-                "pass image_urls"
-            )
-        else:
-            name_source = Path(str(payload["path"]))
-            image_bytes = name_source.read_bytes()
-        mime_type_name = _VALID_IMAGE_MIME_TYPES[str(payload["mime_type"])]
-        asset.name = str(payload.get("name") or _build_image_asset_name(name_source, image_bytes))
-        asset.type_ = client.enums.AssetTypeEnum.IMAGE
-        asset.image_asset.data = image_bytes
-        asset.image_asset.mime_type = getattr(client.enums.MimeTypeEnum, mime_type_name)
-        asset.image_asset.full_size.width_pixels = int(payload["width"])
-        asset.image_asset.full_size.height_pixels = int(payload["height"])
+        populate_image_asset(client, asset, payload)
 
     return _apply_campaign_assets(
         client,

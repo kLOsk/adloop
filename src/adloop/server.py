@@ -2648,6 +2648,66 @@ def run_gaql(
 # ---------------------------------------------------------------------------
 
 
+@_tool(title="Draft Performance Max asset changes", annotations=_WRITE, tags={"ads"})
+@_safe
+def draft_asset_group_assets(
+    asset_group_id: str,
+    headlines: _StrList = [],  # noqa: B006
+    long_headlines: _StrList = [],  # noqa: B006
+    descriptions: _StrList = [],  # noqa: B006
+    business_name: str = "",
+    images: _DictList = [],  # noqa: B006
+    youtube_video_ids: _StrList = [],  # noqa: B006
+    remove_asset_ids: _StrList = [],  # noqa: B006
+    customer_id: str = "",
+) -> dict:
+    """Draft adding and/or removing assets of a Performance Max asset group — returns a PREVIEW.
+
+    Adds new text, image and YouTube assets and unlinks existing ones in one
+    atomic request, so an asset is replaced without the group dropping below
+    Google's minimums (3 headlines, 1 long headline, 2 descriptions, one of
+    them at most 60 characters). Texts already in the group are skipped.
+    Images are checked and sorted by aspect ratio; removed assets stay in the
+    account's asset library. The preview lists the asset counts per type
+    after the change. Nothing changes until confirm_and_apply applies the
+    plan_id; a dry run has Google validate it.
+
+    Args:
+        asset_group_id: Numeric asset group id (from get_pmax_performance or
+            get_pmax_assets).
+        headlines: Headlines to add, at most 30 characters each (up to 15 in
+            the group).
+        long_headlines: Long headlines to add, at most 90 characters (up to 5).
+        descriptions: Descriptions to add, at most 90 characters (up to 5).
+        business_name: Business name to add, at most 25 characters (one per
+            group).
+        images: Images to add, each {"url": "..."} or {"upload_id": "up_..."}
+            with an optional "role": "marketing" (default; landscape 1.91:1,
+            square 1:1 or portrait 4:5 by aspect ratio), "logo" (1:1) or
+            "landscape_logo" (4:1). PNG, JPEG or GIF up to 5120 KB.
+        youtube_video_ids: YouTube video ids to add (the 11 characters after
+            "v=" in the URL), up to 5 per group.
+        remove_asset_ids: Asset ids to unlink from the group (from
+            get_pmax_assets).
+        customer_id: Google Ads customer ID (digits, dashes optional).
+            Defaults to the configured account.
+    """
+    from adloop.ads.pmax import draft_asset_group_assets as _impl
+
+    return _impl(
+        current_config(),
+        customer_id=customer_id or current_config().ads.customer_id,
+        asset_group_id=asset_group_id,
+        headlines=headlines,
+        long_headlines=long_headlines,
+        descriptions=descriptions,
+        business_name=business_name,
+        images=images,
+        youtube_video_ids=youtube_video_ids,
+        remove_asset_ids=remove_asset_ids,
+    )
+
+
 @_tool(title="Draft a Shopping campaign", annotations=_WRITE, tags={"ads"})
 @_safe
 def draft_shopping_campaign(
