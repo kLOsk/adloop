@@ -3572,6 +3572,11 @@ def _validate_campaign(
             "Google Ads interface, then use AdLoop to analyse it — "
             "get_pmax_performance reports per-asset-group Ad Strength."
         )
+    elif ct == "SHOPPING":
+        errors.append(
+            "Shopping campaigns have their own tool: draft_shopping_campaign "
+            "(Merchant Center id, product bid, countries; no keywords or languages)."
+        )
     elif ct != "SEARCH":
         # The create path builds a Search campaign: a SEARCH_STANDARD ad
         # group, keywords and language criteria. Shopping also needs a

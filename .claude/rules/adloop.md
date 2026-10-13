@@ -55,6 +55,7 @@ You have access to AdLoop MCP tools that connect Google Ads, Reddit Ads and Goog
 | `get_recommendations` | Google's auto-generated recommendations with estimated impact — budget, keyword, bid strategy, ad copy suggestions | `recommendation_types` (optional filter), `campaign_id` (optional) |
 | `get_pmax_performance` | Performance Max campaign metrics with network breakdown + asset group ad strength | `date_range_start`, `date_range_end` |
 | `get_pmax_assets` | Per-asset details for PMax — field type, serving status, content. Use with `get_detailed_asset_performance` for quality signals | `campaign_id` (optional) |
+| `get_asset_group_signals` | A PMax asset group's search themes and audience signal (with `signal_id` and approval status), plus the account's audiences that can become its signal | `asset_group_id` |
 | `get_detailed_asset_performance` | Top-performing asset combinations — which headline+description+image combos Google selects most | `campaign_id` (optional) |
 | `get_audience_performance` | Audience segment metrics — remarketing, in-market, affinity, demographics | `date_range_start`, `date_range_end`, `campaign_id` (optional) |
 | `get_change_history` | What changed in the account and who changed it: time, user email, client (UI, API, scripts, Editor, auto-applied recommendations), resource type, operation, changed fields, campaign/ad group. The first stop for "what changed before the drop?" (30 days of history) | `date_range_start`, `date_range_end`, `campaign_id` (optional), `resource_types` (optional), `limit` (optional, max 10000) |
@@ -253,6 +254,10 @@ For images that have no public URL: a file on the user's computer, or an image t
 | Tool | What It Does | Validation |
 |------|-------------|------------|
 | `draft_campaign` | Create full campaign structure (budget + campaign + ad group + keywords + geo/language targeting) | `campaign_name`, `daily_budget`, `bidding_strategy`, `geo_target_ids` (REQUIRED), `language_ids` (REQUIRED), optional `search_partners_enabled`, `display_network_enabled`, `display_expansion_enabled`, optional `max_cpc` for MANUAL_CPC ad-group bids or TARGET_SPEND CPC caps |
+| `draft_shopping_campaign` | Create a Standard Shopping campaign for a Merchant Center feed: budget + campaign (PAUSED) + product ad group + Shopping ad + one "All products" product group, atomically | `campaign_name`, `daily_budget`, `merchant_id` (must be linked to the Ads account; checked), `product_bid` (CPC of the product group, required by Google), `geo_target_ids` (REQUIRED), `bidding_strategy` MANUAL_CPC (default) / TARGET_SPEND (Maximize clicks, optional `max_cpc`) / TARGET_ROAS (+ `target_roas`), `campaign_priority` LOW/MEDIUM/HIGH, optional `feed_label`. No keywords, no languages |
+| `draft_asset_group_assets` | Add and/or remove assets of an existing PMax asset group in one atomic change: text, images, YouTube videos | `asset_group_id`, `headlines` (≤30), `long_headlines` (≤90), `descriptions` (≤90), `business_name` (≤25), `images` (`{"url"}` or `{"upload_id"}`, optional `role` marketing/logo/landscape_logo; marketing images sorted into landscape 1.91:1, square 1:1, portrait 4:5 by ratio), `youtube_video_ids`, `remove_asset_ids` |
+| `draft_asset_group_signals` | Add search themes or set the audience signal of a PMax asset group, or remove signals | `asset_group_id`, `add_search_themes` (≤80 chars, up to 50 per group), `audience_id` (one per group), `remove_signal_ids` |
+| `draft_pmax_product_exclusions` | Set the full list of products a retail PMax asset group excludes, on one dimension; everything else stays included | `asset_group_id`, `exclude_values` (the COMPLETE list; `[]` includes everything again), `dimension` item_id (default) / brand / custom_label_0–4 |
 | `draft_ad_group` | Create a new ad group within an existing campaign (does NOT publish) | `campaign_id` (REQUIRED), `ad_group_name` (REQUIRED), `keywords` (optional list of {text, match_type}), `cpc_bid_micros` (optional) |
 | `update_campaign` | Modify existing campaign settings — bid strategy, budget, geo targets, language targets, Search partners, display expansion | `campaign_id` (REQUIRED), plus any of: `bidding_strategy`, `daily_budget`, `geo_target_ids`, `language_ids`, `search_partners_enabled`, `display_network_enabled`, TARGET_SPEND `max_cpc` |
 | `update_ad_group` | Update ad group name and/or MANUAL_CPC `max_cpc` | `ad_group_id`, optional `ad_group_name`, optional `max_cpc` |
@@ -282,9 +287,9 @@ For images that have no public URL: a file on the user's computer, or an image t
 | `draft_demographic_targeting` | Propose demographic criteria (age, gender, parental status, income range) at ad group or campaign level. Defaults to EXCLUSION (`negative=True`). | exactly one of `ad_group_id` or `campaign_id`, at least one of `age_ranges`/`genders`/`parental_statuses`/`income_ranges`, optional `negative` (default True) |
 | `draft_ai_max_settings` | Draft AI Max controls for one Search campaign: `enable_ai_max`, per-ad-group `disable_search_term_matching`, text and final-URL asset automation. Refuses a plan that would switch AI Max on while an automation it was never told about keeps running; an explicitly requested automation asks for a double confirmation. | `campaign_id`, optional `enable_ai_max`, optional `disable_search_term_matching`, optional `ad_group_ids`, optional `include_paused_ad_groups`, optional `text_asset_automation`, optional `final_url_expansion` |
 | `draft_prepare_brand_exclusions` | Draft the whole safe state for a brand exclusion in one step: AI Max on, search term matching off on every non-removed ad group, text and final-URL automation opted out. Touches nothing else. | `campaign_id`, optional `include_paused_ad_groups` |
-| `pause_entity` | Propose pausing campaign/ad group/ad/keyword | `entity_type`, `entity_id` |
-| `enable_entity` | Propose enabling paused entity | `entity_type`, `entity_id` |
-| `remove_entity` | Propose REMOVING an entity (irreversible) | `entity_type` (incl. "negative_keyword", "shared_criterion", "ad_group_criterion", "campaign_criterion", "campaign_asset", "asset", "customer_asset"), `entity_id` |
+| `pause_entity` | Propose pausing campaign/ad group/ad/keyword/asset group | `entity_type` (incl. `asset_group` for PMax), `entity_id` |
+| `enable_entity` | Propose enabling paused entity | `entity_type` (incl. `asset_group`), `entity_id` |
+| `remove_entity` | Propose REMOVING an entity (irreversible) | `entity_type` (incl. "asset_group", "negative_keyword", "shared_criterion", "ad_group_criterion", "campaign_criterion", "campaign_asset", "asset", "customer_asset"), `entity_id` |
 | `confirm_and_apply` | Execute a previously previewed change | `plan_id` from a draft tool, `dry_run` (default true) |
 
 ### Reddit Ads Write Tools (ALL require safety confirmation)
@@ -304,7 +309,7 @@ Same draft → preview → `confirm_and_apply` gate; the plan carries `platform:
 | `draft_reddit_ad` | Create a post on the profile, then the ad (PAUSED) | `ad_group_id`, `profile_id` (from `list_reddit_funding_instruments`), `headline` (≤300 chars), `click_url` (verified reachable), `post_type` TEXT, IMAGE (+ public `image_url`), VIDEO (+ `video_url`, a direct MP4/MOV link up to 1 GB, and `thumbnail_url`) or CAROUSEL (+ 2–6 `carousel_cards`, each `{image_url, caption ≤180, click_url, call_to_action}`; card click_url and CTA default to the ad's), CTA from Reddit's fixed labels, `allow_comments`; or `post_id` (t3_…) to promote an EXISTING post and keep its upvotes and comments (no post is created, copy args are ignored, TEXT posts take no `click_url`, media posts default it to the post's destination) |
 
 - **Choose the post type deliberately.** IMAGE, VIDEO and CAROUSEL ads click through to `click_url` (normal landing-page ads; a carousel card can link to its own page). A TEXT ("free-form") ad clicks through to the **post itself**: Reddit forbids a `click_url` on it, so the landing link must be written into `body` (the tool refuses otherwise) and the report shows post opens and comments, not site clicks. Use TEXT for conversation-style founder posts, IMAGE when you want landing-page traffic. Neither can be edited after creation except `allow_comments`; new copy means a new post and ad.
-- **Media comes from URLs.** Reddit downloads `image_url`, `video_url`, `thumbnail_url` and card images when the post is created, so they must be direct links to the files, publicly reachable. The draft checks each one and refuses a web page or a file over Reddit's limit (videos 1 GB, images 20 MB). A video needs a thumbnail. There is no file upload through AdLoop; host the file (a CDN, the website, cloud storage) and pass its link.
+- **Media comes from URLs.** Reddit downloads `image_url`, `video_url`, `thumbnail_url` and card images when the post is created, so they must be direct links to the files, publicly reachable. The draft checks each one and refuses a web page or a file over Reddit's limit (videos 1 GB, images 20 MB). A video needs a thumbnail. Videos cannot be uploaded through AdLoop: host the file (a CDN, the website, cloud storage) and pass its link. Images without a public URL can be uploaded first on AdLoop Cloud and passed as `upload:<id>` (see Image Uploads).
 - **Ad groups need a schedule.** Reddit requires `start_time`; the tool defaults it to now. Pass `end_time` too when the budget is `lifetime_budget`.
 
 **Write tool workflow:**
@@ -453,6 +458,15 @@ Most websites (especially in the EU) use a GDPR cookie consent banner. This has 
    - Enable the campaign via `enable_entity` only after ads and sitelinks are in place
 8. Wait for explicit user approval before calling `confirm_and_apply`
 
+### When user wants a Shopping campaign
+
+1. `list_merchant_accounts` for the Merchant Center id, then `get_merchant_feed_health`: a feed with many disapproved products needs fixing first, a campaign cannot advertise them
+2. The Merchant Center account must be linked to the Google Ads account (Merchant Center → Settings → Apps and services); `draft_shopping_campaign` checks it and says which accounts are linked
+3. Ask for countries if not stated. Shopping takes no language targeting and no keywords: the feed's language applies, and search terms are controlled with negative keywords after launch
+4. Bidding: MANUAL_CPC with a modest `product_bid` to start, TARGET_ROAS once the account has conversion value history, TARGET_SPEND (Maximize clicks) to gather data quickly. `product_bid` is always required (Google sets it on the product group)
+5. `campaign_priority` matters only when several Shopping campaigns share products: the higher priority serves first
+6. Preview → approval → `confirm_and_apply` (the dry run has Google validate it). The campaign is created PAUSED: enable it with `enable_entity` once the feed is healthy
+
 ### When user wants to add an ad group to an existing campaign
 
 1. Call `get_campaign_performance` to identify the target campaign and verify it exists
@@ -583,10 +597,14 @@ Reddit's structure is campaign → ad group (budget, bid, pixel, targeting) → 
 3. If ad strength is POOR or AVERAGE, call `get_pmax_assets` to see each asset's type and serving status and which asset types are missing (per-asset LOW/GOOD/BEST labels don't exist for PMax; `get_detailed_asset_performance` shows which combinations Google serves most)
 4. Call `get_detailed_asset_performance` to see which headline+description+image combinations Google selects most — this reveals what's actually working
 5. If the user wants to improve PMax performance:
-   - Replace LOW-performing assets with new ones
-   - Ensure minimum asset diversity: at least 5 headlines, 5 descriptions, 5 marketing images, 1 landscape image, 1 logo, 1 YouTube video (recommended)
+   - Replace weak assets with `draft_asset_group_assets`: add the new asset and put the old asset's id in `remove_asset_ids` in the SAME draft, so the group never drops below Google's minimums (3 headlines, 1 long headline, 2 descriptions with one ≤60 characters). Images the user has only on their computer go through `upload_images` first, then `{"upload_id": "up_..."}`
+   - Ensure asset diversity: at least 5 headlines, 5 descriptions, 5 marketing images (landscape AND square), a logo, ideally a YouTube video. The preview's `counts_after` shows the result per type
+   - Signals: `get_asset_group_signals`, then `draft_asset_group_signals` to add search themes (what customers search for the products) or set an audience signal. Signals guide PMax; they do not restrict it
+   - Products that must not be advertised (out of stock, low margin, a brand you may not advertise): `draft_pmax_product_exclusions` with the COMPLETE list of excluded item ids, brands or custom labels. Check `get_merchant_feed_health` first: disapproved products are a feed problem, not an exclusion
+   - Pause an underperforming asset group with `pause_entity(entity_type="asset_group")` rather than removing it
    - Check that final URLs point to relevant, working landing pages
-6. Note: PMax campaigns are partially opaque. `segments.ad_network_type` gives SEARCH, CONTENT, YOUTUBE_SEARCH, YOUTUBE_WATCH, and MIXED — but MIXED is a catch-all for most PMax traffic. Full per-channel transparency is not available via the API.
+6. New PMax campaigns cannot be built through AdLoop yet (the campaign, asset group and full asset set have to be created in one request); building them stays a job for Google Ads. Editing existing ones works as above.
+7. Note: PMax campaigns are partially opaque. `segments.ad_network_type` gives SEARCH, CONTENT, YOUTUBE_SEARCH, YOUTUBE_WATCH, and MIXED — but MIXED is a catch-all for most PMax traffic. Full per-channel transparency is not available via the API.
 
 ### When user asks about Google's recommendations or "what does Google suggest"
 

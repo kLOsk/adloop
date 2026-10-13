@@ -2707,6 +2707,9 @@ def test_other_non_search_types_are_refused_at_draft():
         )
 
         joined = " ".join(errors)
+        if channel.upper() == "SHOPPING":
+            assert "draft_shopping_campaign" in joined
+            continue
         assert f"{channel.upper()} campaigns cannot be created yet" in joined, channel
         assert "Google Ads interface" in joined, channel
 
