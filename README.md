@@ -13,7 +13,7 @@
 [![Google Ads API](https://img.shields.io/badge/Google%20Ads-API%20v25-4285F4.svg?logo=google-ads&logoColor=white)](https://developers.google.com/google-ads/api/docs/start)
 [![GA4 Data API](https://img.shields.io/badge/GA4-Data%20API-E37400.svg?logo=google-analytics&logoColor=white)](https://developers.google.com/analytics/devguides/reporting/data/v1)
 [![GitHub stars](https://img.shields.io/github/stars/kLOsk/adloop?style=social)](https://github.com/kLOsk/adloop)
-[![smithery badge](https://smithery.ai/badge/adloop/adloop)](https://smithery.ai/servers/adloop/adloop)
+[![Smithery](https://img.shields.io/badge/Smithery-adloop-FF5601.svg)](https://smithery.ai/servers/adloop/adloop)
 
 An MCP server that gives your AI assistant read + write access to Google Ads, Reddit Ads and GA4 — with safety guardrails that prevent accidental spend.
 
