@@ -26,7 +26,7 @@ import math
 import re
 import threading
 from datetime import datetime, timezone as _tz
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Callable
 
 from adloop.ads.enums import enum_names
 
@@ -1397,6 +1397,7 @@ def draft_upload_call_conversions(
         columns_present=any(r.get("consent_columns_present") for r in rows),
         default=consent_norm,
     )
+    dedup_warnings = _duplicate_row_warnings(rows, _call_duplicate_key, "call")
     distinct_actions = sorted({r["conversion_name"] for r in rows})
     total_value, totals_by_currency, currency_hint, value_warnings = (
         _value_summary(rows)
@@ -1474,6 +1475,7 @@ def draft_upload_call_conversions(
             # fallback and would misrepresent a file that sets it per row.
             "consent_summary": _consent_summary(rows, consent_norm),
             "parse_warnings": [*parse_advisories, *consent_warnings],
+            "dedup_warnings": dedup_warnings,
             # Display sample uses REDACTED caller ids only.
             "sample_rows": [
                 {
@@ -1604,6 +1606,106 @@ def _value_summary(
             "is not a meaningful amount. Use total_value_by_currency."
         )
     return total, by_currency, hint, warnings
+
+
+def _join_source_lines(lines: list[object]) -> str:
+    """``4``, ``4 and 9``, ``4, 9 and 12`` — in reading order."""
+
+    def order(line: object) -> tuple:
+        # Line numbers are ints; a hand-built plan may carry none. Sorting the
+        # mixed list by ``str`` alone would put line 10 in front of line 9.
+        return (0, line, "") if isinstance(line, int) else (1, 0, str(line))
+
+    parts = [str(line) for line in sorted(lines, key=order)]
+    if len(parts) == 1:
+        return parts[0]
+    return f"{', '.join(parts[:-1])} and {parts[-1]}"
+
+
+def _duplicate_row_warnings(
+    rows: list[dict],
+    key_of: Callable[[dict], tuple | None],
+    what: str,
+    order_id_of: Callable[[dict], str] | None = None,
+) -> list[str]:
+    """Rows that repeat inside one CSV — reported, not refused.
+
+    Google dedups a re-upload on the Order ID, and a call upload has no dedup
+    key at all, so the same record twice in one file goes out twice and nothing
+    in the result says so. Legitimate repetition exists (two calls from the
+    same number, the same second), so the rows are named and the caller decides
+    in the preview.
+
+    ``order_id_of`` splits the wording: rows that share an Order ID collapse
+    into one conversion at Google, the others add up.
+    """
+    seen: dict[tuple, list[tuple[object, dict]]] = {}
+    for index, row in enumerate(rows, start=1):
+        key = key_of(row)
+        if key:
+            seen.setdefault(key, []).append((_source_line(row, index), row))
+    warnings: list[str] = []
+    for group in seen.values():
+        if len(group) < 2:
+            continue
+        lines = [line for line, _ in group]
+        order_id = order_id_of(group[0][1]) if order_id_of else ""
+        if order_id:
+            warnings.append(
+                f"{len(group)} rows look like the same {what} and carry the "
+                f"same Order ID: lines {_join_source_lines(lines)}. Google "
+                "dedups on the conversion action and that Order ID, so they "
+                "count once."
+            )
+            continue
+        warnings.append(
+            f"{len(group)} rows look like the same {what}: lines "
+            f"{_join_source_lines(lines)}. Every row is uploaded as its own "
+            f"conversion, so the record is counted {len(group)} times — delete "
+            "the extra rows if it is one copy-paste accident."
+        )
+    return warnings
+
+
+def _call_duplicate_key(row: dict) -> tuple | None:
+    """What identifies a call: the number and the start of the call.
+
+    The value stays out of the key on purpose: two rows for the same call with
+    different values are still almost certainly one call exported twice.
+    """
+    caller = row.get("caller_id") or ""
+    if not caller:
+        return None
+    return (caller, row.get("call_start_time") or "")
+
+
+def _ec_duplicate_key(row: dict) -> tuple | None:
+    """What identifies a lead: the strongest identifier the row carries.
+
+    A row that only matched on its address is compared by that address, not
+    reported as a duplicate of every other row without an email. The Order ID
+    is part of the key whenever the row has one: two orders for the same lead
+    at the same (often date-only) time are two real orders, not one.
+    """
+    identifier: object = row.get("email_sha256") or row.get("phone_sha256")
+    if not identifier and _has_complete_address(row):
+        identifier = (
+            row["first_name_sha256"],
+            row["last_name_sha256"],
+            row["country_code"],
+            row["postal_code"],
+        )
+    if not identifier:
+        return None
+    return (
+        identifier,
+        row.get("conversion_time") or "",
+        row.get("order_id") or "",
+    )
+
+
+def _row_order_id(row: dict) -> str:
+    return str(row.get("order_id") or "")
 
 
 def _upload_draft_preflight(
@@ -2536,6 +2638,11 @@ def draft_upload_enhanced_conversions_for_leads(
             f"Only {with_order_id} of {len(rows)} rows have an Order ID. "
             "Rows without one will double-count on re-upload."
         )
+    dedup_warnings.extend(
+        _duplicate_row_warnings(
+            rows, _ec_duplicate_key, "lead", order_id_of=_row_order_id
+        )
+    )
 
     # Freeze the hashed rows apply will upload. These are already SHA-256
     # hashes — NO raw PII. Safe to persist in the plan and (order_id/value/
