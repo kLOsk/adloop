@@ -152,3 +152,79 @@ def test_operations_create_link_and_unlink_in_one_request():
     assert client.sent[4].asset_operation.create.youtube_video_asset.youtube_video_id == "dQw4w9WgXcQ"
     assert client.sent[6].asset_group_asset_operation.remove == "customers/1/assetGroupAssets/9~1~HEADLINE"
     assert result["assets_added"] == 3 and result["assets_removed"] == 1
+
+
+_SIGNAL_ROWS = [
+    {"asset_group_signal.resource_name": "customers/1/assetGroupSignals/9~11", "asset_group_signal.search_theme.text": "running shoes",
+     "asset_group_signal.approval_status": "APPROVED"},
+    {"asset_group_signal.resource_name": "customers/1/assetGroupSignals/9~12", "asset_group_signal.audience.audience": "customers/1/audiences/77",
+     "asset_group_signal.approval_status": "APPROVED"},
+]
+_AUDIENCES = [{"audience.id": 77, "audience.name": "Buyers"}, {"audience.id": 78, "audience.name": "Visitors"}]
+
+
+def _gaql(signal_rows=_SIGNAL_ROWS):
+    def fake(config, customer_id, query):
+        return signal_rows if "FROM asset_group_signal" in query else _AUDIENCES
+    return patch("adloop.ads.gaql.execute_query", side_effect=fake)
+
+
+def test_signals_read_joins_audience_names():
+    with _gaql():
+        result = pmax.get_asset_group_signals(AdLoopConfig(), customer_id="1", asset_group_id="9")
+    assert result["search_themes"][0] == {"signal_id": "9~11", "approval_status": "APPROVED", "disapproval_reasons": [],
+                                          "search_theme": "running shoes"}
+    assert result["audience_signals"][0]["audience_name"] == "Buyers"
+    assert [a["audience_id"] for a in result["available_audiences"]] == ["77", "78"]
+
+
+def test_signal_draft_skips_known_themes_and_guards_the_single_audience():
+    with _gaql():
+        preview = pmax.draft_asset_group_signals(
+            AdLoopConfig(), customer_id="1", asset_group_id="9", add_search_themes=["Running Shoes", "trail shoes"],
+        )
+        assert preview["changes"]["add_search_themes"] == ["trail shoes"]
+        assert any("already on the asset group" in w for w in preview["warnings"])
+
+        clash = pmax.draft_asset_group_signals(AdLoopConfig(), customer_id="1", asset_group_id="9", audience_id="78")
+        assert "remove_signal_ids=['9~12']" in clash["details"][0]
+        swap = pmax.draft_asset_group_signals(
+            AdLoopConfig(), customer_id="1", asset_group_id="9", audience_id="78", remove_signal_ids=["9~12"],
+        )
+        assert swap["changes"]["audience_id"] == "78" and swap["changes"]["remove"][0]["label"] == "Buyers"
+
+        unknown = pmax.draft_asset_group_signals(AdLoopConfig(), customer_id="1", asset_group_id="9", audience_id="99")
+        assert "not an enabled audience" in unknown["details"][0]
+
+
+def test_signal_operations():
+    client = _FakeClient()
+    pmax.apply_asset_group_signals(client, "1", {
+        "asset_group_id": "9", "add_search_themes": ["trail shoes"], "audience_id": "78",
+        "remove": [{"signal_id": "9~12", "label": "Buyers"}],
+    })
+    assert client.sent[0].asset_group_signal_operation.remove == "customers/1/assetGroupSignals/9~12"
+    assert client.sent[1].asset_group_signal_operation.create.search_theme.text == "trail shoes"
+    assert client.sent[2].asset_group_signal_operation.create.audience.audience == "customers/1/audiences/78"
+    assert client.sent[2].asset_group_signal_operation.create.asset_group == "customers/1/assetGroups/9"
+
+
+def test_asset_groups_can_be_paused_enabled_and_removed():
+    from adloop.ads import write
+
+    preview = write.pause_entity(AdLoopConfig(), customer_id="1", entity_type="asset_group", entity_id="9")
+    assert preview["operation"] == "pause_entity" and preview["entity_type"] == "asset_group"
+
+    sent = []
+    service = SimpleNamespace(
+        asset_group_path=GoogleAdsServiceClient.asset_group_path,
+        mutate_asset_groups=lambda customer_id, operations: sent.extend(operations) or SimpleNamespace(
+            results=[SimpleNamespace(resource_name="customers/1/assetGroups/9")]),
+    )
+    client = _FakeClient()
+    client.get_service = lambda name: service
+    write._apply_status_change(client, "1", "asset_group", "9", "PAUSED")
+    assert sent[0].update.status == client.enums.AssetGroupStatusEnum.PAUSED
+    assert list(sent[0].update_mask.paths) == ["status"]
+    write._apply_remove(client, "1", "asset_group", "9")
+    assert sent[1].remove == "customers/1/assetGroups/9"

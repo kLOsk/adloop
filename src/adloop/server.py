@@ -2648,6 +2648,66 @@ def run_gaql(
 # ---------------------------------------------------------------------------
 
 
+@_tool(title="Asset group signals", annotations=_READONLY, tags={"ads"})
+@_safe
+def get_asset_group_signals(asset_group_id: str, customer_id: str = "") -> dict:
+    """Search themes and the audience signal of a Performance Max asset group, plus the account's audiences.
+
+    Returns each search theme and audience signal with its signal_id and
+    approval status, the enabled audiences of the account that can become
+    the group's audience signal (audience_id, name), and insights when a
+    group has no themes or no audience signal.
+
+    Args:
+        asset_group_id: Numeric asset group id (from get_pmax_performance).
+        customer_id: Google Ads customer ID (digits, dashes optional).
+            Defaults to the configured account.
+    """
+    from adloop.ads.pmax import get_asset_group_signals as _impl
+
+    return _impl(current_config(), customer_id=customer_id or current_config().ads.customer_id, asset_group_id=asset_group_id)
+
+
+@_tool(title="Draft Performance Max signal changes", annotations=_WRITE, tags={"ads"})
+@_safe
+def draft_asset_group_signals(
+    asset_group_id: str,
+    add_search_themes: _StrList = [],  # noqa: B006
+    audience_id: str = "",
+    remove_signal_ids: _StrList = [],  # noqa: B006
+    customer_id: str = "",
+) -> dict:
+    """Draft adding search themes or an audience signal to a Performance Max asset group, or removing signals — PREVIEW.
+
+    Signals are hints that steer Performance Max, not targeting. A group has
+    at most one audience signal and up to 50 search themes; replacing the
+    audience means removing the current one in the same draft. Themes already
+    on the group are skipped. Nothing changes until confirm_and_apply applies
+    the plan_id; a dry run has Google validate it.
+
+    Args:
+        asset_group_id: Numeric asset group id (from get_pmax_performance).
+        add_search_themes: Search themes to add, short phrases people search
+            for (at most 80 characters each).
+        audience_id: Audience to set as the group's audience signal (from
+            get_asset_group_signals available_audiences).
+        remove_signal_ids: Signals to remove (signal_id from
+            get_asset_group_signals).
+        customer_id: Google Ads customer ID (digits, dashes optional).
+            Defaults to the configured account.
+    """
+    from adloop.ads.pmax import draft_asset_group_signals as _impl
+
+    return _impl(
+        current_config(),
+        customer_id=customer_id or current_config().ads.customer_id,
+        asset_group_id=asset_group_id,
+        add_search_themes=add_search_themes,
+        audience_id=audience_id,
+        remove_signal_ids=remove_signal_ids,
+    )
+
+
 @_tool(title="Draft Performance Max asset changes", annotations=_WRITE, tags={"ads"})
 @_safe
 def draft_asset_group_assets(
@@ -3895,7 +3955,8 @@ def pause_entity(
     (target status PAUSED); nothing changes until confirm_and_apply applies it.
 
     Args:
-        entity_type: "campaign", "ad_group", "ad", or "keyword".
+        entity_type: "campaign", "ad_group", "ad", "keyword" or
+            "asset_group" (Performance Max).
         entity_id: ID in the format for its type. campaign: campaign ID (e.g.
             "12345678"); ad_group: ad group ID (e.g. "12345678"); ad:
             "adGroupId~adId" (e.g. "12345678~987654"; a bare ad ID is resolved
@@ -3927,7 +3988,8 @@ def enable_entity(
     until confirm_and_apply applies it.
 
     Args:
-        entity_type: "campaign", "ad_group", "ad", or "keyword".
+        entity_type: "campaign", "ad_group", "ad", "keyword" or
+            "asset_group" (Performance Max).
         entity_id: ID in the format for its type. campaign: campaign ID (e.g.
             "12345678"); ad_group: ad group ID (e.g. "12345678"); ad:
             "adGroupId~adId" (e.g. "12345678~987654"; a bare ad ID is resolved
@@ -3961,10 +4023,10 @@ def remove_entity(
     applies it.
 
     Args:
-        entity_type: "campaign", "ad_group", "ad", "keyword", "negative_keyword",
-            "shared_criterion", "campaign_asset", "asset", "customer_asset",
-            "ad_group_criterion", or "campaign_criterion".
-        entity_id: The resource ID. campaign / ad_group / asset: simple numeric
+        entity_type: "campaign", "ad_group", "ad", "keyword", "asset_group",
+            "negative_keyword", "shared_criterion", "campaign_asset", "asset",
+            "customer_asset", "ad_group_criterion", or "campaign_criterion".
+        entity_id: The resource ID. campaign / ad_group / asset_group / asset: simple numeric
             ID. ad: "adGroupId~adId" (a bare ad ID is resolved to its ad group).
             keyword and ad_group_criterion: "adGroupId~criterionId".
             negative_keyword and campaign_criterion: "campaignId~criterionId"

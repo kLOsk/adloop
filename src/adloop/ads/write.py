@@ -3097,7 +3097,7 @@ def confirm_and_apply(
 # ---------------------------------------------------------------------------
 
 _VALID_MATCH_TYPES = {"EXACT", "PHRASE", "BROAD"}
-_VALID_ENTITY_TYPES = {"campaign", "ad_group", "ad", "keyword"}
+_VALID_ENTITY_TYPES = {"campaign", "ad_group", "ad", "keyword", "asset_group"}
 _REMOVABLE_ENTITY_TYPES = _VALID_ENTITY_TYPES | {
     "negative_keyword",
     "shared_criterion",
@@ -3945,6 +3945,7 @@ def _dispatch_ads_plan(client: object, cid: str, plan: object) -> dict:
     )
     from adloop.ads.shopping import apply_create_shopping_campaign as _apply_create_shopping_campaign
     from adloop.ads.pmax import apply_asset_group_assets as _apply_asset_group_assets
+    from adloop.ads.pmax import apply_asset_group_signals as _apply_asset_group_signals
     # Custom conversion goals live in their own module for the same reason.
     from adloop.ads.custom_conversion_goals import (
         _apply_assign_custom_conversion_goal,
@@ -3957,6 +3958,7 @@ def _dispatch_ads_plan(client: object, cid: str, plan: object) -> dict:
         "create_campaign": _apply_create_campaign,
         "create_shopping_campaign": _apply_create_shopping_campaign,
         "update_asset_group_assets": _apply_asset_group_assets,
+        "update_asset_group_signals": _apply_asset_group_signals,
         "create_ad_group": _apply_create_ad_group,
         "update_campaign": _apply_update_campaign,
         "update_ad_group": _apply_update_ad_group,
@@ -4711,6 +4713,14 @@ def _apply_remove(
             customer_id=cid, operations=[operation]
         )
 
+    elif entity_type == "asset_group":
+        service = client.get_service("AssetGroupService")
+        operation = client.get_type("AssetGroupOperation")
+        operation.remove = service.asset_group_path(cid, entity_id)
+        response = service.mutate_asset_groups(
+            customer_id=cid, operations=[operation]
+        )
+
     elif entity_type == "ad":
         resolved_id = _resolve_ad_entity_id(client, cid, entity_id)
         service = client.get_service("AdGroupAdService")
@@ -4808,7 +4818,7 @@ def _apply_status_change(
     entity_id: str,
     status: str,
 ) -> dict:
-    """Update the status of a campaign, ad group, ad, or keyword."""
+    """Update the status of a campaign, ad group, ad, keyword or asset group."""
     if entity_type == "campaign":
         service = client.get_service("CampaignService")
         operation = client.get_type("CampaignOperation")
@@ -4824,6 +4834,14 @@ def _apply_status_change(
         entity.resource_name = service.ad_group_path(cid, entity_id)
         entity.status = getattr(client.enums.AdGroupStatusEnum, status)
         mutate = service.mutate_ad_groups
+
+    elif entity_type == "asset_group":
+        service = client.get_service("AssetGroupService")
+        operation = client.get_type("AssetGroupOperation")
+        entity = operation.update
+        entity.resource_name = service.asset_group_path(cid, entity_id)
+        entity.status = getattr(client.enums.AssetGroupStatusEnum, status)
+        mutate = service.mutate_asset_groups
 
     elif entity_type == "ad":
         resolved_id = _resolve_ad_entity_id(client, cid, entity_id)

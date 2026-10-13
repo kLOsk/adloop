@@ -325,3 +325,180 @@ def apply_asset_group_assets(client: object, cid: str, changes: dict) -> dict:
         "assets_removed": len(changes.get("remove") or []),
         "note": "New assets are reviewed by Google before they serve; get_pmax_assets shows their status.",
     }
+
+
+# ---------------------------------------------------------------------------
+# Signals: search themes and the audience signal of an asset group
+# ---------------------------------------------------------------------------
+
+_MAX_SEARCH_THEMES = 50
+_MAX_THEME_CHARS = 80
+
+
+def get_asset_group_signals(config: AdLoopConfig, *, customer_id: str = "", asset_group_id: str = "") -> dict:
+    """An asset group's search themes and audience signal, plus the account's audiences."""
+    from adloop.ads.gaql import execute_query
+
+    asset_group_id = str(asset_group_id or "").strip()
+    if not asset_group_id.isdigit():
+        return {"error": "asset_group_id is required (see get_pmax_performance)"}
+    rows = execute_query(
+        config,
+        customer_id,
+        "SELECT asset_group_signal.resource_name, asset_group_signal.search_theme.text, "
+        "asset_group_signal.audience.audience, asset_group_signal.approval_status, "
+        "asset_group_signal.disapproval_reasons FROM asset_group_signal "
+        f"WHERE asset_group.id = {int(asset_group_id)}",
+    )
+    audiences = execute_query(
+        config,
+        customer_id,
+        "SELECT audience.id, audience.name, audience.description, audience.status FROM audience "
+        "WHERE audience.status = 'ENABLED'",
+    )
+    from adloop.ads.client import normalize_customer_id
+
+    cid = normalize_customer_id(customer_id)
+    names = {f"customers/{cid}/audiences/{a.get('audience.id')}": a.get("audience.name") for a in audiences}
+    themes, audience_signals = [], []
+    for row in rows:
+        signal_id = str(row.get("asset_group_signal.resource_name") or "").rsplit("/", 1)[-1]
+        entry = {
+            "signal_id": signal_id,
+            "approval_status": row.get("asset_group_signal.approval_status"),
+            "disapproval_reasons": row.get("asset_group_signal.disapproval_reasons") or [],
+        }
+        if row.get("asset_group_signal.search_theme.text"):
+            themes.append({**entry, "search_theme": row["asset_group_signal.search_theme.text"]})
+        elif row.get("asset_group_signal.audience.audience"):
+            resource = row["asset_group_signal.audience.audience"]
+            audience_signals.append({
+                **entry,
+                "audience_id": resource.rsplit("/", 1)[-1],
+                "audience_name": names.get(resource),
+            })
+    insights = []
+    if not themes:
+        insights.append("No search themes: adding a few tells PMax which searches the products fit.")
+    if not audience_signals:
+        insights.append("No audience signal: an audience (customer list, site visitors) speeds up PMax learning.")
+    disapproved = [t["search_theme"] for t in themes if t["approval_status"] == "DISAPPROVED"]
+    if disapproved:
+        insights.append(f"Disapproved search themes: {', '.join(disapproved)}")
+    return {
+        "asset_group_id": asset_group_id,
+        "search_themes": themes,
+        "audience_signals": audience_signals,
+        "available_audiences": [
+            {"audience_id": str(a.get("audience.id")), "name": a.get("audience.name"), "description": a.get("audience.description")}
+            for a in audiences
+        ],
+        "insights": insights,
+    }
+
+
+def draft_asset_group_signals(
+    config: AdLoopConfig,
+    *,
+    customer_id: str = "",
+    asset_group_id: str = "",
+    add_search_themes: list[str] | None = None,
+    audience_id: str = "",
+    remove_signal_ids: list[str] | None = None,
+) -> dict:
+    """Draft adding search themes or an audience signal, and removing signals — returns a preview."""
+    from adloop.safety.guards import SafetyViolation, check_blocked_operation
+    from adloop.safety.preview import ChangePlan, store_plan
+
+    try:
+        check_blocked_operation("update_asset_group_signals", config.safety)
+    except SafetyViolation as e:
+        return {"error": str(e)}
+    errors: list[str] = []
+    themes = list(dict.fromkeys(str(t).strip() for t in (add_search_themes or []) if str(t).strip()))
+    audience_id = str(audience_id or "").strip()
+    removals = [str(r).strip() for r in (remove_signal_ids or []) if str(r).strip()]
+    for theme in themes:
+        if len(theme) > _MAX_THEME_CHARS:
+            errors.append(f"search theme '{theme[:40]}...' is {len(theme)} characters; keep it under {_MAX_THEME_CHARS}")
+    if audience_id and not audience_id.isdigit():
+        errors.append("audience_id must be numeric (see get_asset_group_signals available_audiences)")
+    if not themes and not audience_id and not removals:
+        errors.append("Nothing to change: pass add_search_themes, audience_id and/or remove_signal_ids")
+    if errors:
+        return {"error": "Validation failed", "details": errors}
+
+    current = get_asset_group_signals(config, customer_id=customer_id, asset_group_id=asset_group_id)
+    if "error" in current:
+        return current
+    existing = {t["signal_id"]: t for t in current["search_themes"]} | {a["signal_id"]: a for a in current["audience_signals"]}
+    unknown = [r for r in removals if r not in existing]
+    if unknown:
+        return {"error": "Validation failed", "details": [f"signals not on this asset group: {', '.join(unknown)}"]}
+    known_themes = {t["search_theme"].lower() for t in current["search_themes"] if t["signal_id"] not in removals}
+    warnings = [f"search theme '{t}' is already on the asset group; skipped" for t in themes if t.lower() in known_themes]
+    themes = [t for t in themes if t.lower() not in known_themes]
+    remaining_themes = len(known_themes) + len(themes)
+    if remaining_themes > _MAX_SEARCH_THEMES:
+        errors.append(f"an asset group takes at most {_MAX_SEARCH_THEMES} search themes ({remaining_themes} after this change)")
+    kept_audiences = [a for a in current["audience_signals"] if a["signal_id"] not in removals]
+    if audience_id:
+        if audience_id not in {a["audience_id"] for a in current["available_audiences"]}:
+            errors.append(f"audience {audience_id} is not an enabled audience of this account")
+        if kept_audiences:
+            errors.append(
+                f"the asset group already has an audience signal ({kept_audiences[0]['audience_name'] or kept_audiences[0]['audience_id']}); "
+                f"remove it in the same draft (remove_signal_ids=['{kept_audiences[0]['signal_id']}'])"
+            )
+    if errors:
+        return {"error": "Validation failed", "details": errors}
+
+    warnings.append("Signals are hints, not targeting: PMax still serves beyond them.")
+    plan = ChangePlan(
+        operation="update_asset_group_signals",
+        entity_type="asset_group",
+        entity_id=str(asset_group_id),
+        customer_id=customer_id,
+        changes={
+            "asset_group_id": str(asset_group_id),
+            "add_search_themes": themes,
+            "audience_id": audience_id or None,
+            "remove": [
+                {"signal_id": r, "label": existing[r].get("search_theme") or existing[r].get("audience_name") or existing[r].get("audience_id")}
+                for r in removals
+            ],
+        },
+    )
+    store_plan(plan)
+    preview = plan.to_preview()
+    preview["warnings"] = warnings
+    return preview
+
+
+def apply_asset_group_signals(client: object, cid: str, changes: dict) -> dict:
+    service = client.get_service("GoogleAdsService")
+    group_path = service.asset_group_path(cid, changes["asset_group_id"])
+    operations = []
+    for removal in changes.get("remove") or []:
+        op = client.get_type("MutateOperation")
+        op.asset_group_signal_operation.remove = f"customers/{cid}/assetGroupSignals/{removal['signal_id']}"
+        operations.append(op)
+    for theme in changes.get("add_search_themes") or []:
+        op = client.get_type("MutateOperation")
+        signal = op.asset_group_signal_operation.create
+        signal.asset_group = group_path
+        signal.search_theme.text = theme
+        operations.append(op)
+    if changes.get("audience_id"):
+        op = client.get_type("MutateOperation")
+        signal = op.asset_group_signal_operation.create
+        signal.asset_group = group_path
+        signal.audience.audience = f"customers/{cid}/audiences/{changes['audience_id']}"
+        operations.append(op)
+    service.mutate(customer_id=cid, mutate_operations=operations)
+    return {
+        "asset_group_id": changes["asset_group_id"],
+        "search_themes_added": len(changes.get("add_search_themes") or []),
+        "audience_added": bool(changes.get("audience_id")),
+        "signals_removed": len(changes.get("remove") or []),
+    }
