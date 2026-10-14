@@ -2668,6 +2668,131 @@ def run_gaql(
 # ---------------------------------------------------------------------------
 
 
+@_tool(title="Audience lists", annotations=_READONLY, tags={"ads"})
+@_safe
+def get_audience_lists(customer_id: str = "") -> dict:
+    """The account's own audiences: remarketing and customer lists, custom segments, combined segments.
+
+    Each user list comes with its type, membership status (OPEN or CLOSED),
+    size for Search and Display, eligibility and membership duration;
+    custom and combined segments with their id and description. Insights
+    flag lists below the 1,000 users Search needs and closed lists. Use the
+    ids with draft_audience_attachment; for Google's in-market and affinity
+    segments use search_audience_segments.
+
+    Args:
+        customer_id: Google Ads customer ID (digits, dashes optional).
+            Defaults to the configured account.
+    """
+    from adloop.ads.audiences import get_audience_lists as _impl
+
+    return _impl(current_config(), customer_id=customer_id or current_config().ads.customer_id)
+
+
+@_tool(title="Search audience segments", annotations=_READONLY, tags={"ads"})
+@_safe
+def search_audience_segments(query: str, kind: str = "all", limit: int = 25, customer_id: str = "") -> dict:
+    """Find Google's in-market and affinity segments by name, with the segment_id to attach.
+
+    In-market segments are people actively researching a purchase; affinity
+    segments are long-term interests. Matching is on the segment name, in
+    English, e.g. "running", "insurance", "travel".
+
+    Args:
+        query: Part of the segment name to look for (at least 2 characters).
+        kind: "in_market", "affinity" or "all" (default).
+        limit: Maximum number of segments to return (1-100, default 25).
+        customer_id: Google Ads customer ID (digits, dashes optional).
+            Defaults to the configured account.
+    """
+    from adloop.ads.audiences import search_audience_segments as _impl
+
+    return _impl(current_config(), customer_id=customer_id or current_config().ads.customer_id, query=query, kind=kind, limit=limit)
+
+
+@_tool(title="Audience targeting", annotations=_READONLY, tags={"ads"})
+@_safe
+def get_audience_targeting(campaign_id: str = "", ad_group_id: str = "", customer_id: str = "") -> dict:
+    """Audiences attached to one campaign or ad group, its exclusions, and the audience mode.
+
+    audience_mode is "observation" (audiences only adjust bids and report),
+    "targeting" (ads only reach the audiences) or "not set". Every audience
+    and exclusion carries a remove_id for remove_entity (entity_type
+    "campaign_criterion" or "ad_group_criterion").
+
+    Args:
+        campaign_id: Numeric campaign id. Pass this or ad_group_id.
+        ad_group_id: Numeric ad group id. Pass this or campaign_id.
+        customer_id: Google Ads customer ID (digits, dashes optional).
+            Defaults to the configured account.
+    """
+    from adloop.ads.audiences import get_audience_targeting as _impl
+
+    return _impl(
+        current_config(),
+        customer_id=customer_id or current_config().ads.customer_id,
+        campaign_id=campaign_id,
+        ad_group_id=ad_group_id,
+    )
+
+
+@_tool(title="Draft audience attachment", annotations=_WRITE, tags={"ads"})
+@_safe
+def draft_audience_attachment(
+    campaign_id: str = "",
+    ad_group_id: str = "",
+    user_list_ids: _StrList = [],  # noqa: B006
+    segment_ids: _StrList = [],  # noqa: B006
+    custom_audience_ids: _StrList = [],  # noqa: B006
+    combined_audience_ids: _StrList = [],  # noqa: B006
+    mode: str = "observation",
+    exclude: bool = False,
+    customer_id: str = "",
+) -> dict:
+    """Draft attaching audiences to a campaign or ad group as observation, targeting or exclusion: returns a PREVIEW.
+
+    Observation (the default) keeps the reach: the audiences adjust bids and
+    show up in reports. Targeting narrows delivery to the audiences and needs
+    a double confirmation. Exclusions keep the people out and leave the mode
+    alone. The draft refuses combinations Google does not allow (custom
+    segments on Search, combined segments outside Search, audiences at both
+    campaign and ad group level) and lists that cannot serve; Performance Max
+    is refused with a pointer to draft_asset_group_signals. Nothing changes
+    until confirm_and_apply applies the plan_id; a dry run has Google
+    validate it.
+
+    Args:
+        campaign_id: Numeric campaign id. Pass this or ad_group_id.
+        ad_group_id: Numeric ad group id. Pass this or campaign_id.
+        user_list_ids: Remarketing or customer lists (user_list_id from
+            get_audience_lists).
+        segment_ids: In-market or affinity segments (segment_id from
+            search_audience_segments).
+        custom_audience_ids: Custom segments (custom_audience_id from
+            get_audience_lists); Display and Video only.
+        combined_audience_ids: Combined segments (combined_audience_id from
+            get_audience_lists); Search only.
+        mode: "observation" (default) or "targeting". Ignored for exclusions.
+        exclude: True to exclude the audiences instead of adding them.
+        customer_id: Google Ads customer ID (digits, dashes optional).
+            Defaults to the configured account.
+    """
+    from adloop.ads.audiences import draft_audience_attachment as _impl
+
+    return _impl(
+        current_config(),
+        customer_id=customer_id or current_config().ads.customer_id,
+        campaign_id=campaign_id,
+        ad_group_id=ad_group_id,
+        user_list_ids=user_list_ids,
+        segment_ids=segment_ids,
+        custom_audience_ids=custom_audience_ids,
+        combined_audience_ids=combined_audience_ids,
+        mode=mode,
+        exclude=exclude,
+    )
+
+
 @_tool(title="Asset group signals", annotations=_READONLY, tags={"ads"})
 @_safe
 def get_asset_group_signals(asset_group_id: str, customer_id: str = "") -> dict:

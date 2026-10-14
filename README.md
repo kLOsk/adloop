@@ -110,6 +110,9 @@ The best features come from real workflows. If you're using AdLoop and find your
 | `get_audience_performance` | Audience segment performance — remarketing, in-market, affinity, demographics |
 | `get_change_history` | What changed before the drop: who changed what and when, through which client (UI, API, scripts, auto-applied recommendations), last 30 days |
 | `get_demographic_targeting` | List demographic criteria (age/gender/parental status/income) on an ad group or campaign |
+| `get_audience_lists` | The account's remarketing and customer lists (size, eligibility, open/closed), custom and combined segments |
+| `search_audience_segments` | Find Google's in-market and affinity segments by name |
+| `get_audience_targeting` | Audiences and audience exclusions on a campaign or ad group, plus the audience mode (observation or targeting) |
 | `suggest_brands` | Resolve a brand name to the brands Google recognizes — brand ID, name, state, URLs |
 | `check_brand_names` | Check a shortlist of brand names against Google's brand knowledge graph (max 25 per call) |
 | `get_brand_lists` | List brand lists (SharedSets of type BRANDS) — ID, name, status, member count |
@@ -280,6 +283,7 @@ All write operations follow a **draft → preview → confirm** workflow. Nothin
 | `draft_key_event` | Mark a GA4 event as a key event (conversion) — the fix for "fires but isn't tracked as a conversion" |
 | `draft_delete_key_event` | Remove a GA4 key event. The event keeps firing but no longer counts as a conversion, for future data only |
 | `draft_demographic_targeting` | Propose demographic criteria (age, gender, parental status, income) — exclusions by default |
+| `draft_audience_attachment` | Attach audiences as observation (default), targeting (double confirmation) or exclusion; refuses pairings Google doesn't allow and Search lists too small to target |
 | `propose_negative_keyword_list` | Draft a shared negative keyword list (SharedSet) and attach it to a campaign — reusable across multiple campaigns |
 | `propose_brand_list` | Draft a brand list (SharedSet of type BRANDS) from Commercial KG MIDs and optionally attach it to campaigns — `negative=true` (default) excludes the brands, `false` restricts targeting to them |
 | `add_to_brand_list` | Draft adding brands to an existing brand list |

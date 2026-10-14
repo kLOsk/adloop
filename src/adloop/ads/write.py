@@ -3976,6 +3976,7 @@ def _dispatch_ads_plan(client: object, cid: str, plan: object) -> dict:
         _apply_upload_call_conversions,
         _apply_upload_enhanced_conversions_for_leads,
     )
+    from adloop.ads.audiences import apply_audience_criteria as _apply_audience_criteria
     from adloop.ads.shopping import apply_create_shopping_campaign as _apply_create_shopping_campaign
     from adloop.ads.pmax import apply_asset_group_assets as _apply_asset_group_assets
     from adloop.ads.pmax import apply_asset_group_signals as _apply_asset_group_signals
@@ -4007,6 +4008,7 @@ def _dispatch_ads_plan(client: object, cid: str, plan: object) -> dict:
         "attach_shared_set_to_campaigns": _apply_attach_shared_set_to_campaigns,
         "detach_shared_set_from_campaigns": _apply_detach_shared_set_from_campaigns,
         "add_demographic_criteria": _apply_add_demographic_criteria,
+        "add_audience_criteria": _apply_audience_criteria,
         "create_brand_list": _apply_create_brand_list,
         "add_to_brand_list": _apply_add_to_brand_list,
         "remove_from_brand_list": _apply_remove_from_brand_list,
