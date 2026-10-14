@@ -3117,10 +3117,13 @@ def draft_responsive_search_ad(
         ad_group_id: Numeric ID of the ad group that gets the ad.
         headlines: 3-15 headlines, max 30 chars each. Each entry is a plain
             string (unpinned) or {"text": "...", "pinned_field": "HEADLINE_1"};
-            valid pins are HEADLINE_1, HEADLINE_2, HEADLINE_3.
+            valid pins are HEADLINE_1, HEADLINE_2, HEADLINE_3. Keyword or
+            location insertion such as {KeyWord:Drain Cleaning} counts as its
+            default text, which is required.
         descriptions: 2-4 descriptions, max 90 chars each. Each entry is a plain
             string (unpinned) or {"text": "...", "pinned_field": "DESCRIPTION_1"};
-            valid pins are DESCRIPTION_1, DESCRIPTION_2.
+            valid pins are DESCRIPTION_1, DESCRIPTION_2. Insertion tags count
+            as their default text, as for headlines.
         final_url: Landing page URL the ad links to; must be reachable.
         customer_id: Google Ads customer ID (digits, e.g. "1234567890"). Empty
             uses the configured default account.
@@ -3183,11 +3186,13 @@ def update_responsive_search_ad(
             fully swaps in for the existing headlines. Google's RSA constraints
             apply: 3-15 headlines, max 30 chars each, at most 2 per pin slot.
             Each entry is a plain string (unpinned) or {"text": "...",
-            "pinned_field": "HEADLINE_1"} (HEADLINE_1-3).
+            "pinned_field": "HEADLINE_1"} (HEADLINE_1-3). Insertion tags such as
+            {KeyWord:Clogged Drain Service} count as their default text, which
+            is required.
         descriptions: LIST-REPLACE: None or [] means no change; a non-empty list
             fully swaps in. 2-4 descriptions, max 90 chars each, at most 1 per
-            pin slot (DESCRIPTION_1, DESCRIPTION_2). Same entry format as
-            headlines.
+            pin slot (DESCRIPTION_1, DESCRIPTION_2). Same entry format and
+            insertion-tag counting as headlines.
         final_url: Empty means no change; non-empty replaces the final URL and
             is checked for reachability.
         path1: Empty means no change; non-empty sets the first display path
