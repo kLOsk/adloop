@@ -125,6 +125,34 @@ class TestTools:
         assert hosted["curl_example"].startswith('curl -T "logo.png" "https://mcp.example/u/tok-local/"')
 
     @pytest.mark.asyncio
+    async def test_the_card_code_lets_a_card_upload_without_the_extension_declaration(self, store):
+        """The Claude iOS app sends the card's calls without declaring MCP Apps;
+        the code from upload_images authorises them instead."""
+        from adloop.safety.approval import UPLOAD_META_KEY, upload_code
+
+        async with Client(server.mcp, extensions=CARDS) as card_app:
+            shown = await card_app.call_tool("upload_images", {})
+        code = shown.meta[UPLOAD_META_KEY]["code"]
+        assert code not in str(shown.structured_content) and code not in shown.content[0].text
+
+        image = base64.b64encode(_png()).decode()
+        async with Client(server.mcp) as same_app_without_declaration:
+            stored = await same_app_without_declaration.call_tool(
+                "store_image_upload", {"name": "hero.png", "data_base64": image, "code": code}, raise_on_error=False
+            )
+            forged = await same_app_without_declaration.call_tool(
+                "store_image_upload", {"name": "hero.png", "data_base64": image, "code": code[:-1] + "0"}, raise_on_error=False
+            )
+            expired = await same_app_without_declaration.call_tool(
+                "store_image_upload",
+                {"name": "hero.png", "data_base64": image, "code": upload_code(now=time.time() - 3 * 3600)},
+                raise_on_error=False,
+            )
+        assert stored.structured_content["status"] == "UPLOADED"
+        assert forged.is_error and "upload card" in forged.content[0].text
+        assert expired.is_error and "upload card" in expired.content[0].text
+
+    @pytest.mark.asyncio
     async def test_store_refuses_garbage(self, store):
         async with Client(server.mcp, extensions=CARDS) as client:
             broken = await client.call_tool("store_image_upload", {"name": "x.png", "data_base64": "%%%"})

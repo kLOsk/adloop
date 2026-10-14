@@ -263,7 +263,7 @@ class _AppOnlyToolsForCardClients(Middleware):
     call from an "app without cards" breaks the card itself. approve_change
     needs no such check: it only acts on the plan's one-time code, which
     goes to the card and never into the model's context. The upload card's
-    tool has no code of its own and keeps the check.
+    tool passes with the declaration or its own code from upload_images.
     """
 
     async def on_list_tools(self, context, call_next):
@@ -274,6 +274,11 @@ class _AppOnlyToolsForCardClients(Middleware):
 
     async def on_call_tool(self, context, call_next):
         card = _APP_ONLY_TOOLS.get(context.message.name)
+        if card and context.message.name == STORE_UPLOAD_TOOL:
+            from adloop.safety.approval import upload_code_valid
+
+            if upload_code_valid((context.message.arguments or {}).get("code", "")):
+                card = None
         if card and context.message.name != APPROVE_TOOL and not client_shows_cards():
             from fastmcp.exceptions import ToolError
 
@@ -4444,7 +4449,21 @@ def upload_images() -> dict:
     """
     from adloop.uploads import upload_instructions
 
-    return upload_instructions(client_shows_cards())
+    shows_cards = client_shows_cards()
+    result = upload_instructions(shows_cards)
+    if not shows_cards:
+        return result
+    from fastmcp.tools import ToolResult
+    from mcp.types import TextContent
+
+    from adloop.safety.approval import UPLOAD_META_KEY, upload_code
+
+    # The card sends this code with every file (see store_image_upload).
+    return ToolResult(
+        content=[TextContent(type="text", text=json.dumps(result, default=str))],
+        structured_content=result,
+        meta={UPLOAD_META_KEY: {"code": upload_code()}},
+    )
 
 
 @_tool(
@@ -4454,7 +4473,7 @@ def upload_images() -> dict:
     meta={"ui": {"resourceUri": UPLOAD_CARD_URI, "visibility": ["app"]}},
 )
 @_safe
-def store_image_upload(name: str, data_base64: str) -> dict:
+def store_image_upload(name: str, data_base64: str, code: str = "") -> dict:
     """Store an image dropped on the AdLoop upload card.
 
     Called only by the upload card; AI apps keep this tool out of the
@@ -4463,6 +4482,7 @@ def store_image_upload(name: str, data_base64: str) -> dict:
     Args:
         name: The file name, used for the asset name.
         data_base64: The file content, base64-encoded.
+        code: The upload card's code from upload_images.
     """
     import base64
     import binascii

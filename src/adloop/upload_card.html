@@ -77,6 +77,10 @@
 (() => {
   "use strict";
   const TOOL = "store_image_upload";
+  const META_KEY = "adloop/upload";
+  // From upload_images: some apps send the card's calls without declaring
+  // MCP Apps, so each file carries the card's code instead.
+  let code = "";
   const MAX_BYTES = 5120 * 1024;
   const TYPES = ["image/png", "image/jpeg", "image/gif"];
   const STRINGS = {
@@ -168,7 +172,7 @@
       if (file.size > MAX_BYTES) { row.state.textContent = t("tooBig"); row.state.classList.add("bad"); continue; }
       row.state.textContent = t("uploading");
       try {
-        const result = await request("tools/call", { name: TOOL, arguments: { name: file.name, data_base64: await readBase64(file) } });
+        const result = await request("tools/call", { name: TOOL, arguments: { name: file.name, data_base64: await readBase64(file), code } });
         const r = payloadOf(result);
         if ((result && result.isError) || r.error || !r.upload_id) throw new Error(r.error || "upload failed");
         row.meta.textContent = describe(r);
@@ -200,6 +204,8 @@
 
   let shownExisting = false;
   function onToolResult(result) {
+    const meta = result && result._meta && result._meta[META_KEY];
+    if (meta && meta.code) code = meta.code;
     if (shownExisting || !result) return;
     shownExisting = true;
     const r = payloadOf(result);

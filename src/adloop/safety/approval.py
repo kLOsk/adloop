@@ -91,6 +91,41 @@ def code_matches(plan: ChangePlan, code: str) -> bool:
     return hmac.compare_digest(approval_code(plan), str(code or ""))
 
 
+UPLOAD_META_KEY = "adloop/upload"
+# The upload card's code is good for this long after upload_images opened it.
+_UPLOAD_CODE_SECONDS = 2 * 3600
+
+
+def upload_code(now: float | None = None) -> str:
+    """The code an upload card presents with each file: "<expiry>.<signature>".
+
+    Some apps send a card's own calls without declaring MCP Apps (the Claude
+    iOS app), so the upload tool cannot rely on that declaration. The code
+    goes to the card in the result's _meta, never into the model's context,
+    and is bound to the workspace and an expiry.
+    """
+    import time
+
+    from adloop.runtime import current_tenant
+
+    expiry = int((now if now is not None else time.time()) + _UPLOAD_CODE_SECONDS)
+    message = "\x00".join(("upload", current_tenant(), str(expiry)))
+    return f"{expiry}.{hmac.new(_secret, message.encode(), hashlib.sha256).hexdigest()[:32]}"
+
+
+def upload_code_valid(code: str, now: float | None = None) -> bool:
+    import time
+
+    from adloop.runtime import current_tenant
+
+    expiry, _, signature = str(code or "").partition(".")
+    if not expiry.isdigit() or int(expiry) < (now if now is not None else time.time()):
+        return False
+    message = "\x00".join(("upload", current_tenant(), expiry))
+    expected = hmac.new(_secret, message.encode(), hashlib.sha256).hexdigest()[:32]
+    return hmac.compare_digest(expected, signature)
+
+
 def card_click_active() -> bool:
     """True while ``approve_change`` runs a click from the card."""
     return _card_click.get()
