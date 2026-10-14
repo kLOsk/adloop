@@ -108,6 +108,7 @@ The best features come from real workflows. If you're using AdLoop and find your
 | `get_asset_group_signals` | A PMax asset group's search themes and audience signal, plus the audiences available for it |
 | `get_detailed_asset_performance` | Top-performing asset combinations — which headline+description+image combos Google selects most |
 | `get_audience_performance` | Audience segment performance — remarketing, in-market, affinity, demographics |
+| `get_shopping_product_performance` | Spend, conversions, CPA and ROAS per product across Shopping and Performance Max, plus products that spent without converting |
 | `get_change_history` | What changed before the drop: who changed what and when, through which client (UI, API, scripts, auto-applied recommendations), last 30 days |
 | `get_demographic_targeting` | List demographic criteria (age/gender/parental status/income) on an ad group or campaign |
 | `get_audience_lists` | The account's remarketing and customer lists (size, eligibility, open/closed), custom and combined segments |
@@ -211,6 +212,7 @@ The Google account also needs **Edit** permission on the container (and **Publis
 |------|-------------|
 | `list_merchant_accounts` | Discover accessible Merchant Center accounts |
 | `get_merchant_feed_health` | Feed health — approved/pending/disapproved counts per reporting context, top product issues with docs, account-level issues. Disapprovals silently starve Shopping/PMax. |
+| `get_merchant_product_issues` | The products behind the feed-health counts: which are disapproved, limited or pending, and each issue with its attribute and affected countries |
 
 > **Setup for Merchant Center tools** — Enable the **Merchant API** in your GCP project (the Content API for Shopping is deprecated). The Merchant API has no read-only scope; AdLoop uses it strictly read-only. Upgrading OAuth users re-authorize once.
 

@@ -1221,6 +1221,39 @@ def get_merchant_feed_health(account_id: str = "") -> dict:
     return _impl(current_config(), account_id=account_id)
 
 
+@_tool(title="Merchant Center product issues", annotations=_READONLY, tags={"merchant"})
+@_safe
+def get_merchant_product_issues(
+    account_id: str = "",
+    status: str = "disapproved",
+    issue_code: str = "",
+    limit: int = 50,
+) -> dict:
+    """The products behind the feed-health counts, each with its issues.
+
+    Lists products by status with offer id, title, brand, click potential
+    and every item issue: its code, the attribute it concerns, severity per
+    reporting context with the affected countries, and whether the
+    merchant has to act or Google is still processing. Products with high
+    click potential come first, because fixing them recovers the most
+    traffic. issues_by_code counts the products per issue. Data lags feed
+    changes by about 30 minutes.
+
+    Args:
+        account_id: Numeric Merchant Center ID from list_merchant_accounts.
+            Defaults to merchant.account_id in the config.
+        status: "disapproved" (default, not serving), "limited" (serving
+            with restrictions), "pending" (still in review) or "any"
+            (every product with at least one issue).
+        issue_code: Only products with this issue code (from
+            issues_by_code or get_merchant_feed_health).
+        limit: Maximum number of products to return (1-200, default 50).
+    """
+    from adloop.merchant.read import get_merchant_product_issues as _impl
+
+    return _impl(current_config(), account_id=account_id, status=status, issue_code=issue_code, limit=limit)
+
+
 @_tool(title="List Google Ads accounts", annotations=_READONLY, tags={"ads"})
 @_safe
 def list_accounts(limit: int = 200) -> dict:
@@ -2802,6 +2835,42 @@ def draft_audience_attachment(
         combined_audience_ids=combined_audience_ids,
         mode=mode,
         exclude=exclude,
+    )
+
+
+@_tool(title="Shopping product performance", annotations=_READONLY, tags={"ads"})
+@_safe
+def get_shopping_product_performance(
+    date_range_start: str = "",
+    date_range_end: str = "",
+    campaign_id: str = "",
+    limit: int = 50,
+    customer_id: str = "",
+) -> dict:
+    """Spend, clicks, conversions, CPA and ROAS per product across Shopping and Performance Max.
+
+    Each product (item id) is summed over the campaigns it ran in. Returns
+    the account totals, the top products by spend, and the products that
+    spent without a conversion, with insights on what to do with them.
+
+    Args:
+        date_range_start: Start date "YYYY-MM-DD". Both dates empty means
+            the last 30 days.
+        date_range_end: End date "YYYY-MM-DD" (inclusive).
+        campaign_id: Optional numeric campaign id to limit the report to.
+        limit: Maximum number of products to return (1-200, default 50).
+        customer_id: Google Ads customer ID (digits, dashes optional).
+            Defaults to the configured account.
+    """
+    from adloop.ads.shopping import get_shopping_product_performance as _impl
+
+    return _impl(
+        current_config(),
+        customer_id=customer_id or current_config().ads.customer_id,
+        date_range_start=date_range_start,
+        date_range_end=date_range_end,
+        campaign_id=campaign_id,
+        limit=limit,
     )
 
 

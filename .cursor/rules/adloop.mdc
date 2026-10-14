@@ -59,6 +59,7 @@ You have access to AdLoop MCP tools that connect Google Ads, Reddit Ads and Goog
 | `get_pmax_assets` | Per-asset details for PMax — field type, serving status, content. Use with `get_detailed_asset_performance` for quality signals | `campaign_id` (optional) |
 | `get_asset_group_signals` | A PMax asset group's search themes and audience signal (with `signal_id` and approval status), plus the account's audiences that can become its signal | `asset_group_id` |
 | `get_detailed_asset_performance` | Top-performing asset combinations — which headline+description+image combos Google selects most | `campaign_id` (optional) |
+| `get_shopping_product_performance` | Spend, clicks, conversions, CPA and ROAS per product (item id) across Shopping and PMax, plus the products that spent without converting | `date_range_start`, `date_range_end`, `campaign_id` (optional), `limit` |
 | `get_audience_performance` | Audience segment metrics — remarketing, in-market, affinity, demographics | `date_range_start`, `date_range_end`, `campaign_id` (optional) |
 | `get_change_history` | What changed in the account and who changed it: time, user email, client (UI, API, scripts, Editor, auto-applied recommendations), resource type, operation, changed fields, campaign/ad group. The first stop for "what changed before the drop?" (30 days of history) | `date_range_start`, `date_range_end`, `campaign_id` (optional), `resource_types` (optional), `limit` (optional, max 10000) |
 | `get_demographic_targeting` | List current demographic criteria (age/gender/parental status/income) on an ad group or campaign — returns each criterion's `remove_id` for use with `remove_entity` | exactly one of `ad_group_id` or `campaign_id` |
@@ -174,10 +175,12 @@ These tools call both APIs internally and return unified results with computed `
 |------|-------------|----------------|
 | `list_merchant_accounts` | Discovery — which Merchant Center accounts the connected user can reach | (none) |
 | `get_merchant_feed_health` | Shopping/PMax underperforming or dead — check feed disapprovals FIRST, before touching bids/budgets | `account_id` (numeric; from list_merchant_accounts — optional when `merchant.account_id` is configured) |
+| `get_merchant_product_issues` | Which products are disapproved, limited or pending, and why: offer id, title, click potential, and each issue's code, attribute, affected countries and whether the merchant has to act | `account_id`, `status` (disapproved/limited/pending/any), `issue_code`, `limit` |
 
 - **Disapproved feed items are the #1 silent PMax/Shopping killer.** When a Shopping or PMax campaign has impressions collapsing or zero delivery, check `get_merchant_feed_health` before any campaign-side diagnosis.
 - The Merchant API has no read-only scope; AdLoop's merchant tools are read-only by design — never propose feed edits through these tools. Product-status data lags ~30 minutes — say so when the user just changed the feed.
 - Item issues come ranked by affected products and include Google's resolution documentation links — surface the top 3 with their doc links.
+- To name the products behind the counts, call `get_merchant_product_issues`: products with HIGH click potential come first, because fixing them recovers the most traffic. `issues_by_code` groups the products per issue; an issue whose resolution is `PENDING_PROCESSING` needs no action, Google is still reviewing. Filter with `issue_code` to list every product of one issue (e.g. all missing GTINs) for the user to fix in the feed.
 
 ### Reddit Ads Read Tools
 
@@ -467,7 +470,7 @@ Most websites (especially in the EU) use a GDPR cookie consent banner. This has 
 
 ### When user wants a Shopping campaign
 
-1. `list_merchant_accounts` for the Merchant Center id, then `get_merchant_feed_health`: a feed with many disapproved products needs fixing first, a campaign cannot advertise them
+1. `list_merchant_accounts` for the Merchant Center id, then `get_merchant_feed_health`: a feed with many disapproved products needs fixing first, a campaign cannot advertise them; `get_merchant_product_issues` names those products and their issues
 2. The Merchant Center account must be linked to the Google Ads account (Merchant Center → Settings → Apps and services); `draft_shopping_campaign` checks it and says which accounts are linked
 3. Ask for countries if not stated. Shopping takes no language targeting and no keywords: the feed's language applies, and search terms are controlled with negative keywords after launch
 4. Bidding: MANUAL_CPC with a modest `product_bid` to start, TARGET_ROAS once the account has conversion value history, TARGET_SPEND (Maximize clicks) to gather data quickly. `product_bid` is always required (Google sets it on the product group)
@@ -608,6 +611,7 @@ Reddit's structure is campaign → ad group (budget, bid, pixel, targeting) → 
    - Ensure asset diversity: at least 5 headlines, 5 descriptions, 5 marketing images (landscape AND square), a logo, ideally a YouTube video. The preview's `counts_after` shows the result per type
    - Signals: `get_asset_group_signals`, then `draft_asset_group_signals` to add search themes (what customers search for the products) or set an audience signal. Signals guide PMax; they do not restrict it
    - Products that must not be advertised (out of stock, low margin, a brand you may not advertise): `draft_pmax_product_exclusions` with the COMPLETE list of excluded item ids, brands or custom labels. Check `get_merchant_feed_health` first: disapproved products are a feed problem, not an exclusion
+   - Which products earn and which only spend: `get_shopping_product_performance`. Its `no_conversion_spenders` are the candidates to check (landing page, price, stock) before excluding them; one or two weeks without a conversion can be normal for expensive products
    - Pause an underperforming asset group with `pause_entity(entity_type="asset_group")` rather than removing it
    - Check that final URLs point to relevant, working landing pages
 6. New PMax campaigns cannot be built through AdLoop yet (the campaign, asset group and full asset set have to be created in one request); building them stays a job for Google Ads. Editing existing ones works as above.

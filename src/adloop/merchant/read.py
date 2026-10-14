@@ -124,27 +124,9 @@ def get_merchant_feed_health(
         register_gcp,
     )
 
-    account_id = str(account_id or "").strip() or config.merchant.account_id.strip()
-    if not account_id:
-        from adloop.runtime import default_setting_hint
-
-        return {
-            "error": (
-                "account_id is required: no Merchant Center account was "
-                "passed and no default is configured."
-            ),
-            "hint": (
-                "Call list_merchant_accounts to find the numeric Merchant "
-                "Center ID and pass it as account_id, or "
-                + default_setting_hint("merchant.account_id", "Settings → Google & accounts")
-                + "."
-            ),
-        }
-    if not account_id.isdigit():
-        return {
-            "error": "account_id must be a numeric Merchant Center ID — "
-                     "call list_merchant_accounts first."
-        }
+    account_id, error = _account_or_error(config, account_id)
+    if error:
+        return error
 
     def _fetch() -> tuple[dict, dict]:
         return (
@@ -245,3 +227,176 @@ def get_merchant_feed_health(
         "top_item_issues": top_item_issues[:15],
         "insights": insights,
     }
+
+
+# ---------------------------------------------------------------------------
+# Product-level issues (Reports API, product_view)
+# ---------------------------------------------------------------------------
+
+_STATUS_FILTERS = {
+    "disapproved": "NOT_ELIGIBLE_OR_DISAPPROVED",
+    "limited": "ELIGIBLE_LIMITED",
+    "pending": "PENDING",
+}
+_CLICK_ORDER = {"HIGH": 0, "MEDIUM": 1, "LOW": 2}
+_MAX_PRODUCTS = 200
+
+
+def _account_or_error(config: AdLoopConfig, account_id: str) -> tuple[str, dict | None]:
+    account_id = str(account_id or "").strip() or config.merchant.account_id.strip()
+    if not account_id:
+        from adloop.runtime import default_setting_hint
+
+        return "", {
+            "error": "account_id is required: no Merchant Center account was passed and no default is configured.",
+            "hint": (
+                "Call list_merchant_accounts to find the numeric Merchant Center ID and pass it as account_id, or "
+                + default_setting_hint("merchant.account_id", "Settings → Google & accounts")
+                + "."
+            ),
+        }
+    if not account_id.isdigit():
+        return "", {"error": "account_id must be a numeric Merchant Center ID — call list_merchant_accounts first."}
+    return account_id, None
+
+
+def _issue_entry(issue: dict) -> dict:
+    severity = issue.get("severity") or {}
+    contexts = [
+        {
+            "reporting_context": ctx.get("reportingContext", ""),
+            "disapproved_countries": ctx.get("disapprovedCountries", []) or [],
+            "demoted_countries": ctx.get("demotedCountries", []) or [],
+        }
+        for ctx in severity.get("severityPerReportingContext", []) or []
+    ]
+    return {
+        "code": (issue.get("type") or {}).get("code", ""),
+        "attribute": (issue.get("type") or {}).get("canonicalAttribute", ""),
+        "severity": severity.get("aggregatedSeverity", ""),
+        "resolution": issue.get("resolution", ""),
+        "where": contexts,
+    }
+
+
+def get_merchant_product_issues(
+    config: AdLoopConfig,
+    *,
+    account_id: str = "",
+    status: str = "disapproved",
+    issue_code: str = "",
+    limit: int = 50,
+) -> dict:
+    """The products behind the feed-health counts, with each product's issues.
+
+    Queries product_view through the Reports API: offer id, title, brand,
+    status, click potential and item issues (code, attribute, severity per
+    reporting context with the affected countries, and whether the merchant
+    has to act). Products with high click potential come first, because
+    fixing them recovers the most traffic.
+    """
+    from adloop.merchant.client import API_REPORTS, MerchantNotRegistered, merchant_post, register_gcp
+
+    account_id, error = _account_or_error(config, account_id)
+    if error:
+        return error
+    if status not in (*_STATUS_FILTERS, "any"):
+        return {"error": "status must be disapproved (default), limited, pending or any"}
+    limit = max(1, min(int(limit or 50), _MAX_PRODUCTS))
+    issue_code = str(issue_code or "").strip()
+
+    where = f" WHERE aggregated_reporting_context_status = '{_STATUS_FILTERS[status]}'" if status in _STATUS_FILTERS else ""
+    query = (
+        "SELECT id, offer_id, title, brand, feed_label, availability, click_potential, "
+        f"aggregated_reporting_context_status, item_issues FROM product_view{where}"
+    )
+
+    def _fetch() -> dict:
+        return merchant_post(
+            config,
+            f"accounts/{account_id}/reports:search",
+            {"query": query, "pageSize": 1000},
+            api=API_REPORTS,
+        )
+
+    try:
+        payload = _fetch()
+    except MerchantNotRegistered:
+        try:
+            register_gcp(config, account_id)
+        except Exception as e:
+            return _registration_failed(account_id, e)
+        try:
+            payload = _fetch()
+        except MerchantNotRegistered:
+            return _registered_retry_later(account_id)
+
+    products = []
+    by_code: dict[str, dict] = {}
+    for row in payload.get("results", []) or []:
+        view = row.get("productView") or {}
+        issues = [_issue_entry(i) for i in view.get("itemIssues", []) or []]
+        if status == "any" and not issues:
+            continue
+        if issue_code and not any(i["code"] == issue_code for i in issues):
+            continue
+        product = {
+            "offer_id": view.get("offerId", ""),
+            "product_id": view.get("id", ""),
+            "title": view.get("title", ""),
+            "brand": view.get("brand", ""),
+            "feed_label": view.get("feedLabel", ""),
+            "availability": view.get("availability", ""),
+            "status": view.get("aggregatedReportingContextStatus", ""),
+            "click_potential": view.get("clickPotential", ""),
+            "issues": issues,
+        }
+        products.append(product)
+        for issue in issues:
+            entry = by_code.setdefault(issue["code"], {
+                "code": issue["code"],
+                "attribute": issue["attribute"],
+                "severity": issue["severity"],
+                "merchant_action": issue["resolution"] == "MERCHANT_ACTION",
+                "products": 0,
+            })
+            entry["products"] += 1
+    products.sort(key=lambda p: (_CLICK_ORDER.get(p["click_potential"], 3), p["title"]))
+    summary = sorted(by_code.values(), key=lambda e: e["products"], reverse=True)
+
+    insights = []
+    if not products:
+        insights.append(
+            f"No products with status {status}." if status != "any" else "No product has an item issue."
+        )
+    high = [p for p in products if p["click_potential"] == "HIGH"]
+    if high and status == "disapproved":
+        insights.append(
+            f"{len(high)} disapproved product(s) have HIGH click potential: fixing them recovers the most traffic first."
+        )
+    if summary:
+        top = summary[0]
+        insights.append(
+            f"Most common issue: {top['code']}"
+            + (f" on attribute {top['attribute']}" if top["attribute"] else "")
+            + f" ({top['products']} product(s))."
+        )
+    waiting = [e["code"] for e in summary if not e["merchant_action"]]
+    if waiting:
+        insights.append(
+            "Pending Google's processing, nothing to do yet: " + ", ".join(waiting[:5]) + "."
+        )
+    if payload.get("nextPageToken"):
+        insights.append("More than 1,000 products matched; narrow with issue_code to see the rest.")
+
+    return {
+        "account_id": account_id,
+        "status": status,
+        "products": products[:limit],
+        "shown": min(limit, len(products)),
+        "matched": len(products),
+        "issues_by_code": summary[:20],
+        "insights": insights,
+        "note": "Product data lags about 30 minutes behind feed changes.",
+    }
+

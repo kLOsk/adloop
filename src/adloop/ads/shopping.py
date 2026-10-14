@@ -282,3 +282,131 @@ def apply_create_shopping_campaign(client: object, cid: str, changes: dict) -> d
             "with enable_entity(entity_type='campaign')."
         ),
     }
+
+
+# ---------------------------------------------------------------------------
+# Product performance (Shopping and Performance Max)
+# ---------------------------------------------------------------------------
+
+_MAX_PRODUCT_ROWS = 10000
+
+
+def get_shopping_product_performance(
+    config: AdLoopConfig,
+    *,
+    customer_id: str = "",
+    date_range_start: str = "",
+    date_range_end: str = "",
+    campaign_id: str = "",
+    limit: int = 50,
+) -> dict:
+    """Spend, clicks, conversions and value per product across Shopping and PMax.
+
+    Reads shopping_performance_view and sums each product (item id) over
+    the campaigns it ran in. Returns the top products by spend with CPA and
+    ROAS, plus the products that spent without converting.
+    """
+    from adloop.ads.currency import get_currency_code
+    from adloop.ads.gaql import execute_query
+    from adloop.ads.read import _date_clause
+
+    campaign_id = str(campaign_id or "").strip()
+    if campaign_id and not campaign_id.isdigit():
+        return {"error": "campaign_id must be a numeric Google Ads id"}
+    limit = max(1, min(int(limit or 50), 200))
+    campaign_filter = f"AND campaign.id = {campaign_id} " if campaign_id else ""
+    rows = execute_query(
+        config,
+        customer_id,
+        "SELECT segments.product_item_id, segments.product_title, segments.product_brand, campaign.id, "
+        "campaign.name, campaign.advertising_channel_type, metrics.impressions, metrics.clicks, "
+        "metrics.cost_micros, metrics.conversions, metrics.conversions_value FROM shopping_performance_view "
+        f"WHERE metrics.impressions > 0 {campaign_filter}{_date_clause(date_range_start, date_range_end)} "
+        f"ORDER BY metrics.cost_micros DESC LIMIT {_MAX_PRODUCT_ROWS}",
+    )
+    currency = get_currency_code(config, customer_id)
+
+    products: dict[str, dict] = {}
+    for row in rows:
+        item = str(row.get("segments.product_item_id") or "").strip()
+        if not item:
+            continue
+        product = products.setdefault(item, {
+            "item_id": item,
+            "title": row.get("segments.product_title") or "",
+            "brand": row.get("segments.product_brand") or "",
+            "campaigns": set(),
+            "channels": set(),
+            "impressions": 0, "clicks": 0, "cost_micros": 0, "conversions": 0.0, "conversions_value": 0.0,
+        })
+        product["campaigns"].add(row.get("campaign.name") or str(row.get("campaign.id")))
+        product["channels"].add(str(row.get("campaign.advertising_channel_type") or ""))
+        product["impressions"] += int(row.get("metrics.impressions") or 0)
+        product["clicks"] += int(row.get("metrics.clicks") or 0)
+        product["cost_micros"] += int(row.get("metrics.cost_micros") or 0)
+        product["conversions"] += float(row.get("metrics.conversions") or 0)
+        product["conversions_value"] += float(row.get("metrics.conversions_value") or 0)
+
+    out = []
+    for p in products.values():
+        cost = p["cost_micros"] / 1_000_000
+        out.append({
+            "item_id": p["item_id"],
+            "title": p["title"],
+            "brand": p["brand"],
+            "campaigns": sorted(p["campaigns"]),
+            "channels": sorted(c for c in p["channels"] if c),
+            "impressions": p["impressions"],
+            "clicks": p["clicks"],
+            "cost": round(cost, 2),
+            "conversions": round(p["conversions"], 2),
+            "conversions_value": round(p["conversions_value"], 2),
+            "cpa": round(cost / p["conversions"], 2) if p["conversions"] else None,
+            "roas": round(p["conversions_value"] / cost, 2) if cost and p["conversions_value"] else None,
+        })
+    out.sort(key=lambda p: p["cost"], reverse=True)
+
+    total_cost = round(sum(p["cost"] for p in out), 2)
+    total_value = round(sum(p["conversions_value"] for p in out), 2)
+    totals = {
+        "products": len(out),
+        "cost": total_cost,
+        "clicks": sum(p["clicks"] for p in out),
+        "conversions": round(sum(p["conversions"] for p in out), 2),
+        "conversions_value": total_value,
+        "roas": round(total_value / total_cost, 2) if total_cost and total_value else None,
+        "currency": currency,
+    }
+    # Spenders without a conversion, from the products that took at least
+    # 1% of the spend (a few cents on one product is noise).
+    threshold = max(total_cost * 0.01, 0.01)
+    no_conversions = [p for p in out if p["conversions"] == 0 and p["cost"] >= threshold]
+    insights = []
+    if not out:
+        insights.append(
+            "No Shopping or Performance Max product data in this period: the account has no product ads "
+            "running, or the campaigns did not serve."
+        )
+    if no_conversions:
+        wasted = round(sum(p["cost"] for p in no_conversions), 2)
+        insights.append(
+            f"{len(no_conversions)} product(s) spent {wasted} {currency} without a conversion. Check the "
+            "landing page and price first; in Performance Max, draft_pmax_product_exclusions can take "
+            "the worst ones out, in Shopping a lower product bid."
+        )
+    if totals["roas"] is not None:
+        weak = [p for p in out if p["roas"] is not None and p["roas"] < totals["roas"] / 2 and p["cost"] >= threshold]
+        if weak:
+            insights.append(
+                f"{len(weak)} converting product(s) return less than half the account's ROAS ({totals['roas']})."
+            )
+    if len(rows) >= _MAX_PRODUCT_ROWS:
+        insights.append("The period has more product rows than one report returns; narrow the dates or pass campaign_id.")
+
+    return {
+        "date_range": {"start": date_range_start or "LAST_30_DAYS", "end": date_range_end or ""},
+        "totals": totals,
+        "products": out[:limit],
+        "no_conversion_spenders": no_conversions[:20],
+        "insights": insights,
+    }

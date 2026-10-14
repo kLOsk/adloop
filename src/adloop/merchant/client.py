@@ -22,6 +22,8 @@ _BASE = "https://merchantapi.googleapis.com"
 # states its sub-API and API_ACCOUNTS is only the default.
 API_ACCOUNTS = "accounts/v1"
 API_ISSUE_RESOLUTION = "issueresolution/v1"
+# Product-level reporting (MCQL queries over product_view and friends).
+API_REPORTS = "reports/v1"
 
 # Google blocks every Merchant API call from a GCP project that is not
 # registered as a developer with the merchant account (401 UNAUTHENTICATED,
