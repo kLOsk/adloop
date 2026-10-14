@@ -281,12 +281,15 @@ def _prompt_toolsets() -> str:
     Client-side (env), not config.yaml: the same machine can run one
     full-catalog client and one trimmed client off one AdLoop config.
     """
-    from adloop.server import TOOLSETS
+    from adloop.server import ADS_SUBSETS, TOOLSETS
 
     _print("  AdLoop can expose only some toolsets to your AI client —")
     _print("  a smaller tool list costs less context per conversation.")
     _print()
     for slug, description in TOOLSETS.items():
+        _print(f"    {slug:<9} {description}")
+    _print("  Or only part of Google Ads instead of ads:")
+    for slug, description in ADS_SUBSETS.items():
         _print(f"    {slug:<9} {description}")
     _print()
     _print("  (health_check and confirm_and_apply are always included.)")
@@ -295,12 +298,12 @@ def _prompt_toolsets() -> str:
     while True:
         raw = _prompt("Toolsets (comma-separated, e.g. ads,ga4)")
         chosen = [part.strip().lower() for part in raw.split(",") if part.strip()]
-        unknown = [slug for slug in chosen if slug not in TOOLSETS]
+        unknown = [slug for slug in chosen if slug not in TOOLSETS and slug not in ADS_SUBSETS]
         if chosen and not unknown:
             return ",".join(dict.fromkeys(chosen))
         _print(
             f"    ⚠  Unknown toolset(s): {', '.join(unknown) or '(none given)'}."
-            f" Valid: {', '.join(TOOLSETS)}"
+            f" Valid: {', '.join([*TOOLSETS, *ADS_SUBSETS])}"
         )
 
 

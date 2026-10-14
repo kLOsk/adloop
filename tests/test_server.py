@@ -403,6 +403,74 @@ class TestToolsets:
             assert len(hits) == 1, f"{tool.name}: toolset tags {hits or 'MISSING'}"
 
     @pytest.mark.asyncio
+    async def test_every_ads_tool_carries_exactly_one_matching_ads_subset(self):
+        """ads:read / ads:write / ads:plan must cover every Ads tool, or a new
+        tool would fall out of all three (issue #56)."""
+        from adloop.server import ADS_SUBSETS, mcp
+
+        for tool in await mcp.list_tools():
+            tags = tool.tags or set()
+            subsets = tags & set(ADS_SUBSETS)
+            if "ads" in tags:
+                assert len(subsets) == 1, f"{tool.name}: ads subsets {subsets or 'MISSING'}"
+                writes = not (tool.annotations and tool.annotations.readOnlyHint)
+                assert ("ads:write" in subsets) == writes, f"{tool.name}: {subsets} vs readOnly"
+            else:
+                # Only the Ads/Analytics cross-checks borrow ads:read.
+                assert subsets <= {"ads:read"}, f"{tool.name}: {subsets}"
+                if subsets:
+                    assert "tracking" in tags, tool.name
+
+    @pytest.mark.asyncio
+    async def test_ads_read_selection_has_reports_and_cross_checks_but_no_writes(self, monkeypatch):
+        from adloop import server
+
+        monkeypatch.setenv("ADLOOP_TOOLSETS", "ads:read")
+        saved = list(server.mcp._transforms)
+        server._apply_toolsets_env()
+        try:
+            tools = {t.name: t for t in await server.mcp.list_tools()}
+            assert {"get_campaign_performance", "run_gaql", "attribution_check", "health_check", "confirm_and_apply"} <= set(tools)
+            assert "draft_campaign" not in tools
+            assert "discover_keywords" not in tools
+            assert "run_ga4_report" not in tools
+            writes = [n for n, t in tools.items() if not t.annotations.readOnlyHint and n != "confirm_and_apply"]
+            assert writes == []
+        finally:
+            server.mcp._transforms[:] = saved
+
+    @pytest.mark.asyncio
+    async def test_ads_write_brings_the_reads_along(self, monkeypatch):
+        from adloop import server
+
+        monkeypatch.setenv("ADLOOP_TOOLSETS", "ads:write")
+        saved = list(server.mcp._transforms)
+        server._apply_toolsets_env()
+        try:
+            names = {t.name for t in await server.mcp.list_tools()}
+            assert {"draft_campaign", "pause_entity", "get_campaign_performance"} <= names
+            assert "discover_keywords" not in names
+        finally:
+            server.mcp._transforms[:] = saved
+
+    @pytest.mark.asyncio
+    async def test_ads_plan_is_just_the_planning_tools_plus_core(self, monkeypatch):
+        from adloop import server
+
+        monkeypatch.setenv("ADLOOP_TOOLSETS", "ads:plan")
+        saved = list(server.mcp._transforms)
+        server._apply_toolsets_env()
+        try:
+            names = {t.name for t in await server.mcp.list_tools()}
+            assert {"discover_keywords", "estimate_budget"} <= names
+            assert "get_campaign_performance" not in names
+            assert names <= {"discover_keywords", "estimate_budget"} | {
+                t for t, tags in server._TOOL_TAGS.items() if "core" in tags
+            }
+        finally:
+            server.mcp._transforms[:] = saved
+
+    @pytest.mark.asyncio
     async def test_every_tool_keeps_the_title_its_decorator_set(self):
         """A stray @mcp.tool above another one registers the tool twice.
 

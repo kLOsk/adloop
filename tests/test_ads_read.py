@@ -851,7 +851,7 @@ class TestChangeHistoryRegistration:
 
         tool = {t.name: t for t in await mcp.list_tools()}["get_change_history"]
         assert tool.annotations.read_only_hint is True
-        assert set(tool.tags) == {"ads"}
+        assert set(tool.tags) - {"ads:read", "ads:write", "ads:plan"} == {"ads"}
         assert {
             "customer_id", "date_range_start", "date_range_end",
             "campaign_id", "resource_types", "limit",

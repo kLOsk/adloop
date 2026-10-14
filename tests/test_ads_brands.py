@@ -267,7 +267,7 @@ class TestBrandToolRegistration:
         for name in ("suggest_brands", "check_brand_names"):
             tool = tools[name]
             assert tool.annotations.readOnlyHint is True, name
-            assert set(tool.tags) == {"ads"}, name
+            assert set(tool.tags) - {"ads:read", "ads:write", "ads:plan"} == {"ads"}, name
 
     @pytest.mark.asyncio
     async def test_suggest_brands_exposes_customer_id_and_prefix(self):
@@ -851,7 +851,7 @@ class TestBrandListToolRegistration:
             assert tools[name].annotations.destructive_hint is True, name
 
         for name in read_only | writes | destructive:
-            assert set(tools[name].tags) == {"ads"}, name
+            assert set(tools[name].tags) - {"ads:read", "ads:write", "ads:plan"} == {"ads"}, name
 
     @pytest.mark.asyncio
     async def test_schema_documents_the_parameters_that_matter(self):

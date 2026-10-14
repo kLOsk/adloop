@@ -48,6 +48,18 @@ TOOLSETS: dict[str, str] = {
     "reddit": "Reddit Ads reads, writes, and planning",
 }
 
+# Finer selections inside "ads" (issue #56): every ads tool also carries
+# exactly one of these, derived in _tool() from its annotations, so "ads"
+# keeps its meaning and a smaller session can ask for just the part it
+# needs. The cross-reference tools that query Ads carry "ads:read" next to
+# their "tracking" tag. Not part of the Cloud contract above.
+ADS_SUBSETS: dict[str, str] = {
+    "ads:read": "Google Ads reports, GAQL and the Ads/Analytics cross-checks",
+    "ads:write": "Google Ads drafts and changes (turns on ads:read too)",
+    "ads:plan": "Keyword ideas and budget forecasts",
+}
+_ADS_PLAN_TOOLS = frozenset({"discover_keywords", "estimate_budget"})
+
 
 def _coerce_json_string_to_list(value):
     """Decode a JSON-array-shaped string into a native list.
@@ -387,17 +399,25 @@ def _tool(*, title: str, annotations: ToolAnnotations, tags: set[str], **kwargs)
             description = f"{description}\n\n{docs}"
         name = kwargs.get("name") or fn.__name__
         options = dict(kwargs)
+        tool_tags = set(tags)
+        if "ads" in tool_tags and not tool_tags & set(ADS_SUBSETS):
+            if name in _ADS_PLAN_TOOLS:
+                tool_tags.add("ads:plan")
+            elif annotations.read_only_hint:
+                tool_tags.add("ads:read")
+            else:
+                tool_tags.add("ads:write")
         if not annotations.read_only_hint and name not in _NO_CARD_TOOLS:
             # Write tools return a preview; apps with MCP Apps support
             # render it as the approval card.
             options["meta"] = {**(options.get("meta") or {}), "ui": {"resourceUri": CARD_URI}}
             fn = _with_approval_card(fn)
         if not is_app_only(options.get("meta")):
-            _TOOL_TAGS[name] = frozenset(tags)
+            _TOOL_TAGS[name] = frozenset(tool_tags)
         return mcp.tool(
             title=title,
             annotations=annotations,
-            tags=tags,
+            tags=tool_tags,
             description=description,
             **options,
         )(fn)
@@ -1739,7 +1759,7 @@ def get_change_history(
 @_tool(
     title="Campaign conversions against Analytics",
     annotations=_READONLY,
-    tags={"tracking"},
+    tags={"tracking", "ads:read"},
 )
 @_safe
 def analyze_campaign_conversions(
@@ -1780,7 +1800,7 @@ def analyze_campaign_conversions(
     )
 
 
-@_tool(title="Landing page analysis", annotations=_READONLY, tags={"tracking"})
+@_tool(title="Landing page analysis", annotations=_READONLY, tags={"tracking", "ads:read"})
 @_safe
 def landing_page_analysis(
     date_range_start: str = "",
@@ -1815,7 +1835,7 @@ def landing_page_analysis(
     )
 
 
-@_tool(title="Attribution check", annotations=_READONLY, tags={"tracking"})
+@_tool(title="Attribution check", annotations=_READONLY, tags={"tracking", "ads:read"})
 @_safe
 def attribution_check(
     date_range_start: str = "",
@@ -6475,18 +6495,24 @@ def _apply_toolsets_env() -> None:
 
     Unset/empty = the full catalog. Core tools (health_check,
     confirm_and_apply) survive every selection. A smaller tools/list costs
-    less context in MCP clients that load all tool schemas upfront.
+    less context in MCP clients that load all tool schemas upfront. Besides
+    the toolsets, the ads subsets (ads:read, ads:write, ads:plan) narrow
+    Google Ads further; ads:write brings ads:read along, because a draft
+    needs the reads first (IDs, bidding strategy).
     """
     raw = _os.getenv("ADLOOP_TOOLSETS", "").strip()
     if not raw:
         return
     requested = {part.strip().lower() for part in raw.split(",") if part.strip()}
-    unknown = sorted(requested - set(TOOLSETS))
+    unknown = sorted(requested - set(TOOLSETS) - set(ADS_SUBSETS))
     if unknown:
         raise ValueError(
             f"ADLOOP_TOOLSETS names unknown toolset(s): {', '.join(unknown)}. "
-            f"Valid toolsets: {', '.join(TOOLSETS)}. Example: ADLOOP_TOOLSETS=ads,ga4"
+            f"Valid toolsets: {', '.join([*TOOLSETS, *ADS_SUBSETS])}. "
+            "Example: ADLOOP_TOOLSETS=ads,ga4 or ADLOOP_TOOLSETS=ads:read,ga4"
         )
+    if "ads:write" in requested:
+        requested.add("ads:read")
     global _ENABLED_TAGS
     _ENABLED_TAGS = requested | {"core"}
     mcp.enable(tags=_ENABLED_TAGS, only=True)

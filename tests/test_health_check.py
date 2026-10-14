@@ -103,7 +103,7 @@ def test_offered_tools_follow_the_runtime_visibility_hook():
     assert "run_ga4_report" in names and "health_check" in names
     assert "get_campaign_performance" not in names
     # The hook gets every enabled tool with its tags.
-    assert seen["get_campaign_performance"] == frozenset({"ads"})
+    assert seen["get_campaign_performance"] == frozenset({"ads", "ads:read"})
 
 
 def test_offered_tools_respect_adloop_toolsets(monkeypatch):

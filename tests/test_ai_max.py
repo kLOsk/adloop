@@ -869,7 +869,7 @@ class TestAiMaxToolRegistration:
             assert tools[name].annotations.destructive_hint is False, name
         for name in ("get_ai_max_settings", "draft_ai_max_settings",
                      "draft_prepare_brand_exclusions"):
-            assert set(tools[name].tags) == {"ads"}, name
+            assert set(tools[name].tags) - {"ads:read", "ads:write", "ads:plan"} == {"ads"}, name
 
     @pytest.mark.asyncio
     async def test_schema_documents_the_parameters(self):
