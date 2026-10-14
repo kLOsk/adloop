@@ -78,9 +78,9 @@ async def test_apps_without_cards_keep_the_chat_flow():
         )
         assert applied.structured_content.get("status") != "APPROVE_ON_CARD"
 
-        refused = await client.call_tool(APPROVE_TOOL, {"plan_id": "x", "code": "y"}, raise_on_error=False)
-        assert refused.is_error
-        assert "approval card" in refused.content[0].text
+        # Not listed, and without a card's code a call does nothing.
+        refused = await client.call_tool(APPROVE_TOOL, {"plan_id": preview["plan_id"], "code": "y"}, raise_on_error=False)
+        assert "does not match" in refused.structured_content["error"]
 
 
 async def test_card_apps_get_the_code_only_in_meta_and_the_model_cannot_apply():
@@ -116,6 +116,20 @@ async def test_chat_approval_switch_lets_the_model_apply_again(tmp_path):
             "confirm_and_apply", {"plan_id": plan_id, "dry_run": False}, raise_on_error=False
         )
     assert applied.structured_content.get("status") != "APPROVE_ON_CARD"
+
+
+async def test_a_card_click_without_the_extension_declaration_still_works():
+    """The Claude iOS app sends the card's click without declaring MCP Apps.
+    The click carries the card's code, which is what authorises it."""
+    async with Client(server.mcp, extensions=CARDS) as card_app:
+        plan_id, code, _ = await _draft(card_app)
+    async with Client(server.mcp) as same_app_without_declaration:
+        tested = await same_app_without_declaration.call_tool(
+            APPROVE_TOOL, {"plan_id": plan_id, "code": code, "action": "test"}, raise_on_error=False
+        )
+    assert not tested.is_error
+    assert "does not match" not in str(tested.structured_content)
+    assert "only be called" not in str(tested.content)
 
 
 async def test_the_card_needs_the_matching_code():

@@ -252,11 +252,18 @@ _APP_ONLY_TOOLS = {
 
 
 class _AppOnlyToolsForCardClients(Middleware):
-    """List and run app-only tools only for apps that render cards.
+    """List app-only tools only to apps that render cards.
 
     The MCP Apps spec makes a card-capable app hide app-only tools from its
     model. An app without the extension knows nothing about that rule and
     would hand them to its model, so they are not offered to it at all.
+
+    Calls are a different matter. Some apps send a card's own click without
+    the extension declaration (the Claude iOS app does), so refusing every
+    call from an "app without cards" breaks the card itself. approve_change
+    needs no such check: it only acts on the plan's one-time code, which
+    goes to the card and never into the model's context. The upload card's
+    tool has no code of its own and keeps the check.
     """
 
     async def on_list_tools(self, context, call_next):
@@ -267,7 +274,7 @@ class _AppOnlyToolsForCardClients(Middleware):
 
     async def on_call_tool(self, context, call_next):
         card = _APP_ONLY_TOOLS.get(context.message.name)
-        if card and not client_shows_cards():
+        if card and context.message.name != APPROVE_TOOL and not client_shows_cards():
             from fastmcp.exceptions import ToolError
 
             raise ToolError(f"{context.message.name} can only be called from the {card}.")
