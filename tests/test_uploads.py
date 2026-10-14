@@ -141,7 +141,7 @@ class TestTools:
                 "store_image_upload", {"name": "hero.png", "data_base64": image, "code": code}, raise_on_error=False
             )
             forged = await same_app_without_declaration.call_tool(
-                "store_image_upload", {"name": "hero.png", "data_base64": image, "code": code[:-1] + "0"}, raise_on_error=False
+                "store_image_upload", {"name": "hero.png", "data_base64": image, "code": code[:-1] + ("1" if code[-1] == "0" else "0")}, raise_on_error=False
             )
             expired = await same_app_without_declaration.call_tool(
                 "store_image_upload",
