@@ -820,7 +820,7 @@ class TestHeadlineDescriptionValidation:
         )
         assert result["error"] == "Validation failed"
         assert any(
-            "At most 2 headlines may pin to HEADLINE_1" in d
+            "HEADLINE_2, HEADLINE_3 without enough headlines" in d
             for d in result["details"]
         )
 
@@ -890,7 +890,7 @@ class TestHeadlineDescriptionValidation:
         )
         assert result["error"] == "Validation failed"
         assert any(
-            "At most 1 description may pin to DESCRIPTION_1" in d
+            "DESCRIPTION_2 without enough descriptions" in d
             for d in result["details"]
         )
 

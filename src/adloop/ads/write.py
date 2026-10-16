@@ -550,9 +550,10 @@ def draft_responsive_search_ad(
         headlines:    HEADLINE_1, HEADLINE_2, HEADLINE_3
         descriptions: DESCRIPTION_1, DESCRIPTION_2
 
-    Google caps: at most 2 headlines per pin slot, at most 1 description per
-    pin slot. Mixed plain-string and dict entries are allowed within a single
-    call (e.g. brand pinned to HEADLINE_1, the rest unpinned).
+    Several assets may pin to the same position (Google rotates them there),
+    as long as every position stays fillable: by an asset pinned to it or by
+    a distinct unpinned asset. Mixed plain-string and dict entries are allowed
+    within a single call (e.g. brand pinned to HEADLINE_1, the rest unpinned).
     """
     from adloop.safety.guards import SafetyViolation, check_blocked_operation
     from adloop.safety.preview import ChangePlan, store_plan
@@ -2055,12 +2056,19 @@ def remove_entity(
     if entity_type in ("campaign_asset", "customer_asset"):
         entity_id = entity_id.replace(",", "~")
 
+    names, not_found = _describe_target(config, customer_id, entity_type, entity_id)
+    if not_found:
+        return {"error": not_found}
+
     plan = ChangePlan(
         operation="remove_entity",
         entity_type=entity_type,
         entity_id=entity_id,
         customer_id=customer_id,
-        changes={"action": "REMOVE"},
+        changes={"action": "REMOVE", **names, **(
+            {"warnings": ["This entity is already REMOVED; applying changes nothing."]}
+            if names.get("current_status") == "REMOVED" else {}
+        )},
         # Removal is irreversible; the preview asks for a second explicit
         # confirmation, as Reddit removals already did.
         requires_double_confirm=True,
@@ -3457,7 +3465,6 @@ def _validate_rsa_assets(
         if len(descriptions) > 4:
             errors.append(f"Maximum 4 descriptions, got {len(descriptions)}")
 
-    headline_pin_counts: dict[str, int] = {}
     for i, h in enumerate(headlines):
         text = h["text"]
         pin = h["pinned_field"]
@@ -3472,13 +3479,8 @@ def _validate_rsa_assets(
                     f"Headline {i + 1} pinned_field '{pin}' invalid; "
                     f"must be one of {sorted(_VALID_HEADLINE_PINS)} or null"
                 )
-            else:
-                headline_pin_counts[pin] = headline_pin_counts.get(pin, 0) + 1
-    for pin, count in headline_pin_counts.items():
-        if count > 2:
-            errors.append(f"At most 2 headlines may pin to {pin}; got {count}")
+    errors.extend(_pin_fill_errors("headline", headlines, _VALID_HEADLINE_PINS))
 
-    description_pin_counts: dict[str, int] = {}
     for i, d in enumerate(descriptions):
         text = d["text"]
         pin = d["pinned_field"]
@@ -3493,13 +3495,35 @@ def _validate_rsa_assets(
                     f"Description {i + 1} pinned_field '{pin}' invalid; "
                     f"must be one of {sorted(_VALID_DESCRIPTION_PINS)} or null"
                 )
-            else:
-                description_pin_counts[pin] = description_pin_counts.get(pin, 0) + 1
-    for pin, count in description_pin_counts.items():
-        if count > 1:
-            errors.append(f"At most 1 description may pin to {pin}; got {count}")
+    errors.extend(_pin_fill_errors("description", descriptions, _VALID_DESCRIPTION_PINS))
 
     return errors
+
+
+def _pin_fill_errors(kind: str, assets: list[dict], positions: set[str]) -> list[str]:
+    """Google's pinning rule: every position must be fillable, either by an
+    asset pinned to it or by a distinct unpinned asset.
+
+    Google sets no cap on how many assets pin to one position (they rotate
+    there), so several headlines pinned to HEADLINE_1 are fine as long as the
+    other positions can still be filled. Breaking the rule fails at Google with
+    NOT_ENOUGH_AVAILABLE_ASSET_LINKS_FOR_VALID_COMBINATION.
+    """
+    if not assets:
+        return []
+    pinned = {a["pinned_field"] for a in assets if a.get("pinned_field") in positions}
+    if not pinned:
+        return []
+    empty = sorted(positions - pinned)
+    unpinned = sum(1 for a in assets if not a.get("pinned_field"))
+    if unpinned >= len(empty):
+        return []
+    return [
+        f"Pinning leaves {', '.join(empty)} without enough {kind}s: "
+        f"{len(empty)} position(s) have no pinned {kind} and need one distinct "
+        f"unpinned {kind} each, but only {unpinned} {kind}(s) are unpinned. "
+        f"Unpin a {kind}, add more unpinned ones, or pin one to each empty position."
+    ]
 
 
 def _validate_rsa(
@@ -3815,6 +3839,98 @@ def _preflight_ad_group_checks(
     return errors, warnings
 
 
+# What the preview of a pause, enable or remove names besides the IDs:
+# (query resource, id fields, name field, extra fields) per entity type. The
+# names reach the approval card and the confirmation dialog, where an ID alone
+# is hard to check, and a lookup that finds nothing exposes a mistyped ID.
+_TARGET_LOOKUPS: dict[str, tuple[str, tuple[str, ...], str, dict[str, str]]] = {
+    "campaign": ("campaign", ("campaign.id",), "campaign.name",
+                 {"current_status": "campaign.status"}),
+    "ad_group": ("ad_group", ("ad_group.id",), "ad_group.name",
+                 {"campaign_name": "campaign.name", "current_status": "ad_group.status"}),
+    "ad": ("ad_group_ad", ("ad_group_ad.ad.id",), "ad_group_ad.ad.name",
+           {"ad_group_name": "ad_group.name", "campaign_name": "campaign.name",
+            "current_status": "ad_group_ad.status"}),
+    "keyword": ("ad_group_criterion", ("ad_group.id", "ad_group_criterion.criterion_id"),
+                "ad_group_criterion.keyword.text",
+                {"match_type": "ad_group_criterion.keyword.match_type",
+                 "ad_group_name": "ad_group.name", "campaign_name": "campaign.name",
+                 "current_status": "ad_group_criterion.status"}),
+    "asset_group": ("asset_group", ("asset_group.id",), "asset_group.name",
+                    {"campaign_name": "campaign.name", "current_status": "asset_group.status"}),
+    "negative_keyword": ("campaign_criterion", ("campaign.id", "campaign_criterion.criterion_id"),
+                         "campaign_criterion.keyword.text", {"campaign_name": "campaign.name"}),
+    "campaign_criterion": ("campaign_criterion", ("campaign.id", "campaign_criterion.criterion_id"),
+                           "campaign_criterion.type", {"campaign_name": "campaign.name"}),
+    "ad_group_criterion": ("ad_group_criterion", ("ad_group.id", "ad_group_criterion.criterion_id"),
+                           "ad_group_criterion.type",
+                           {"ad_group_name": "ad_group.name", "campaign_name": "campaign.name"}),
+}
+
+
+def _format_customer(customer_id: object) -> str:
+    digits = str(customer_id or "").replace("-", "")
+    return f"{digits[:3]}-{digits[3:6]}-{digits[6:]}" if len(digits) == 10 else digits
+
+
+def _describe_target(
+    config: AdLoopConfig, customer_id: str, entity_type: str, entity_id: str
+) -> tuple[dict, str | None]:
+    """Names for a status change or removal preview: ``({names}, error)``.
+
+    One GAQL query reads the account name and, for the entity types above,
+    the entity's name, its campaign or ad group and its current status. A
+    failed lookup (API error, an ID format this does not know) returns no
+    names and no error, so the preview falls back to the IDs. A lookup that
+    succeeds but finds no such entity returns an error: the ID is wrong.
+    """
+    from adloop.ads.gaql import execute_query
+
+    spec = _TARGET_LOOKUPS.get(entity_type)
+    parts = entity_id.split("~")
+    if entity_type == "ad" and len(parts) == 2:
+        parts = parts[1:]  # adGroupId~adId: the ad id alone identifies it
+    if spec and (len(parts) != len(spec[1]) or not all(p.isdigit() for p in parts)):
+        spec = None
+    try:
+        if spec:
+            resource, id_fields, name_field, extra = spec
+            fields = ["customer.descriptive_name", "customer.id", name_field, *extra.values()]
+            where = " AND ".join(f"{f} = {v}" for f, v in zip(id_fields, parts))
+            rows = execute_query(
+                config, customer_id,
+                f"SELECT {', '.join(fields)} FROM {resource} WHERE {where} LIMIT 1",
+            )
+        else:
+            rows = execute_query(
+                config, customer_id, "SELECT customer.descriptive_name, customer.id FROM customer LIMIT 1"
+            )
+    except Exception:
+        return {}, None
+    if not rows:
+        if spec:
+            return {}, (
+                f"No {entity_type.replace('_', ' ')} with ID {entity_id} in account "
+                f"{_format_customer(customer_id) or 'the default account'}. Check the ID "
+                "with a read tool (get_campaign_performance, get_ad_performance, ...)."
+            )
+        return {}, None
+    row = rows[0]
+    names: dict = {}
+    account = row.get("customer.descriptive_name") or ""
+    cid = _format_customer(row.get("customer.id"))
+    if account or cid:
+        names["account"] = f"{account} ({cid})" if account and cid else account or cid
+    if spec:
+        name = row.get(spec[2])
+        if name:
+            names["entity_name"] = str(name)
+        for key, field_name in spec[3].items():
+            if row.get(field_name) not in (None, ""):
+                names[key] = str(row[field_name])
+    return names, None
+
+
 def _draft_status_change(
     config: AdLoopConfig,
     operation: str,
@@ -3841,12 +3957,21 @@ def _draft_status_change(
     if errors:
         return {"error": "Validation failed", "details": errors}
 
+    names, not_found = _describe_target(config, customer_id, entity_type, entity_id)
+    if not_found:
+        return {"error": not_found}
+    changes: dict = {"target_status": target_status, **names}
+    if names.get("current_status") == target_status:
+        changes["warnings"] = [
+            f"This {entity_type.replace('_', ' ')} is already {target_status}; applying changes nothing."
+        ]
+
     plan = ChangePlan(
         operation=operation,
         entity_type=entity_type,
         entity_id=entity_id,
         customer_id=customer_id,
-        changes={"target_status": target_status},
+        changes=changes,
     )
     store_plan(plan)
     return plan.to_preview()

@@ -203,15 +203,25 @@
     const p = plan.preview;
     $("platform").textContent = PLATFORMS[platformOf(p)];
     $("title").textContent = humanize(p.operation);
+    // Names resolved at draft time (pause, enable, remove) sit in changes;
+    // the IDs stay visible next to them, and the card falls back to IDs.
+    const ch = p.changes || {};
     const sub = [];
-    if (p.entity_type) sub.push(String(p.entity_type).replace(/_/g, " ") + (p.entity_id ? " " + p.entity_id : ""));
-    if (p.customer_id) sub.push(String(p.customer_id));
+    if (p.entity_type) {
+      let target = String(p.entity_type).replace(/_/g, " ");
+      if (ch.entity_name) target += " \u201c" + ch.entity_name + "\u201d" + (p.entity_id ? " (" + p.entity_id + ")" : "");
+      else if (p.entity_id) target += " " + p.entity_id;
+      sub.push(target);
+    }
+    if (ch.account) sub.push(String(ch.account));
+    else if (p.customer_id) sub.push(String(p.customer_id));
     sub.push("plan " + plan.planId);
     $("subtitle").textContent = sub.join(" · ");
 
     const dl = $("changes");
     dl.replaceChildren();
-    const entries = Object.entries(p.changes || {});
+    const SHOWN_ELSEWHERE = new Set(["account", "entity_name", "warnings"]);
+    const entries = Object.entries(ch).filter(([k]) => !SHOWN_ELSEWHERE.has(k));
     entries.slice(0, MAX_ROWS).forEach(([k, v]) => row(dl, k, v));
     if (entries.length > MAX_ROWS) {
       const more = document.createElement("div");

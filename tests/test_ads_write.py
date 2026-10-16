@@ -2224,7 +2224,7 @@ class TestValidateRsaPinning:
             self._ds("d1", "d2"),
             "https://example.com/",
         )
-        assert any("At most 2 headlines may pin to HEADLINE_1" in e for e in errs)
+        assert any("HEADLINE_2, HEADLINE_3 without enough headlines" in e for e in errs)
 
     def test_rejects_two_descriptions_pinned_to_same_slot(self):
         errs = write._validate_rsa(
@@ -2237,17 +2237,61 @@ class TestValidateRsaPinning:
             "https://example.com/",
         )
         assert any(
-            "At most 1 description may pin to DESCRIPTION_1" in e for e in errs
+            "DESCRIPTION_2 without enough descriptions" in e for e in errs
         )
 
+    def test_many_headlines_pinned_to_one_slot_with_unpinned_rest_is_allowed(self):
+        # Google sets no per-position cap (issue #102): four keyword headlines
+        # on HEADLINE_1 rotate there while the unpinned rest fills 2 and 3.
+        errs = write._validate_rsa(
+            "123",
+            self._hs(
+                *[{"text": f"Keyword {i}", "pinned_field": "HEADLINE_1"} for i in range(4)],
+                *[f"Benefit {i}" for i in range(11)],
+            ),
+            self._ds(
+                {"text": "d1", "pinned_field": "DESCRIPTION_1"},
+                {"text": "d2", "pinned_field": "DESCRIPTION_1"},
+                "d3",
+            ),
+            "https://example.com/",
+        )
+        assert errs == []
+
+    def test_pins_need_a_distinct_unpinned_asset_per_empty_position(self):
+        errs = write._validate_rsa(
+            "123",
+            self._hs(
+                {"text": "Brand A", "pinned_field": "HEADLINE_1"},
+                {"text": "Brand B", "pinned_field": "HEADLINE_1"},
+                "only one unpinned",
+            ),
+            self._ds("d1", "d2"),
+            "https://example.com/",
+        )
+        assert any("only 1 headline(s) are unpinned" in e for e in errs)
+        ok = write._validate_rsa(
+            "123",
+            self._hs(
+                {"text": "Brand A", "pinned_field": "HEADLINE_1"},
+                {"text": "Brand B", "pinned_field": "HEADLINE_1"},
+                {"text": "Offer", "pinned_field": "HEADLINE_2"},
+                "unpinned",
+            ),
+            self._ds("d1", "d2"),
+            "https://example.com/",
+        )
+        assert ok == []
+
     def test_two_headlines_pinned_to_same_slot_is_allowed(self):
-        # Google permits up to 2 per pin slot
+        # Several pins may share a position; the unpinned rest fills 2 and 3.
         errs = write._validate_rsa(
             "123",
             self._hs(
                 {"text": "Brand A", "pinned_field": "HEADLINE_1"},
                 {"text": "Brand B", "pinned_field": "HEADLINE_1"},
                 "x",
+                "y",
             ),
             self._ds("d1", "d2"),
             "https://example.com/",

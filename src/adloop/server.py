@@ -3406,10 +3406,11 @@ def draft_responsive_search_ad(
 
     The preview shows exactly what will be created; confirm_and_apply executes
     the returned plan_id. The ad is created PAUSED. final_url is checked for
-    reachability first and an unreachable URL is refused. Google caps: at most
-    2 headlines per pin slot, at most 1 description per pin slot. Mixed
-    plain-string and dict entries are allowed within a single call (e.g. brand
-    pinned to HEADLINE_1, the rest unpinned). Warnings note fewer than 8
+    reachability first and an unreachable URL is refused. Several headlines
+    may pin to the same position (Google rotates them there) as long as every
+    position stays fillable, by an asset pinned to it or by a distinct
+    unpinned one. Mixed plain-string and dict entries are allowed within a
+    single call (e.g. brand pinned to HEADLINE_1, the rest unpinned). Warnings note fewer than 8
     headlines or 3 descriptions.
 
     Args:
@@ -3483,15 +3484,15 @@ def update_responsive_search_ad(
             uses the configured default account.
         headlines: LIST-REPLACE: None or [] means no change; a non-empty list
             fully swaps in for the existing headlines. Google's RSA constraints
-            apply: 3-15 headlines, max 30 chars each, at most 2 per pin slot.
+            apply: 3-15 headlines, max 30 chars each, every pin position fillable.
             Each entry is a plain string (unpinned) or {"text": "...",
             "pinned_field": "HEADLINE_1"} (HEADLINE_1-3). Insertion tags such as
             {KeyWord:Clogged Drain Service} count as their default text, which
             is required.
         descriptions: LIST-REPLACE: None or [] means no change; a non-empty list
-            fully swaps in. 2-4 descriptions, max 90 chars each, at most 1 per
-            pin slot (DESCRIPTION_1, DESCRIPTION_2). Same entry format and
-            insertion-tag counting as headlines.
+            fully swaps in. 2-4 descriptions, max 90 chars each, pins to
+            DESCRIPTION_1 or DESCRIPTION_2 with every position fillable. Same
+            entry format and insertion-tag counting as headlines.
         final_url: Empty means no change; non-empty replaces the final URL and
             is checked for reachability.
         path1: Empty means no change; non-empty sets the first display path
