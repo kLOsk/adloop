@@ -40,6 +40,7 @@ class FakeGTM:
         self.workspaces_list = [{"workspaceId": WS, "name": "Default Workspace"}]
         self.tags: dict[str, dict] = {}
         self.triggers: dict[str, dict] = {}
+        self.variables: dict[str, dict] = {}
         self.status: dict = {"workspaceChange": []}
         self.create_version_response: dict = {
             "containerVersion": {
@@ -144,6 +145,9 @@ class _Workspaces:
 
     def triggers(self):
         return _Entities(self.f, self.f.triggers, "trigger")
+
+    def variables(self):
+        return _Entities(self.f, self.f.variables, "variable")
 
 
 class _Entities:
@@ -656,8 +660,8 @@ class TestDelete:
         from adloop.gtm.write import draft_delete_gtm_entity
 
         result = draft_delete_gtm_entity(_config(tmp_path), **_ids(),
-                                         entity_type="variable", entity_id="1")
-        assert "tag' or 'trigger" in result["error"]
+                                         entity_type="folder", entity_id="1")
+        assert "'tag', 'trigger' or 'variable'" in result["error"]
 
 
 # ---------------------------------------------------------------------------
@@ -1210,3 +1214,116 @@ class TestServerRegistration:
         payload = result.structured_content
         assert payload["status"] == "PENDING_CONFIRMATION", payload
         assert payload["changes"]["tag"]["firingTriggerId"] == ["2147479553"]
+
+
+# ---------------------------------------------------------------------------
+# Variables
+# ---------------------------------------------------------------------------
+
+
+class TestVariables:
+    def test_data_layer_variable_from_the_shortcut(self, tmp_path, fake):
+        from adloop.gtm.write import draft_gtm_variable
+
+        cfg = _config(tmp_path)
+        preview = draft_gtm_variable(cfg, **_ids(), name="DLV - ecommerce.value", variable_type="v",
+                                     data_layer_key="ecommerce.value", default_value="0")
+        body = preview["changes"]["variable"]
+        assert body["type"] == "v"
+        assert {"type": "TEMPLATE", "key": "name", "value": "ecommerce.value"} in body["parameter"]
+        assert {"type": "INTEGER", "key": "dataLayerVersion", "value": "2"} in body["parameter"]
+        assert {"type": "TEMPLATE", "key": "defaultValue", "value": "0"} in body["parameter"]
+        assert any("{{DLV - ecommerce.value}}" in w for w in preview["warnings"])
+
+        result = _apply(cfg, preview["plan_id"])
+        assert result["status"] == "APPLIED"
+        assert fake.calls[-1][0] == "create_variable"
+        assert fake.variables["100"]["name"] == "DLV - ecommerce.value"
+
+    def test_create_validation(self, tmp_path, fake):
+        from adloop.gtm.write import draft_gtm_variable
+
+        cfg = _config(tmp_path)
+        assert "data_layer_key is required" in str(draft_gtm_variable(cfg, **_ids(), name="X", variable_type="v"))
+        assert "invalid" in str(draft_gtm_variable(cfg, **_ids(), name="X", variable_type="nope"))
+        assert "only apply to Data Layer" in str(draft_gtm_variable(cfg, **_ids(), name="X", variable_type="c", data_layer_key="a"))
+        assert "curly" in str(draft_gtm_variable(cfg, **_ids(), name="{{X}}", variable_type="c"))
+        fake.variables["5"] = {"variableId": "5", "name": "Taken", "type": "c", "fingerprint": "f1"}
+        assert "already exists" in draft_gtm_variable(cfg, **_ids(), name="Taken", variable_type="c")["error"]
+
+    def test_custom_javascript_variables_are_gated(self, tmp_path, fake):
+        from adloop.gtm.write import draft_gtm_variable
+
+        refused = draft_gtm_variable(_config(tmp_path), **_ids(), name="JS", variable_type="jsm",
+                                     parameters=[{"type": "TEMPLATE", "key": "javascript", "value": "function(){return 1}"}])
+        assert refused["gate"] == "gtm.allow_custom_html"
+        allowed = draft_gtm_variable(_config(tmp_path, html=True), **_ids(), name="JS", variable_type="jsm",
+                                     parameters=[{"type": "TEMPLATE", "key": "javascript", "value": "function(){return 1}"}])
+        assert allowed["status"] == "PENDING_CONFIRMATION"
+        # The gate is re-checked at apply: switching it off in between blocks.
+        result = _apply(_config(tmp_path), allowed["plan_id"])
+        assert "Custom HTML" in str(result) or "arbitrary JavaScript" in str(result)
+        assert not fake.variables
+
+    def test_update_merges_parameters_and_pins_the_fingerprint(self, tmp_path, fake):
+        from adloop.gtm.write import draft_gtm_variable
+
+        cfg = _config(tmp_path)
+        fake.variables["7"] = {"variableId": "7", "name": "DLV - value", "type": "v", "fingerprint": "f1",
+                               "parentFolderId": "3",
+                               "parameter": [{"type": "INTEGER", "key": "dataLayerVersion", "value": "2"},
+                                             {"type": "TEMPLATE", "key": "name", "value": "value"}]}
+        preview = draft_gtm_variable(cfg, **_ids(), variable_id="7", data_layer_key="ecommerce.value")
+        assert preview["changes"]["patch"]["parameter"][1]["value"] == "ecommerce.value"
+        assert preview["changes"]["fingerprint"] == "f1"
+
+        result = _apply(cfg, preview["plan_id"])
+        assert result["status"] == "APPLIED"
+        _op, _path, body, fingerprint = fake.calls[-1]
+        assert fingerprint == "f1" and body["parentFolderId"] == "3"
+
+        assert "No changes" in draft_gtm_variable(cfg, **_ids(), variable_id="7", data_layer_key="ecommerce.value")["error"]
+        assert "cannot be changed" in str(draft_gtm_variable(cfg, **_ids(), variable_id="7", variable_type="c"))
+
+    def test_renaming_a_referenced_variable_is_refused(self, tmp_path, fake):
+        from adloop.gtm.write import draft_gtm_variable
+
+        fake.variables["7"] = {"variableId": "7", "name": "DLV - value", "type": "v", "fingerprint": "f1", "parameter": []}
+        fake.tags["1"] = {"tagId": "1", "name": "GA4 purchase", "type": "gaawe",
+                          "parameter": [{"type": "TEMPLATE", "key": "value", "value": "{{DLV - value}}"}]}
+        refused = draft_gtm_variable(_config(tmp_path), **_ids(), variable_id="7", name="DLV - revenue")
+        assert "Rename it in the GTM UI" in refused["error"]
+        assert refused["referenced_by"] == [{"kind": "tag", "id": "1", "name": "GA4 purchase"}]
+
+    def test_deleting_a_variable_checks_references(self, tmp_path, fake):
+        from adloop.gtm.write import draft_delete_gtm_entity
+
+        cfg = _config(tmp_path)
+        fake.variables["7"] = {"variableId": "7", "name": "DLV - value", "type": "v", "fingerprint": "f1", "parameter": []}
+        fake.triggers["2"] = {"triggerId": "2", "name": "High value", "type": "customEvent",
+                              "filter": [{"type": "GREATER", "parameter": [{"key": "arg0", "value": "{{DLV - value}}"}]}]}
+        refused = draft_delete_gtm_entity(cfg, **_ids(), entity_type="variable", entity_id="7")
+        assert refused["referenced_by"][0]["kind"] == "trigger"
+
+        fake.triggers.clear()
+        preview = draft_delete_gtm_entity(cfg, **_ids(), entity_type="variable", entity_id="7")
+        assert preview["requires_double_confirm"] is True
+        result = _apply(cfg, preview["plan_id"])
+        assert result["status"] == "APPLIED" and "7" not in fake.variables
+
+
+
+def test_publish_and_rollback_gates_also_catch_custom_javascript_variables():
+    from adloop.gtm.write import _custom_html_changes, _custom_html_in_diff, _custom_html_pending_changes
+
+    status = {"workspaceChange": [
+        {"changeStatus": "added", "variable": {"variableId": "9", "name": "JS calc", "type": "jsm"}},
+        {"changeStatus": "added", "variable": {"variableId": "10", "name": "DLV", "type": "v"}},
+        {"changeStatus": "deleted", "variable": {"variableId": "11", "name": "Old JS", "type": "jsm"}},
+    ]}
+    assert _custom_html_changes(status) == [{"variable_id": "9", "name": "JS calc", "change_status": "added"}]
+    pending = [{"entity_kind": "variable", "entity_id": "9", "name": "JS calc", "type": "jsm", "change_status": "added"},
+               {"entity_kind": "variable", "entity_id": "11", "name": "Old JS", "type": "jsm", "change_status": "deleted"}]
+    assert [c["id"] for c in _custom_html_pending_changes(pending)] == ["9"]
+    diff = {"variables": {"added": [{"id": "9", "name": "JS calc", "type": "jsm"}], "removed": [{"id": "11", "type": "jsm"}]}}
+    assert _custom_html_in_diff(diff) == [{"variable_id": "9", "name": "JS calc", "change_status": "added"}]

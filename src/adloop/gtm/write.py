@@ -18,10 +18,10 @@ Three gates sit on top of that, all enforced here rather than advised:
   every page they fire on. Creating or editing one, or publishing a
   workspace (or rolling back to a version) that adds or changes one, is
   refused unless this is on. Pausing
-  or deleting one is always allowed (both reduce what runs). The gate matches
-  the tag type ``html``: a Custom JavaScript variable or a custom template
-  tag (``cvt_…``), which can inject a script, is not covered and has to be
-  reviewed in the GTM UI.
+  or deleting one is always allowed (both reduce what runs). Creating or
+  editing a Custom JavaScript variable (``jsm``) is gated the same way. A
+  custom template (``cvt_…``), which runs sandboxed code, is not covered
+  and has to be reviewed in the GTM UI.
 * Concurrency — every update/delete pins the entity fingerprint read at draft
   time, and publish pins a digest of the workspace's pending changes. A
   rollback pins the live version it replaces and the target's fingerprint. If
@@ -77,6 +77,25 @@ KNOWN_TRIGGER_TYPES = {
     "youTubeVideo", "historyChange", "timer", "jsError",
     "triggerGroup",
 }
+
+# GTM API variable type values the draft accepts. Custom templates use
+# ``cvt_<id>`` like tags. ``jsm`` (Custom JavaScript) runs code on the site
+# and is gated by gtm.allow_custom_html.
+KNOWN_VARIABLE_TYPES: dict[str, str] = {
+    "v": "Data Layer Variable",
+    "c": "Constant",
+    "u": "URL",
+    "k": "1st-Party Cookie",
+    "j": "JavaScript Variable (reads a global, runs no code)",
+    "aev": "Auto-Event Variable",
+    "d": "DOM Element",
+    "f": "HTTP Referrer",
+    "e": "Custom Event",
+    "smm": "Lookup Table",
+    "remm": "RegEx Table",
+    "jsm": "Custom JavaScript (gated by gtm.allow_custom_html)",
+}
+CUSTOM_JAVASCRIPT = "jsm"
 
 # Trigger request fields the draft tool can set, keyed by the tool's
 # snake_case argument name.
@@ -314,25 +333,29 @@ def _summarize_changes(status: dict) -> list[dict]:
 
 
 def _custom_html_changes(status: dict) -> list[dict]:
-    """Custom HTML tags the publish would add or change (deletes are fine)."""
-    return [
-        {"tag_id": c["tag"].get("tagId"), "name": c["tag"].get("name"),
-         "change_status": c.get("changeStatus")}
-        for c in status.get("workspaceChange", []) or []
-        if "tag" in c
-        and c["tag"].get("type") == CUSTOM_HTML
-        and c.get("changeStatus") != "deleted"
-    ]
+    """Custom HTML tags and Custom JavaScript variables the publish would add
+    or change (deletes are fine)."""
+    out = []
+    for c in status.get("workspaceChange", []) or []:
+        if c.get("changeStatus") == "deleted":
+            continue
+        if "tag" in c and c["tag"].get("type") == CUSTOM_HTML:
+            out.append({"tag_id": c["tag"].get("tagId"), "name": c["tag"].get("name"),
+                        "change_status": c.get("changeStatus")})
+        elif "variable" in c and c["variable"].get("type") == CUSTOM_JAVASCRIPT:
+            out.append({"variable_id": c["variable"].get("variableId"), "name": c["variable"].get("name"),
+                        "change_status": c.get("changeStatus")})
+    return out
 
 
 def _custom_html_pending_changes(pending: list[dict]) -> list[dict]:
     """The same check against a stored preview's summarized pending changes."""
     return [
-        {"tag_id": c.get("entity_id"), "name": c.get("name"),
+        {"entity_kind": c.get("entity_kind"), "id": c.get("entity_id"), "name": c.get("name"),
          "change_status": c.get("change_status")}
         for c in pending
-        if c.get("entity_kind") == "tag"
-        and c.get("type") == CUSTOM_HTML
+        if ((c.get("entity_kind") == "tag" and c.get("type") == CUSTOM_HTML)
+            or (c.get("entity_kind") == "variable" and c.get("type") == CUSTOM_JAVASCRIPT))
         and c.get("change_status") != "deleted"
     ]
 
@@ -610,6 +633,152 @@ def draft_gtm_trigger(
     return _store(operation, "gtm_trigger", trigger_id, changes, warnings=warnings)
 
 
+def _variable_references(ws, ws_path: str, name: str, *, skip_variable_id: str = "") -> list[dict]:
+    """Tags, triggers and variables whose fields mention {{name}}."""
+    if not name:
+        return []
+    needle = "{{" + name + "}}"
+    found = []
+    for kind, method, id_field in (("tag", ws.tags, "tagId"), ("trigger", ws.triggers, "triggerId"),
+                                   ("variable", ws.variables, "variableId")):
+        for entity in method().list(parent=ws_path).execute().get(kind, []) or []:
+            if kind == "variable" and str(entity.get(id_field)) == skip_variable_id:
+                continue
+            if needle in json.dumps(entity):
+                found.append({"kind": kind, "id": entity.get(id_field), "name": entity.get("name")})
+    return found
+
+
+def draft_gtm_variable(
+    config: AdLoopConfig,
+    *,
+    account_id: str,
+    container_id: str,
+    variable_id: str = "",
+    workspace_id: str = "",
+    name: str = "",
+    variable_type: str = "",
+    data_layer_key: str = "",
+    default_value: str | None = None,
+    parameters: list[dict] | None = None,
+    notes: str | None = None,
+) -> dict:
+    """Create (no ``variable_id``) or update (``variable_id`` set) a variable."""
+    _require_writes(config)
+    operation = "gtm_update_variable" if variable_id else "gtm_create_variable"
+    blocked = _blocked(operation, config)
+    if blocked:
+        return blocked
+
+    errors: list[str] = _validate_parameters(parameters, "parameters")
+    if name and (len(name) > 200 or "{" in name or "}" in name):
+        errors.append("name must be 1-200 characters without curly braces")
+    if variable_id and variable_type:
+        errors.append("variable_type cannot be changed on an existing variable; delete it and create a new one")
+    if not variable_id:
+        if not name:
+            errors.append("name is required when creating a variable")
+        if variable_type not in KNOWN_VARIABLE_TYPES and not variable_type.startswith(_CUSTOM_TEMPLATE_PREFIX):
+            errors.append(
+                f"variable_type '{variable_type}' invalid; valid: "
+                + ", ".join(f"{k} ({v})" for k, v in KNOWN_VARIABLE_TYPES.items())
+                + ", or cvt_<id> for a custom template"
+            )
+        if variable_type == "v" and not data_layer_key and not any(
+            p.get("key") == "name" for p in parameters or []
+        ):
+            errors.append("data_layer_key is required for a Data Layer Variable, e.g. 'ecommerce.value'")
+    if (data_layer_key or default_value is not None) and variable_type and variable_type != "v":
+        errors.append("data_layer_key and default_value only apply to Data Layer Variables (variable_type='v')")
+    if variable_type == CUSTOM_JAVASCRIPT and not config.gtm.allow_custom_html:
+        return _custom_html_refusal("a Custom JavaScript variable")
+    if errors:
+        return {"error": "Validation failed", "details": errors}
+
+    # Data Layer Variable fields, from the shortcut arguments.
+    shortcut: list[dict] = []
+    if data_layer_key:
+        shortcut += [
+            {"type": "INTEGER", "key": "dataLayerVersion", "value": "2"},
+            {"type": "TEMPLATE", "key": "name", "value": data_layer_key},
+        ]
+    if default_value is not None:
+        shortcut += [
+            {"type": "BOOLEAN", "key": "setDefaultValue", "value": "true"},
+            {"type": "TEMPLATE", "key": "defaultValue", "value": default_value},
+        ]
+
+    client = _client(config)
+    ws_id, ws_name = _resolve_workspace(client, account_id, container_id, workspace_id)
+    base = {
+        "account_id": account_id,
+        "container_id": container_id,
+        "workspace_id": ws_id,
+        "workspace_name": ws_name,
+    }
+    ws = _workspaces(client)
+    warnings = [
+        f"This edits workspace '{ws_name}' only. Nothing changes on the site "
+        "until the workspace is published (draft_publish_gtm_workspace)."
+    ]
+    variables = ws.variables().list(parent=_ws_path(base)).execute().get("variable", []) or []
+
+    if not variable_id:
+        if any(v.get("name") == name for v in variables):
+            return {"error": f"A variable named '{name}' already exists in workspace '{ws_name}'; update it with its variable_id instead."}
+        body: dict[str, Any] = {
+            "name": name,
+            "type": variable_type,
+            "parameter": _merge_parameters(shortcut, list(parameters or [])),
+        }
+        if notes:
+            body["notes"] = notes
+        warnings.append(f"Tags and triggers use it as {{{{{name}}}}}.")
+        return _store(operation, "gtm_variable", ws_id, {**base, "variable": body}, warnings=warnings)
+
+    var_path = f"{_ws_path(base)}/variables/{variable_id}"
+    existing = ws.variables().get(path=var_path).execute()
+    if existing.get("type") == CUSTOM_JAVASCRIPT and not config.gtm.allow_custom_html:
+        return _custom_html_refusal("editing a Custom JavaScript variable")
+    if (data_layer_key or default_value is not None) and existing.get("type") != "v":
+        return {"error": "data_layer_key and default_value only apply to Data Layer Variables"}
+    patch: dict[str, Any] = {}
+    if name and name != existing.get("name"):
+        if any(v.get("name") == name for v in variables):
+            return {"error": f"A variable named '{name}' already exists in workspace '{ws_name}'."}
+        users = _variable_references(ws, _ws_path(base), existing.get("name", ""), skip_variable_id=str(variable_id))
+        if users:
+            return {
+                "error": (
+                    f"Variable '{existing.get('name')}' is referenced by {len(users)} tag(s), "
+                    "trigger(s) or variable(s), and renaming it through the API would break those "
+                    "{{…}} references. Rename it in the GTM UI, which updates them."
+                ),
+                "referenced_by": users,
+            }
+        patch["name"] = name
+    updates = shortcut + list(parameters or [])
+    if updates:
+        patch["parameter"] = _merge_parameters(existing.get("parameter", []), updates)
+    if notes is not None:
+        patch["notes"] = notes
+    patch = {k: v for k, v in patch.items() if existing.get(k) != v}
+    if not patch:
+        return {"error": "No changes: every field passed already matches the variable."}
+
+    changes = {
+        **base,
+        "variable_id": str(variable_id),
+        "variable_name": existing.get("name"),
+        "variable_type": existing.get("type"),
+        "fingerprint": existing.get("fingerprint"),
+        "patch": patch,
+        "before": {k: existing.get(k) for k in patch},
+    }
+    warnings.append("Every tag and trigger that uses this variable picks up the new value.")
+    return _store(operation, "gtm_variable", variable_id, changes, warnings=warnings)
+
+
 def draft_delete_gtm_entity(
     config: AdLoopConfig,
     *,
@@ -619,10 +788,10 @@ def draft_delete_gtm_entity(
     entity_id: str,
     workspace_id: str = "",
 ) -> dict:
-    """Delete a workspace tag or trigger (``entity_type`` = tag | trigger)."""
+    """Delete a workspace tag, trigger or variable."""
     _require_writes(config)
-    if entity_type not in ("tag", "trigger"):
-        return {"error": "entity_type must be 'tag' or 'trigger'"}
+    if entity_type not in ("tag", "trigger", "variable"):
+        return {"error": "entity_type must be 'tag', 'trigger' or 'variable'"}
     operation = f"gtm_delete_{entity_type}"
     blocked = _blocked(operation, config)
     if blocked:
@@ -639,8 +808,21 @@ def draft_delete_gtm_entity(
         "workspace_name": ws_name,
     }
     ws = _workspaces(client)
-    api = ws.tags() if entity_type == "tag" else ws.triggers()
+    api = getattr(ws, f"{entity_type}s")()
     existing = api.get(path=f"{_ws_path(base)}/{entity_type}s/{entity_id}").execute()
+
+    if entity_type == "variable":
+        users = _variable_references(ws, _ws_path(base), existing.get("name", ""), skip_variable_id=str(entity_id))
+        if users:
+            return {
+                "error": (
+                    f"Variable '{existing.get('name')}' is referenced by {len(users)} "
+                    "tag(s), trigger(s) or variable(s); deleting it would break "
+                    "them. Remove the {{" + str(existing.get("name")) + "}} "
+                    "references first."
+                ),
+                "referenced_by": users,
+            }
 
     if entity_type == "trigger":
         # GTM refuses to delete a referenced trigger; say which tags up front
@@ -754,13 +936,19 @@ def draft_publish_gtm_workspace(
 
 
 def _custom_html_in_diff(diff: dict) -> list[dict]:
-    """Custom HTML tags a version change would add or change (removals are fine)."""
-    tags = diff.get("tags", {})
+    """Custom HTML tags and Custom JavaScript variables a version change would
+    add or change (removals are fine)."""
+    tags, variables = diff.get("tags", {}), diff.get("variables", {})
     return [
         {"tag_id": t.get("id"), "name": t.get("name"), "change_status": status}
         for status in ("added", "changed")
         for t in tags.get(status, [])
         if t.get("type") == CUSTOM_HTML
+    ] + [
+        {"variable_id": v.get("id"), "name": v.get("name"), "change_status": status}
+        for status in ("added", "changed")
+        for v in variables.get(status, [])
+        if v.get("type") == CUSTOM_JAVASCRIPT
     ]
 
 
@@ -945,13 +1133,17 @@ def _check_target_unchanged(client, plan: ChangePlan) -> dict:
     return target
 
 
+def _entity_kind(plan: ChangePlan) -> str:
+    return plan.entity_type.replace("gtm_", "")
+
+
 def _entity_api(client, plan: ChangePlan):
     ws = _workspaces(client)
-    return ws.tags() if plan.entity_type == "gtm_tag" else ws.triggers()
+    return getattr(ws, f"{_entity_kind(plan)}s")()
 
 
 def _entity_path(plan: ChangePlan) -> str:
-    kind = "tag" if plan.entity_type == "gtm_tag" else "trigger"
+    kind = _entity_kind(plan)
     return f"{_ws_path(plan.changes)}/{kind}s/{plan.changes[f'{kind}_id']}"
 
 
@@ -974,6 +1166,10 @@ def _check_gates(config: AdLoopConfig, plan: ChangePlan) -> None:
     elif op == "gtm_update_tag":
         html = (changes.get("tag_type") == CUSTOM_HTML
                 and changes["patch"] != {"paused": True})
+    elif op == "gtm_create_variable":
+        html = changes["variable"].get("type") == CUSTOM_JAVASCRIPT
+    elif op == "gtm_update_variable":
+        html = changes.get("variable_type") == CUSTOM_JAVASCRIPT
     else:
         html = op == "gtm_create_tag" and changes["tag"].get("type") == CUSTOM_HTML
     if html:
@@ -997,7 +1193,7 @@ def preflight(config: AdLoopConfig, plan: ChangePlan) -> dict:
     changes = plan.changes
     checks: dict[str, Any] = {"workspace": changes.get("workspace_name")}
     try:
-        if plan.operation in ("gtm_create_tag", "gtm_create_trigger"):
+        if plan.operation in ("gtm_create_tag", "gtm_create_trigger", "gtm_create_variable"):
             _workspaces(client).get(path=_ws_path(changes)).execute()
             checks["workspace_exists"] = True
         elif plan.operation == "gtm_publish_workspace":
@@ -1082,7 +1278,15 @@ def _apply(config: AdLoopConfig, plan: ChangePlan) -> dict:
                 "type": resp.get("type"), "workspace_id": changes["workspace_id"],
                 "published": False}
 
-    if op in ("gtm_update_tag", "gtm_update_trigger"):
+    if op == "gtm_create_variable":
+        resp = ws.variables().create(
+            parent=_ws_path(changes), body=changes["variable"]
+        ).execute()
+        return {"variable_id": resp.get("variableId"), "name": resp.get("name"),
+                "type": resp.get("type"), "workspace_id": changes["workspace_id"],
+                "published": False}
+
+    if op in ("gtm_update_tag", "gtm_update_trigger", "gtm_update_variable"):
         api = _entity_api(client, plan)
         path = _entity_path(plan)
         current = _check_fingerprint(api, path, changes.get("fingerprint"),
@@ -1094,18 +1298,18 @@ def _apply(config: AdLoopConfig, plan: ChangePlan) -> dict:
         body.update(copy.deepcopy(changes["patch"]))
         resp = api.update(path=path, body=body,
                           fingerprint=current.get("fingerprint")).execute()
-        kind = "tag" if plan.entity_type == "gtm_tag" else "trigger"
+        kind = _entity_kind(plan)
         return {f"{kind}_id": resp.get(f"{kind}Id"), "name": resp.get("name"),
                 "updated_fields": sorted(changes["patch"]),
                 "workspace_id": changes["workspace_id"], "published": False}
 
-    if op in ("gtm_delete_tag", "gtm_delete_trigger"):
+    if op in ("gtm_delete_tag", "gtm_delete_trigger", "gtm_delete_variable"):
         api = _entity_api(client, plan)
         path = _entity_path(plan)
         _check_fingerprint(api, path, changes.get("fingerprint"),
                            plan.entity_type.replace("gtm_", ""))
         api.delete(path=path).execute()
-        kind = "tag" if plan.entity_type == "gtm_tag" else "trigger"
+        kind = _entity_kind(plan)
         return {f"deleted_{kind}_id": changes[f"{kind}_id"],
                 "workspace_id": changes["workspace_id"], "published": False}
 

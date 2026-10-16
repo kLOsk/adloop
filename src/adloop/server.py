@@ -2547,7 +2547,79 @@ def draft_gtm_trigger(
     )
 
 
-@_tool(title="Draft deleting a Tag Manager tag or trigger", annotations=_DESTRUCTIVE, tags={"gtm"})
+@_tool(title="Draft a Tag Manager variable", annotations=_WRITE, tags={"gtm"})
+@_safe
+def draft_gtm_variable(
+    name: str = "",
+    variable_type: str = "",
+    data_layer_key: str = "",
+    default_value: str | None = None,
+    parameters: _DictListOpt = None,
+    notes: str | None = None,
+    variable_id: str = "",
+    workspace_id: str = "",
+    gtm_account_id: str = "",
+    gtm_container_id: str = "",
+) -> dict:
+    """Draft creating or updating a Tag Manager variable: returns a PREVIEW.
+
+    Without variable_id this creates a variable in a workspace; with
+    variable_id it updates the existing one. Data Layer Variables, the usual
+    source for GA4 ecommerce values, take data_layer_key (e.g.
+    "ecommerce.value") instead of raw parameters. Tags and triggers use a
+    variable as {{name}}; renaming one they reference is refused, because
+    the references would break (the GTM UI renames safely). Custom
+    JavaScript variables run code on the site and are refused unless
+    gtm.allow_custom_html is set. The edit lands in the workspace and
+    changes nothing on the site until the workspace is published. Refused
+    unless gtm.write_enabled is set.
+
+    Args:
+        name: Variable name, 1-200 characters without curly braces.
+            Required when creating a variable.
+        variable_type: Required when creating, fixed afterwards: v (Data
+            Layer Variable), c (Constant), u (URL), k (1st-party cookie), j
+            (JavaScript Variable, reads a global), aev (Auto-Event
+            Variable), d (DOM element), f (HTTP referrer), e (Custom event),
+            smm (Lookup table), remm (RegEx table), jsm (Custom JavaScript,
+            gated) or cvt_<id> for a custom template.
+        data_layer_key: For Data Layer Variables: the dataLayer key to read,
+            dot notation for nested values, e.g. "ecommerce.transaction_id".
+        default_value: For Data Layer Variables: the value when the key is
+            missing. None sets no default.
+        parameters: GTM parameter dicts with at least "type" and "key" for
+            the other types, e.g. a Constant's [{"type": "TEMPLATE", "key":
+            "value", "value": "G-ABC123"}]. On update they merge by key.
+        notes: Free-form note stored on the variable. None keeps the current
+            note.
+        variable_id: Existing variable ID to update (see list_gtm_variables).
+            Empty creates a new variable.
+        workspace_id: Workspace to edit (see list_gtm_workspaces). Empty uses
+            the Default Workspace, or the only workspace there is.
+        gtm_account_id: Numeric GTM account ID (see list_gtm_accounts). Empty
+            uses gtm.account_id from the config.
+        gtm_container_id: Numeric GTM container ID (see list_gtm_containers).
+            Empty uses gtm.container_id from the config.
+    """
+    from adloop.gtm.write import draft_gtm_variable as _impl
+
+    gtm_account_id, gtm_container_id = _gtm_defaults(gtm_account_id, gtm_container_id)
+    return _impl(
+        current_config(),
+        account_id=gtm_account_id,
+        container_id=gtm_container_id,
+        variable_id=variable_id,
+        workspace_id=workspace_id,
+        name=name,
+        variable_type=variable_type,
+        data_layer_key=data_layer_key,
+        default_value=default_value,
+        parameters=parameters,
+        notes=notes,
+    )
+
+
+@_tool(title="Draft deleting a Tag Manager tag, trigger or variable", annotations=_DESTRUCTIVE, tags={"gtm"})
 @_safe
 def draft_delete_gtm_entity(
     entity_type: str,
@@ -2556,18 +2628,19 @@ def draft_delete_gtm_entity(
     gtm_account_id: str = "",
     gtm_container_id: str = "",
 ) -> dict:
-    """Draft deleting a Tag Manager tag or trigger — returns a PREVIEW.
+    """Draft deleting a Tag Manager tag, trigger or variable — returns a PREVIEW.
 
     The entity is removed from a workspace and stays on the site until the
-    workspace is published. A trigger that any tag still references is
-    refused up front, with the referencing tags named. Refused unless
+    workspace is published. A trigger that any tag still references, or a
+    variable that a tag, trigger or other variable uses as {{name}}, is
+    refused up front, with the references named. Refused unless
     gtm.write_enabled is set. Returns the entity that would be deleted, the
     resolved workspace and a plan_id.
 
     Args:
-        entity_type: "tag" or "trigger".
-        entity_id: Numeric ID of the entity (see list_gtm_tags and
-            list_gtm_triggers).
+        entity_type: "tag", "trigger" or "variable".
+        entity_id: Numeric ID of the entity (see list_gtm_tags,
+            list_gtm_triggers and list_gtm_variables).
         workspace_id: Workspace to edit (see list_gtm_workspaces). Empty uses
             the Default Workspace, or the only workspace there is.
         gtm_account_id: Numeric GTM account ID (see list_gtm_accounts). Empty

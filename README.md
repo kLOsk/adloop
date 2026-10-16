@@ -178,7 +178,8 @@ Off by default. Set `gtm.write_enabled: true` in `~/.adloop/config.yaml` and res
 |------|-------------|
 | `draft_gtm_tag` | Create a tag, or update one by `tag_id`. Updates are a read-modify-write: `parameters` merge by key and every field you don't pass (priority, consent settings, firing options, schedule, folder, …) is preserved. Tag types are canonical GTM template IDs (`googtag`, `gaawe`, `awct`, `sp`, `gclidw`, …) or `cvt_<id>` gallery templates. |
 | `draft_gtm_trigger` | Create a trigger, or update one by `trigger_id` (type is immutable). `custom_event_name` wires a `customEvent` trigger to a dataLayer event. |
-| `draft_delete_gtm_entity` | Delete a workspace tag or trigger. Triggers still referenced by a tag are refused up front, with the tags listed. |
+| `draft_gtm_variable` | Create or update variables, e.g. Data Layer Variables for GA4 ecommerce values; renaming a referenced variable is refused, Custom JavaScript is gated |
+| `draft_delete_gtm_entity` | Delete a workspace tag, trigger or variable. Triggers and variables still in use are refused up front, with the references listed. |
 | `draft_publish_gtm_workspace` | Publish a workspace live. The preview lists every pending change, including edits other people made in the GTM UI. |
 | `draft_rollback_gtm_version` | Republish an older container version live. The preview is the diff from the live version to the target; the plan pins the live version, so apply refuses if someone publishes in between. Workspaces are left as they are. |
 
