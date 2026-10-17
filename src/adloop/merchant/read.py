@@ -216,7 +216,17 @@ def get_merchant_feed_health(
             f"severity — CRITICAL means offers stop serving entirely: "
             + "; ".join(i["title"] for i in critical[:3])
         )
-    if not account_issues and not totals["disapproved"]:
+    if not serving_total:
+        # Zero products is not a healthy feed: Shopping and Performance Max
+        # have nothing to advertise.
+        insights.append(
+            "The account has no products at all (0 approved, pending or "
+            "disapproved), so Shopping and Performance Max campaigns have "
+            "nothing to show. Either no feed or data source is set up yet, "
+            "products were added in the last ~30 minutes (status lags), or "
+            "the products live in another Merchant Center account."
+        )
+    elif not account_issues and not totals["disapproved"]:
         insights.append("No disapprovals or account issues — feed is healthy.")
 
     return {

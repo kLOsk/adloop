@@ -163,6 +163,16 @@ class TestFeedHealth:
         assert any("healthy" in i for i in result["insights"])
 
 
+    def test_empty_account_is_not_called_healthy(self, config):
+        _, patcher = _patch_get({"aggregateProductStatuses": {}, "issues": {}})
+        with patcher:
+            result = read.get_merchant_feed_health(config, account_id="111")
+
+        assert result["totals"] == {"approved": 0, "pending": 0, "disapproved": 0}
+        assert not any("healthy" in i for i in result["insights"])
+        assert "no products at all" in result["insights"][0]
+
+
 class TestDeveloperRegistration:
     """Merchant API developer registration (registerGcp) — the API blocks
     every call from an unregistered GCP project, so first use must either
