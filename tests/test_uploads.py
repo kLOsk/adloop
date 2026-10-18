@@ -206,13 +206,17 @@ class TestCsvUploads:
         store.delete("t1", upload.upload_id)
         assert store.list("t1") == []
 
+    # Explicit ids, and the oversized file built in the test: pytest names a
+    # case after its bytes, and a 5 MB test name stalled CI's -v log.
     @pytest.mark.parametrize("name,data,message", [
         ("calls.txt", b"a,b\n", ".csv files"),
         ("calls.csv", b"", "empty"),
         ("calls.csv", "ä".encode("latin-1"), "UTF-8"),
-        ("calls.csv", b"a" * (uploads.MAX_UPLOAD_BYTES + 1), "at most"),
-    ])
+        ("calls.csv", None, "at most"),
+    ], ids=["not-csv", "empty", "not-utf8", "too-big"])
     def test_csv_refusals(self, store, name, data, message):
+        if data is None:
+            data = b"a" * (uploads.MAX_UPLOAD_BYTES + 1)
         with pytest.raises(UploadError, match=message):
             store.put("t1", name, data, kind="csv")
 
