@@ -24,6 +24,6 @@ jobs:
         run: uv sync --extra dev
 
       - name: Run tests
-        # A hung test fails the job after 10 minutes with a stack dump
+        # A hung test fails the job after 10 minutes (hard kill 10 s later) with a stack dump
         # (faulthandler) instead of running for hours without logs.
-        run: timeout 600 uv run python -m pytest tests/ -v -o faulthandler_timeout=60
+        run: timeout -k 10 600 uv run python -m pytest tests/ -v -o faulthandler_timeout=60
