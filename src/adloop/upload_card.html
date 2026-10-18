@@ -90,6 +90,11 @@
       drop: "Drop images here", or: "or", pick: "Choose files",
       uploading: "Uploading…", done: "Uploaded", tooBig: "Over 5 MB", wrongType: "Not PNG, JPEG or GIF",
       message: "I uploaded images to AdLoop:\n{list}\nUse these upload ids for the ad.",
+      brandCsv: "AdLoop · conversion CSV", titleCsv: "Upload your conversion CSV",
+      subCsv: "A .csv file in Google's upload template, up to 5 MB. It is deleted once AdLoop has read it, after two hours at the latest.",
+      dropCsv: "Drop the CSV here", pickCsv: "Choose file", wrongTypeCsv: "Not a .csv file",
+      messageCsv: "I uploaded a conversion CSV to AdLoop:\n{list}\nDraft the conversion upload with this upload_id.",
+      lines: "lines",
     },
     de: {
       brand: "AdLoop · Bilder hochladen", title: "Bilder für deine Anzeigen hochladen",
@@ -97,16 +102,30 @@
       drop: "Bilder hierher ziehen", or: "oder", pick: "Dateien auswählen",
       uploading: "Wird hochgeladen…", done: "Hochgeladen", tooBig: "Größer als 5 MB", wrongType: "Kein PNG, JPEG oder GIF",
       message: "Ich habe Bilder bei AdLoop hochgeladen:\n{list}\nNutze diese Upload-IDs für die Anzeige.",
+      brandCsv: "AdLoop · Conversion-CSV", titleCsv: "Conversion-CSV hochladen",
+      subCsv: "Eine .csv-Datei in Googles Upload-Vorlage, bis 5 MB. Sie wird gelöscht, sobald AdLoop sie gelesen hat, spätestens nach zwei Stunden.",
+      dropCsv: "CSV hierher ziehen", pickCsv: "Datei auswählen", wrongTypeCsv: "Keine .csv-Datei",
+      messageCsv: "Ich habe eine Conversion-CSV bei AdLoop hochgeladen:\n{list}\nErstelle den Conversion-Upload mit dieser upload_id.",
+      lines: "Zeilen",
     },
   };
 
   let lang = "en";
+  // "image" or "csv": upload_images and upload_conversion_csv share this card.
+  let kind = "image";
   document.documentElement.dataset.theme =
     window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
   let nextId = 1;
   const pending = new Map();
   const $ = (id) => document.getElementById(id);
-  const t = (key) => (STRINGS[lang] || STRINGS.en)[key] || STRINGS.en[key] || key;
+  const pick = (key) => (STRINGS[lang] || STRINGS.en)[key] || STRINGS.en[key];
+  const t = (key) => (kind === "csv" && pick(key + "Csv")) || pick(key) || key;
+  const accepted = (file) => kind === "csv" ? /\.csv$/i.test(file.name) : TYPES.includes(file.type);
+  function render() {
+    for (const el of document.querySelectorAll("[data-t]")) el.textContent = t(el.dataset.t);
+    $("file").accept = kind === "csv" ? ".csv,text/csv" : TYPES.join(",");
+    $("file").multiple = kind !== "csv";
+  }
 
   function post(message) { window.parent.postMessage(message, "*"); }
   function request(method, params) {
@@ -126,7 +145,7 @@
     const vars = ctx.styles && ctx.styles.variables;
     if (vars) for (const [k, v] of Object.entries(vars)) if (v) document.documentElement.style.setProperty(k, v);
     if (typeof ctx.locale === "string" && ctx.locale.toLowerCase().startsWith("de")) lang = "de";
-    for (const el of document.querySelectorAll("[data-t]")) el.textContent = t(el.dataset.t);
+    render();
   }
 
   function payloadOf(result) {
@@ -152,6 +171,7 @@
   }
 
   function describe(u) {
+    if (u.kind === "csv") return u.upload_id + " · " + u.lines + " " + t("lines") + " · " + u.size_kb + " KB";
     return u.upload_id + " · " + u.width + "×" + u.height + " · " + u.size_kb + " KB";
   }
 
@@ -167,12 +187,12 @@
   async function upload(files) {
     const stored = [];
     for (const file of files) {
-      const row = addRow(file.name, TYPES.includes(file.type) ? URL.createObjectURL(file) : "");
-      if (!TYPES.includes(file.type)) { row.state.textContent = t("wrongType"); row.state.classList.add("bad"); continue; }
+      const row = addRow(file.name, kind === "image" && accepted(file) ? URL.createObjectURL(file) : "");
+      if (!accepted(file)) { row.state.textContent = t("wrongType"); row.state.classList.add("bad"); continue; }
       if (file.size > MAX_BYTES) { row.state.textContent = t("tooBig"); row.state.classList.add("bad"); continue; }
       row.state.textContent = t("uploading");
       try {
-        const result = await request("tools/call", { name: TOOL, arguments: { name: file.name, data_base64: await readBase64(file), code } });
+        const result = await request("tools/call", { name: TOOL, arguments: { name: file.name, data_base64: await readBase64(file), code, kind } });
         const r = payloadOf(result);
         if ((result && result.isError) || r.error || !r.upload_id) throw new Error(r.error || "upload failed");
         row.meta.textContent = describe(r);
@@ -209,6 +229,7 @@
     if (shownExisting || !result) return;
     shownExisting = true;
     const r = payloadOf(result);
+    if (r.upload_kind === "csv") { kind = "csv"; render(); }
     for (const u of r.uploads || []) {
       const row = addRow(u.name, "");
       row.meta.textContent = describe(u);

@@ -249,6 +249,21 @@ For images that have no public URL: a file on the user's computer, or an image t
 - **Using an upload:** `draft_image_assets(upload_ids=["up_..."])` for Google Ads; `"upload:up_..."` as `image_url`, `thumbnail_url` or a carousel card's `image_url` in `draft_reddit_ad` (AdLoop Cloud only, because Reddit downloads the image from a short-lived public link). Videos cannot be uploaded.
 - Uploads expire after 24 hours. Self-hosted without a card, pass local files directly (`image_paths`).
 
+### Offline Conversion Uploads
+
+Conversions that happen offline (a sales call, a lead that turned into a deal) go back to Google Ads from a CSV in Google's upload template.
+
+| Tool | When to Use | Key Parameters |
+|------|-------------|----------------|
+| `upload_conversion_csv` | The CSV is not on the machine running AdLoop (always on AdLoop Cloud). Shows the upload card, or returns an upload link | (none) |
+| `draft_upload_call_conversions` | Calls from call assets or call-tracking numbers that became a conversion; matched by the caller's phone number | exactly one of `csv_path` (local file) or `upload_id`; `default_region` for numbers without a country code; `consent` |
+| `draft_upload_enhanced_conversions_for_leads` | Form leads that became a conversion; matched by hashed email, phone or name and address | exactly one of `csv_path` or `upload_id`; `default_region`; `consent` |
+
+- The conversion action named in the CSV's `Conversion Name` column must exist and be of type UPLOAD_CALLS (calls) or UPLOAD_CLICKS (leads); the draft checks it against the account.
+- **The CSV holds personal data** (phone numbers, emails, names). An uploaded file lasts two hours at most and is deleted as soon as a draft has read it, so a second draft needs a new upload; a failed draft keeps it for a retry (for example with `default_region`). Lead identifiers are hashed while drafting. Never ask the user to paste rows into the chat.
+- EEA traffic needs consent signals: pass `consent` or fill the CSV's `Ad User Data` / `Ad Personalization` columns. Present the preview's `consent_summary`, `skipped_rows` and `dedup_warnings`.
+- Apply sends batches of 2,000 rows. `PARTIAL_UPLOAD` means some batches are already in the account: the plan is retired, and a new draft continues at `resume_from_line`. Don't re-upload rows that went through.
+
 ### Planning Tools
 
 | Tool | When to Use | Key Parameters |

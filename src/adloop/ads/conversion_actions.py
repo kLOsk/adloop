@@ -25,6 +25,7 @@ import hashlib
 import math
 import re
 import threading
+from dataclasses import dataclass
 from datetime import datetime, timezone as _tz
 from typing import TYPE_CHECKING, Callable
 
@@ -1009,8 +1010,16 @@ _CSV_COMMENT_PREFIX = "#"
 _MAX_CSV_BYTES = 5 * 1024 * 1024
 
 
+@dataclass(frozen=True)
+class UploadedCsv:
+    """A conversion CSV that arrived as an upload instead of a local path."""
+
+    name: str
+    data: bytes
+
+
 def _read_upload_csv(
-    csv_path: str,
+    csv_path: "str | UploadedCsv",
 ) -> tuple[list[tuple[int, list[str]]], list[str], str]:
     """Read an upload CSV into ``(source_line, cells)`` records (header first).
 
@@ -1020,8 +1029,9 @@ def _read_upload_csv(
     Counting records instead would drift as soon as a comment or a bad row is
     dropped.
 
-    Local-only by design: the path is read from the machine running AdLoop, so
-    the tool refuses in server mode before it gets here. Errors name the file
+    ``csv_path`` is a path on the machine running AdLoop (refused in server
+    mode before it gets here) or an :class:`UploadedCsv` from the upload
+    store, which a hosted server reads instead. Errors name the file
     and the schema, never file *content* — a hosted runtime can read files the
     caller is not allowed to see.
     """
@@ -1036,15 +1046,21 @@ def _read_upload_csv(
     # which is what timestamps without an offset are resolved against.
     timezone = ""
 
-    path = Path(csv_path).expanduser()
-    if not path.is_file():
-        return [], [f"CSV not found or not a regular file: {path}"], ""
-    if path.suffix.lower() != ".csv":
-        return [], [f"CSV must be a .csv file, got: {path.name}"], ""
-    try:
-        size = path.stat().st_size
-    except OSError as exc:
-        return [], [f"CSV could not be read: {exc.strerror or exc}"], ""
+    import io
+
+    if isinstance(csv_path, UploadedCsv):
+        path = None
+        size = len(csv_path.data)
+    else:
+        path = Path(csv_path).expanduser()
+        if not path.is_file():
+            return [], [f"CSV not found or not a regular file: {path}"], ""
+        if path.suffix.lower() != ".csv":
+            return [], [f"CSV must be a .csv file, got: {path.name}"], ""
+        try:
+            size = path.stat().st_size
+        except OSError as exc:
+            return [], [f"CSV could not be read: {exc.strerror or exc}"], ""
     if size > _MAX_CSV_BYTES:
         return [], [
             f"CSV is {size / 1_048_576:.1f} MB; the limit is "
@@ -1053,7 +1069,11 @@ def _read_upload_csv(
         ], ""
 
     try:
-        with path.open("r", newline="", encoding="utf-8-sig") as handle:
+        with (
+            io.StringIO(csv_path.data.decode("utf-8-sig"), newline="")
+            if path is None
+            else path.open("r", newline="", encoding="utf-8-sig")
+        ) as handle:
             position = {"line": 0}
 
             def _lines():
@@ -1164,7 +1184,7 @@ def _pad_to_header(raw: list[str], columns: int) -> list[str]:
 
 
 def _parse_call_conversion_csv(
-    csv_path: str, default_region: str = ""
+    csv_path: "str | UploadedCsv", default_region: str = ""
 ) -> tuple[list[dict], list[str], list[str], list[dict]]:
     """Read the call-conversions CSV (local file) and normalize each row.
 
@@ -1310,7 +1330,8 @@ def draft_upload_call_conversions(
     config: AdLoopConfig,
     *,
     customer_id: str = "",
-    csv_path: str,
+    csv_path: str = "",
+    upload_id: str = "",
     default_region: str = "",
     consent: dict | None = None,
 ) -> dict:
@@ -1353,12 +1374,17 @@ def draft_upload_call_conversions(
         operation="upload_call_conversions",
         default_region=default_region,
         consent=consent,
+        csv_path=csv_path,
+        upload_id=upload_id,
     )
+    if error:
+        return error
+    source, error = _csv_source(csv_path, upload_id)
     if error:
         return error
 
     rows, parse_advisories, skipped, error = _upload_parse_result(
-        *_parse_call_conversion_csv(csv_path, default_region),
+        *_parse_call_conversion_csv(source, default_region),
         empty_message="CSV contained zero conversion rows",
     )
     if error:
@@ -1493,7 +1519,7 @@ def draft_upload_call_conversions(
         apply_only_payload={"rows": frozen_rows},
     )
     store_plan(plan)
-    return plan.to_preview()
+    return _consume_upload(plan.to_preview(), upload_id)
 
 
 def _resolve_upload_action(
@@ -1714,6 +1740,8 @@ def _upload_draft_preflight(
     operation: str,
     default_region: str,
     consent: dict | None,
+    csv_path: str = "",
+    upload_id: str = "",
 ) -> tuple[str, dict | None, dict | None]:
     """The guards both upload drafts run before they touch the CSV.
 
@@ -1724,12 +1752,19 @@ def _upload_draft_preflight(
     from adloop.runtime import deployment_mode
     from adloop.safety.guards import SafetyViolation, check_blocked_operation
 
-    if deployment_mode() == "server":
+    if bool(csv_path) == bool(upload_id):
         return "", None, {
             "error": (
-                "This tool uploads conversions from a CSV file on the machine "
-                "running AdLoop and is not available on the hosted server. "
-                "Use the self-hosted AdLoop MCP server for conversion uploads."
+                "Pass exactly one of csv_path (a file on the machine running "
+                "AdLoop) or upload_id (a CSV uploaded with upload_conversion_csv)."
+            )
+        }
+    if csv_path and deployment_mode() == "server":
+        return "", None, {
+            "error": (
+                "csv_path names a file on the machine running AdLoop, which on "
+                "the hosted server is not yours. Upload the CSV with "
+                "upload_conversion_csv and pass its upload_id instead."
             )
         }
 
@@ -1752,6 +1787,37 @@ def _upload_draft_preflight(
             )
         }
     return region, consent_norm, None
+
+
+def _csv_source(csv_path: str, upload_id: str) -> "tuple[str | UploadedCsv | None, dict | None]":
+    """The CSV to parse: the local path, or the uploaded file's bytes."""
+    if not upload_id:
+        return csv_path, None
+    from adloop.uploads import UploadError, current_tenant, get_upload_store
+
+    try:
+        upload, data = get_upload_store().get(current_tenant(), upload_id, kind="csv")
+    except UploadError as exc:
+        return None, {"error": f"{exc}. Upload the CSV again with upload_conversion_csv."}
+    return UploadedCsv(name=upload.name, data=data), None
+
+
+def _consume_upload(preview: dict, upload_id: str) -> dict:
+    """Delete an uploaded CSV once its plan holds the rows.
+
+    The plan carries everything apply needs, so the raw file (phone numbers,
+    emails) has no reason to stay. A draft that failed keeps the file, so a
+    retry with another default_region needs no new upload.
+    """
+    if upload_id:
+        from adloop.uploads import current_tenant, get_upload_store
+
+        get_upload_store().delete(current_tenant(), upload_id)
+        preview["source_upload"] = (
+            f"{upload_id} was read and deleted; the plan holds the rows. A new "
+            "draft needs a new upload."
+        )
+    return preview
 
 
 def _upload_parse_result(
@@ -2262,7 +2328,7 @@ _OPTIONAL_EC_HEADERS = [
 
 
 def _parse_ec_for_leads_csv(
-    csv_path: str, default_region: str = ""
+    csv_path: "str | UploadedCsv", default_region: str = ""
 ) -> tuple[list[dict], list[str], list[str], list[dict]]:
     """Parse the EC-for-Leads CSV (local file) and hash PII at parse time.
 
@@ -2463,7 +2529,8 @@ def draft_upload_enhanced_conversions_for_leads(
     config: AdLoopConfig,
     *,
     customer_id: str = "",
-    csv_path: str,
+    csv_path: str = "",
+    upload_id: str = "",
     default_region: str = "",
     consent: dict | None = None,
 ) -> dict:
@@ -2501,12 +2568,17 @@ def draft_upload_enhanced_conversions_for_leads(
         operation="upload_enhanced_conversions_for_leads",
         default_region=default_region,
         consent=consent,
+        csv_path=csv_path,
+        upload_id=upload_id,
     )
+    if error:
+        return error
+    source, error = _csv_source(csv_path, upload_id)
     if error:
         return error
 
     rows, parse_advisories, skipped, error = _upload_parse_result(
-        *_parse_ec_for_leads_csv(csv_path, default_region),
+        *_parse_ec_for_leads_csv(source, default_region),
         empty_message="CSV contained zero conversion rows",
     )
     if error:
@@ -2735,7 +2807,7 @@ def draft_upload_enhanced_conversions_for_leads(
         apply_only_payload={"rows": frozen_rows},
     )
     store_plan(plan)
-    return plan.to_preview()
+    return _consume_upload(plan.to_preview(), upload_id)
 
 
 def _apply_upload_enhanced_conversions_for_leads(

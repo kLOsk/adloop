@@ -88,12 +88,17 @@ CLOUD_NOTE = (
 # heading line. Each runs until the next heading of the same or a higher level.
 CLOUD_DROPPED_SECTIONS = [
     "### Google Tag Manager Write Tools",
+    # Hidden on Cloud until the data processing agreement covers the CSVs'
+    # personal data; remove this entry when the runtime switch goes on.
+    "### Offline Conversion Uploads",
 ]
 
 # Anything matching these after the drop names a tool Cloud doesn't offer.
 CLOUD_UNAVAILABLE_MARKERS = [
     r"gtm\.write_enabled",
     r"\bdraft_\w*gtm\w*",
+    r"\bupload_conversion_csv\b",
+    r"\bdraft_upload_\w+",
 ]
 
 # (old, new) pairs. Every ``old`` must occur in the source at least once.

@@ -2106,19 +2106,19 @@ class TestUploadToolRegistration:
             "draft_upload_enhanced_conversions_for_leads" in tools_by_name
         )
 
-    def test_call_upload_requires_csv_path(self, tools_by_name):
-        required = (
-            tools_by_name["draft_upload_call_conversions"]
-            .parameters.get("required", [])
-        )
-        assert "csv_path" in required
+    def test_call_upload_takes_a_path_or_an_upload(self, tools_by_name):
+        params = tools_by_name["draft_upload_call_conversions"].parameters
+        # Exactly one of the two is required; the draft says so when neither
+        # or both arrive.
+        assert {"csv_path", "upload_id"} <= set(params["properties"])
+        assert not {"csv_path", "upload_id"} & set(params.get("required", []))
 
-    def test_ec_upload_requires_csv_path(self, tools_by_name):
-        required = (
-            tools_by_name["draft_upload_enhanced_conversions_for_leads"]
-            .parameters.get("required", [])
-        )
-        assert "csv_path" in required
+    def test_ec_upload_takes_a_path_or_an_upload(self, tools_by_name):
+        params = tools_by_name["draft_upload_enhanced_conversions_for_leads"].parameters
+        # Exactly one of the two is required; the draft says so when neither
+        # or both arrive.
+        assert {"csv_path", "upload_id"} <= set(params["properties"])
+        assert not {"csv_path", "upload_id"} & set(params.get("required", []))
 
     def test_upload_ops_are_wired_into_the_dispatch_table(self, monkeypatch):
         """Behaviour, not source text: both operations reach their applier.
@@ -2193,7 +2193,7 @@ class TestCsvInputHardening:
         finally:
             set_deployment_mode("local")
 
-        assert "not available on the hosted server" in result["error"]
+        assert "upload_conversion_csv" in result["error"]
 
     def test_errors_never_echo_the_file_content(self, tmp_path):
         # A header the caller sent must not come back in the error text: on a
@@ -4799,3 +4799,103 @@ class TestResumeLineNamesTheNextBatch:
         assert error.unknown_status is False
         assert error.uncertain_lines == []
         assert error.resume_from_line == 4
+
+
+# ---------------------------------------------------------------------------
+# CSV uploads: the hosted path (upload_conversion_csv -> upload_id)
+# ---------------------------------------------------------------------------
+
+
+class _XorCipher:
+    """Stand-in for the hosted store's encryption: reversible, never plain."""
+
+    def encrypt(self, data):
+        return bytes(b ^ 0x5A for b in data)
+
+    def decrypt(self, data):
+        return bytes(b ^ 0x5A for b in data)
+
+
+class TestUploadedCsv:
+    ROW = "+14155550142,2026-03-01T12:00:00Z,A,2026-03-01T13:00:00Z,250.00,USD\n"
+
+    @pytest.fixture(autouse=True)
+    def _ads(self, monkeypatch):
+        return _patch_drafts_client(monkeypatch, "UPLOAD_CALLS")
+
+    @pytest.fixture
+    def store(self, tmp_path):
+        from adloop import uploads
+
+        s = uploads.LocalUploadStore(tmp_path / "uploads", cipher=_XorCipher())
+        uploads.set_upload_store(s)
+        yield s
+        uploads.set_upload_store(None)
+
+    def _upload(self, store, text=None, name="calls.csv"):
+        return store.put("", name, (text or _CALL_HEADER + self.ROW).encode(), kind="csv")
+
+    def test_server_mode_drafts_from_an_upload_and_deletes_it(self, config, store, tmp_path):
+        from adloop.runtime import set_deployment_mode
+
+        upload = self._upload(store)
+        # Encrypted at rest: the phone number is not in the stored file.
+        raw = next((tmp_path / "uploads").rglob(f"{upload.upload_id}.bin")).read_bytes()
+        assert b"+14155550142" not in raw
+        set_deployment_mode("server")
+        try:
+            result = conversion_actions.draft_upload_call_conversions(
+                config, customer_id="1234567890", upload_id=upload.upload_id,
+            )
+        finally:
+            set_deployment_mode("local")
+        assert result["status"] == "PENDING_CONFIRMATION"
+        assert result["changes"]["row_count"] == 1
+        assert "read and deleted" in result["source_upload"]
+        assert store.list("", kind="csv") == []
+        rows = _stored_plan(result).apply_only_payload["rows"]
+        assert rows[0]["caller_id"] == "+14155550142"
+
+    def test_a_failed_draft_keeps_the_upload_for_a_retry(self, config, store):
+        upload = self._upload(store, _CALL_HEADER + "015112345678,2026-03-01T12:00:00Z,A,2026-03-01T13:00:00Z,1,EUR\n")
+        failed = conversion_actions.draft_upload_call_conversions(
+            config, customer_id="1234567890", upload_id=upload.upload_id,
+        )
+        assert "error" in failed
+        assert [u.upload_id for u in store.list("", kind="csv")] == [upload.upload_id]
+        retried = conversion_actions.draft_upload_call_conversions(
+            config, customer_id="1234567890", upload_id=upload.upload_id, default_region="DE",
+        )
+        assert retried["status"] == "PENDING_CONFIRMATION"
+
+    def test_exactly_one_source_and_the_right_kind(self, config, store, tmp_path):
+        from tests.test_uploads import _png
+
+        both = conversion_actions.draft_upload_call_conversions(
+            config, customer_id="1234567890", csv_path="x.csv", upload_id="up_abcdefghij",
+        )
+        assert "exactly one" in both["error"]
+        neither = conversion_actions.draft_upload_call_conversions(config, customer_id="1234567890")
+        assert "exactly one" in neither["error"]
+        image = store.put("", "logo.png", _png())
+        wrong = conversion_actions.draft_upload_call_conversions(
+            config, customer_id="1234567890", upload_id=image.upload_id,
+        )
+        assert "image upload, not a csv upload" in wrong["error"]
+        missing = conversion_actions.draft_upload_call_conversions(
+            config, customer_id="1234567890", upload_id="up_doesnotexist",
+        )
+        assert "not found" in missing["error"]
+
+    def test_enhanced_conversions_draft_from_an_upload(self, config, store, monkeypatch):
+        _patch_drafts_client(monkeypatch, "UPLOAD_CLICKS")
+        header = ("Email,Phone Number,First Name,Last Name,Conversion Name,Conversion Time,"
+                  "Conversion Value,Conversion Currency\n")
+        upload = self._upload(store, header + "Jane@Example.com,+14155550142,Jane,Doe,A,2026-03-01T13:00:00Z,10,USD\n",
+                              name="leads.csv")
+        result = conversion_actions.draft_upload_enhanced_conversions_for_leads(
+            config, customer_id="1234567890", upload_id=upload.upload_id,
+        )
+        assert result["status"] == "PENDING_CONFIRMATION"
+        assert store.list("", kind="csv") == []
+        assert "jane@example.com" not in str(_stored_plan(result).apply_only_payload)

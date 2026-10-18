@@ -3351,7 +3351,7 @@ def image_payloads(
         from adloop.uploads import UploadError, current_tenant, get_upload_store
 
         try:
-            upload, _data = get_upload_store().get(current_tenant(), upload_id)
+            upload, _data = get_upload_store().get(current_tenant(), upload_id, kind="image")
         except UploadError as exc:
             errors.append(f"Upload {index + 1}: {exc}")
             continue
@@ -5135,7 +5135,7 @@ def load_image_bytes(payload: dict) -> tuple[bytes, PurePath]:
     if payload.get("upload_id"):
         from adloop.uploads import current_tenant, get_upload_store
 
-        upload, image_bytes = get_upload_store().get(current_tenant(), str(payload["upload_id"]))
+        upload, image_bytes = get_upload_store().get(current_tenant(), str(payload["upload_id"]), kind="image")
         if upload.sha256 != payload.get("sha256"):
             raise ValueError(f"upload {upload.upload_id} changed since the preview; draft again.")
         return image_bytes, PurePosixPath(upload.name)

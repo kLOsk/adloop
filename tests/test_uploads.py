@@ -41,8 +41,8 @@ def config(tmp_path):
 
 
 class _Links:
-    def upload_page(self, tenant):
-        return f"https://mcp.example/u/tok-{tenant}", 1800
+    def upload_page(self, tenant, kind="image"):
+        return f"https://mcp.example/u/tok-{tenant}" + ("-csv" if kind == "csv" else ""), 1800
 
     def public_file(self, tenant, upload_id):
         return f"https://mcp.example/f/{tenant}/{upload_id}"
@@ -192,3 +192,59 @@ class TestConsumers:
         })
         assert resolved["content"][0]["media_url"] == f"https://mcp.example/f/local/{upload.upload_id}"
         assert resolved["content"][1]["media_url"] == "https://cdn.example.com/2.png"
+
+
+class TestCsvUploads:
+    def test_csv_kind_is_checked_listed_and_short_lived(self, store):
+        upload = store.put("t1", "calls.csv", b"a,b\n1,2\n\n3,4\n", kind="csv")
+        assert (upload.kind, upload.mime_type, upload.lines) == ("csv", "text/csv", 3)
+        assert upload.expires_at - upload.created_at == uploads.CSV_TTL_SECONDS
+        assert upload.summary()["lines"] == 3 and "width" not in upload.summary()
+        assert store.list("t1", kind="image") == [] and len(store.list("t1", kind="csv")) == 1
+        with pytest.raises(UploadError, match="csv upload, not a image upload"):
+            store.get("t1", upload.upload_id, kind="image")
+        store.delete("t1", upload.upload_id)
+        assert store.list("t1") == []
+
+    @pytest.mark.parametrize("name,data,message", [
+        ("calls.txt", b"a,b\n", ".csv files"),
+        ("calls.csv", b"", "empty"),
+        ("calls.csv", "ä".encode("latin-1"), "UTF-8"),
+        ("calls.csv", b"a" * (uploads.MAX_UPLOAD_BYTES + 1), "at most"),
+    ])
+    def test_csv_refusals(self, store, name, data, message):
+        with pytest.raises(UploadError, match=message):
+            store.put("t1", name, data, kind="csv")
+
+    def test_images_never_resolve_csv_uploads(self, store):
+        upload = store.put("", "calls.csv", b"a,b\n", kind="csv")
+        uploads.set_upload_links(_Links())
+        with pytest.raises(UploadError, match="not a image upload"):
+            uploads.public_url_for(upload.upload_id)
+
+    def test_old_metadata_without_kind_reads_as_image(self, store):
+        upload = store.put("t1", "logo.png", _png())
+        meta = next(store.root.rglob(f"{upload.upload_id}.json"))
+        import json
+        data = json.loads(meta.read_text())
+        data.pop("kind"), data.pop("lines")
+        meta.write_text(json.dumps(data))
+        assert store.list("t1")[0].kind == "image"
+
+    @pytest.mark.asyncio
+    async def test_upload_conversion_csv_gives_a_csv_link_or_the_card(self, store):
+        uploads.set_upload_links(_Links())
+        async with Client(server.mcp) as client:
+            hosted = (await client.call_tool("upload_conversion_csv", {})).structured_content
+        assert hosted["upload_kind"] == "csv"
+        assert hosted["upload_url"].endswith("-csv")
+        assert "conversions.csv" in hosted["curl_example"]
+        async with Client(server.mcp, extensions=CARDS) as client:
+            card = await client.call_tool("upload_conversion_csv", {})
+            assert card.structured_content["upload"] == "card"
+            code = card.meta["adloop/upload"]["code"]
+            stored = await client.call_tool("store_image_upload", {
+                "name": "calls.csv", "data_base64": base64.b64encode(b"a,b\n1,2\n").decode(),
+                "code": code, "kind": "csv",
+            })
+        assert stored.structured_content["kind"] == "csv"

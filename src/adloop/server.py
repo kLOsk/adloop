@@ -4590,10 +4590,15 @@ def upload_images() -> dict:
     draft_image_assets, or as "upload:<id>" into the image fields of
     draft_reddit_ad. Returns the current uploads and how to add more.
     """
+    return _upload_tool_result("image")
+
+
+def _upload_tool_result(kind: str):
+    """The upload card (with its code) or the upload link, for ``kind``."""
     from adloop.uploads import upload_instructions
 
     shows_cards = client_shows_cards()
-    result = upload_instructions(shows_cards)
+    result = upload_instructions(shows_cards, kind)
     if not shows_cards:
         return result
     from fastmcp.tools import ToolResult
@@ -4610,22 +4615,48 @@ def upload_images() -> dict:
 
 
 @_tool(
+    title="Upload a conversion CSV",
+    annotations=_READONLY,
+    tags={"ads"},
+    meta={"ui": {"resourceUri": UPLOAD_CARD_URI}},
+)
+@_safe
+def upload_conversion_csv() -> dict:
+    """Let the user upload a conversion CSV for an offline conversion upload.
+
+    For the CSV behind draft_upload_call_conversions or
+    draft_upload_enhanced_conversions_for_leads when the file is not on the
+    machine running AdLoop, as on AdLoop Cloud. Apps that show AdLoop's
+    cards display an upload card where the user drops the .csv file; the
+    card then posts the upload id into the chat. Other apps on AdLoop Cloud
+    get an upload link for the user (or a coding agent, with curl). The
+    file holds personal data (phone numbers, emails), so it is kept for two
+    hours at most and deleted as soon as a draft has read it. Returns the
+    CSV uploads waiting to be used and how to add one.
+    """
+    return _upload_tool_result("csv")
+
+
+@_tool(
     title="Store an uploaded image",
     annotations=_WRITE,
     tags={"core"},
     meta={"ui": {"resourceUri": UPLOAD_CARD_URI, "visibility": ["app"]}},
 )
 @_safe
-def store_image_upload(name: str, data_base64: str, code: str = "") -> dict:
-    """Store an image dropped on the AdLoop upload card.
+def store_image_upload(name: str, data_base64: str, code: str = "", kind: str = "image") -> dict:
+    """Store a file dropped on the AdLoop upload card.
 
     Called only by the upload card; AI apps keep this tool out of the
-    model's tool list. Returns the upload's id, type and dimensions.
+    model's tool list. Returns the upload's id, type and size (dimensions
+    for images, lines for CSVs).
 
     Args:
         name: The file name, used for the asset name.
         data_base64: The file content, base64-encoded.
-        code: The upload card's code from upload_images.
+        code: The upload card's code from upload_images or
+            upload_conversion_csv.
+        kind: "image" (default) or "csv" for a conversion CSV.
     """
     import base64
     import binascii
@@ -4637,20 +4668,21 @@ def store_image_upload(name: str, data_base64: str, code: str = "") -> dict:
     except (binascii.Error, ValueError):
         return {"error": "The file did not arrive intact; upload it again."}
     try:
-        upload = get_upload_store().put(current_tenant(), name, data)
+        upload = get_upload_store().put(current_tenant(), name, data, kind=kind)
     except UploadError as exc:
         return {"error": f"{name}: {exc}"}
     return {"status": "UPLOADED", **upload.summary()}
 
 
-@_tool(title="List uploaded images", annotations=_READONLY, tags={"core"})
+@_tool(title="List uploads", annotations=_READONLY, tags={"core"})
 @_safe
 def list_uploads() -> dict:
-    """List the images the user uploaded to AdLoop that have not expired.
+    """List the files the user uploaded to AdLoop that have not expired.
 
-    Returns each upload's upload_id, name, type, dimensions, size and hours
-    until it expires (uploads last a day): the ids of files the user sent
-    through the upload link, or of earlier uploads.
+    Returns each upload's upload_id, kind (image or csv), name, type, size,
+    dimensions (images) or lines (CSVs) and hours until it expires: images
+    last a day, conversion CSVs two hours or until a draft reads them. The
+    ids of files the user sent through an upload link show up here.
     """
     from adloop.uploads import current_tenant, get_upload_store
 
@@ -4660,7 +4692,8 @@ def list_uploads() -> dict:
         "usage": (
             "draft_image_assets(upload_ids=[...]) for Google Ads; "
             "\"upload:<upload_id>\" as image_url, thumbnail_url or a carousel card's "
-            "image_url in draft_reddit_ad (AdLoop Cloud only)."
+            "image_url in draft_reddit_ad (AdLoop Cloud only). CSV uploads: upload_id in "
+            "draft_upload_call_conversions or draft_upload_enhanced_conversions_for_leads."
         ),
     }
 
@@ -6141,7 +6174,8 @@ def draft_remove_conversion_action(
 @_tool(title="Draft call conversion upload", annotations=_WRITE, tags={"ads"})
 @_safe
 def draft_upload_call_conversions(
-    csv_path: str,
+    csv_path: str = "",
+    upload_id: str = "",
     default_region: str = "",
     consent: dict | None = None,
     customer_id: str = "",
@@ -6157,8 +6191,9 @@ def draft_upload_call_conversions(
     drafting, so a typo fails here rather than after the upload. Optional
     `Ad User Data` and `Ad Personalization` columns carry consent per row.
 
-    Local file only: on the hosted server this tool refuses, because it would
-    read a path on the server rather than the caller's machine.
+    The CSV comes from csv_path (a file on the machine running AdLoop) or
+    from upload_id (a file uploaded with upload_conversion_csv, the only way
+    on AdLoop Cloud). An uploaded file is deleted once the draft has read it.
 
     PII: the caller phone number is required RAW by Google (it cannot be
     hashed), so it lives in the plan's apply-only payload — the preview shows
@@ -6181,8 +6216,10 @@ def draft_upload_call_conversions(
 
     Args:
         csv_path: Path of the CSV file holding the upload rows, read on the
-            machine that runs AdLoop. The hosted server refuses this tool
-            rather than reading a path of its own.
+            machine that runs AdLoop. Refused on the hosted server; use
+            upload_id there.
+        upload_id: Id of a CSV uploaded with upload_conversion_csv (up_...),
+            instead of csv_path.
         default_region: ISO 3166-1 alpha-2 country assumed for phone numbers
             that carry no country code, e.g. "DE" for "0151 12345678". Empty
             leaves such numbers unusable and the row is skipped.
@@ -6202,6 +6239,7 @@ def draft_upload_call_conversions(
         current_config(),
         customer_id=customer_id or current_config().ads.customer_id,
         csv_path=csv_path,
+        upload_id=upload_id,
         default_region=default_region,
         consent=consent,
     )
@@ -6210,7 +6248,8 @@ def draft_upload_call_conversions(
 @_tool(title="Draft enhanced conversions upload", annotations=_WRITE, tags={"ads"})
 @_safe
 def draft_upload_enhanced_conversions_for_leads(
-    csv_path: str,
+    csv_path: str = "",
+    upload_id: str = "",
     default_region: str = "",
     consent: dict | None = None,
     customer_id: str = "",
@@ -6235,8 +6274,9 @@ def draft_upload_enhanced_conversions_for_leads(
     sharing an Order ID count once at Google; two rows with different Order
     IDs are two real orders and are not reported.
 
-    Local file only: on the hosted server this tool refuses, because it would
-    read a path on the server rather than the caller's machine.
+    The CSV comes from csv_path (a file on the machine running AdLoop) or
+    from upload_id (a file uploaded with upload_conversion_csv, the only way
+    on AdLoop Cloud). An uploaded file is deleted once the draft has read it.
 
     Returns a preview with a plan_id, the row counts, the consent the rows
     actually carry (`consent_summary`) and the skipped rows; nothing is
@@ -6244,8 +6284,10 @@ def draft_upload_enhanced_conversions_for_leads(
 
     Args:
         csv_path: Path of the CSV file holding the upload rows, read on the
-            machine that runs AdLoop. The hosted server refuses this tool
-            rather than reading a path of its own.
+            machine that runs AdLoop. Refused on the hosted server; use
+            upload_id there.
+        upload_id: Id of a CSV uploaded with upload_conversion_csv (up_...),
+            instead of csv_path.
         default_region: ISO 3166-1 alpha-2 country assumed for phone numbers
             that carry no country code, e.g. "DE" for "0151 12345678". Empty
             leaves such numbers unusable; the row still uploads when its email
@@ -6266,6 +6308,7 @@ def draft_upload_enhanced_conversions_for_leads(
         current_config(),
         customer_id=customer_id or current_config().ads.customer_id,
         csv_path=csv_path,
+        upload_id=upload_id,
         default_region=default_region,
         consent=consent,
     )
