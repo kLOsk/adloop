@@ -335,6 +335,64 @@ def _not_confirmed(plan: ChangePlan) -> dict:
     }
 
 
+def _dialog_unanswered(plan: ChangePlan) -> dict:
+    return {
+        "status": "CONFIRMATION_UNANSWERED",
+        "plan_id": plan.plan_id,
+        "operation": plan.operation,
+        "message": (
+            "AdLoop asked the user to confirm this change in a dialog of their app, "
+            "but the app never returned an answer, so nothing was changed and the "
+            "plan stays pending. Ask the user whether a confirmation dialog appeared. "
+            "If it did, call confirm_and_apply again and have them answer it. If their "
+            "app cannot show dialogs (for example a headless agent or a script), the "
+            "workspace owner can allow approval in chat (AdLoop Cloud: Settings -> "
+            "Safety -> 'Also allow approval in chat'; self-hosted: "
+            "safety.allow_chat_approval: true), or the change can be applied from an "
+            "app that shows AdLoop's approval card, such as Claude or ChatGPT. Calling "
+            "confirm_and_apply again sends the dialog once more."
+        ),
+    }
+
+
+def _mark_dialog(plan: ChangePlan, open_: bool) -> None:
+    """Record (or clear) that a dialog for this plan awaits an answer."""
+    from datetime import datetime, timezone
+
+    from adloop.safety.preview import store_plan
+
+    plan.dialog_requested_at = datetime.now(timezone.utc).isoformat() if open_ else ""
+    store_plan(plan)
+
+
+def dialog_expected(plan_id: str) -> bool:
+    """Whether a real apply of this plan will ask the user in a dialog.
+
+    Used after a successful dry run, so the AI can tell the user to look out
+    for it instead of letting an unanswered dialog look like a hang.
+    """
+    if _dialog_applies(plan_id) is None:
+        return False
+    try:
+        from fastmcp.server.dependencies import get_context
+
+        if get_context()._is_modern_protocol():
+            return True
+    except Exception:
+        return False
+    from adloop.runtime import deployment_mode
+
+    # Older protocols get the dialog only self-hosted (see confirm_in_dialog).
+    return deployment_mode() != "server"
+
+
+DIALOG_NOTE = (
+    "The real apply (dry_run=false) asks the user to confirm in a dialog shown by "
+    "their app; tell them to look out for it and answer it. If no dialog appears, "
+    "the call returns CONFIRMATION_UNANSWERED on the next attempt with the ways out."
+)
+
+
 def _dialog_applies(plan_id: str) -> ChangePlan | None:
     """The plan when a real apply must be confirmed in a dialog, else None."""
     from adloop.runtime import current_config
@@ -375,6 +433,14 @@ async def confirm_in_dialog(context: Any, plan_id: str) -> Any | None:
     if context._is_modern_protocol():
         responses = context.input_responses
         if responses is None:
+            if plan.dialog_requested_at:
+                # The last dialog for this plan was sent and this is a fresh
+                # call, not its answer: the app received the dialog and never
+                # returned one. Say so instead of sending another dialog the
+                # app will sit on until its timeout. Cleared, so asking again
+                # sends a new dialog.
+                _mark_dialog(plan, False)
+                return ToolResult(structured_content=_dialog_unanswered(plan))
             import mcp_types
             from fastmcp.tools.base import InputRequiredToolResult
 
@@ -385,11 +451,14 @@ async def confirm_in_dialog(context: Any, plan_id: str) -> Any | None:
                 )
             )
             state = json.dumps({"plan_id": plan.plan_id, "code": approval_code(plan)})
+            _mark_dialog(plan, True)
             return InputRequiredToolResult(
                 mcp_types.InputRequiredResult(
                     input_requests={DIALOG_KEY: request}, request_state=state
                 )
             )
+        if plan.dialog_requested_at:
+            _mark_dialog(plan, False)  # answered, whatever the answer is
         try:
             state = json.loads(context.request_state or "{}")
         except ValueError:

@@ -152,3 +152,60 @@ def test_the_message_names_the_change_and_truncates_long_values():
     assert "Update ad group (ad group 9)" in message
     assert "x" * 157 + "..." in message
     assert "3 more fields in the preview" in message
+
+
+async def test_an_unanswered_dialog_does_not_hang_the_next_call(fake_apply):
+    """An app that declares dialogs, receives one and never answers it (seen
+    with a customer's agent, 2026-10-21) used to wait until its own timeout on
+    every retry. The next call now says what happened instead."""
+    import asyncio
+
+    from adloop.safety.preview import get_plan
+
+    plan_id = _plan()
+
+    async def never(message, response_type, params, ctx):
+        await asyncio.sleep(3600)
+
+    async with Client(server.mcp, elicitation_handler=never) as client:
+        with pytest.raises((asyncio.TimeoutError, TimeoutError)):
+            await asyncio.wait_for(
+                client.call_tool("confirm_and_apply", {"plan_id": plan_id, "dry_run": False}), 2
+            )
+        retry = await asyncio.wait_for(
+            client.call_tool("confirm_and_apply", {"plan_id": plan_id, "dry_run": False},
+                             raise_on_error=False), 5
+        )
+
+    assert retry.structured_content["status"] == "CONFIRMATION_UNANSWERED"
+    assert "Also allow approval in chat" in retry.structured_content["message"]
+    assert fake_apply == []
+    plan = get_plan(plan_id)
+    assert plan is not None and plan.dialog_requested_at == ""
+
+    # Asking again sends a fresh dialog, and an answer applies the plan.
+    status, asked = await _apply(plan_id, answer={"apply": True})
+    assert status == "APPLIED" and asked
+
+
+async def test_a_declined_dialog_is_asked_again_next_time(fake_apply):
+    plan_id = _plan()
+    status, _ = await _apply(plan_id, answer={"apply": False})
+    assert status == "NOT_CONFIRMED"
+    status, asked = await _apply(plan_id, answer={"apply": True})
+    assert status == "APPLIED" and asked
+
+
+async def test_the_dry_run_announces_the_dialog_only_where_one_follows(fake_apply):
+    plan_id = _plan()
+    async with Client(server.mcp, elicitation_handler=_answering({"apply": True}, [])) as client:
+        with_dialog = await client.call_tool("confirm_and_apply", {"plan_id": plan_id, "dry_run": True})
+    assert "dialog" in with_dialog.structured_content["next_step"]
+
+    async with Client(server.mcp) as client:
+        without = await client.call_tool("confirm_and_apply", {"plan_id": plan_id, "dry_run": True})
+    assert "next_step" not in without.structured_content
+
+    async with Client(server.mcp, extensions=CARDS, elicitation_handler=_answering({"apply": True}, [])) as client:
+        cards = await client.call_tool("confirm_and_apply", {"plan_id": plan_id, "dry_run": True})
+    assert "next_step" not in cards.structured_content

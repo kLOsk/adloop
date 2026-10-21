@@ -25,6 +25,11 @@ class ChangePlan:
     # Ad platform the plan targets: "" (Google, the default so stored plans
     # from before the field existed still load) or "reddit".
     platform: str = ""
+    # When a confirmation dialog for this plan was last sent and not yet
+    # answered (ISO timestamp, "" when none is open). An app that receives
+    # the dialog but never answers it would otherwise leave every retry
+    # waiting until its own timeout; see approval.confirm_in_dialog.
+    dialog_requested_at: str = ""
 
     # Payload the applier needs but a preview must never show: an upload's rows
     # (the caller id cannot be hashed, so call uploads carry raw phone numbers),

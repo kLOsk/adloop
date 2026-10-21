@@ -4482,6 +4482,11 @@ def confirm_and_apply(
     only the user's click on the card applies the change. Dry runs still
     work. The workspace owner can allow approval in chat as well.
 
+    Confirmation dialogs: in apps that show dialogs instead, dry_run=false
+    first asks the user in a dialog. A declined dialog returns NOT_CONFIRMED;
+    an app that receives the dialog but never answers it gets
+    CONFIRMATION_UNANSWERED on the next call, with the ways out.
+
     Args:
         plan_id: The plan_id returned by a prior draft_*, update_*, add_*,
             pause/enable/remove or other preview tool call. An unknown or
@@ -4490,13 +4495,17 @@ def confirm_and_apply(
             applies the change for real.
     """
     from adloop.ads.write import confirm_and_apply as _impl
-    from adloop.safety.approval import chat_apply_refusal
+    from adloop.safety.approval import DIALOG_NOTE, chat_apply_refusal, dialog_expected
 
     if not dry_run:
         refusal = chat_apply_refusal(plan_id)
         if refusal is not None:
             return refusal
-    return _impl(current_config(), plan_id=plan_id, dry_run=dry_run)
+    result = _impl(current_config(), plan_id=plan_id, dry_run=dry_run)
+    if (dry_run and isinstance(result, dict) and result.get("status") == "DRY_RUN_SUCCESS"
+            and dialog_expected(plan_id)):
+        result["next_step"] = DIALOG_NOTE
+    return result
 
 
 @_tool(
