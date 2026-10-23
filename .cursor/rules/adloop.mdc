@@ -319,7 +319,7 @@ Conversions that happen offline (a sales call, a lead that turned into a deal) g
 | `draft_prepare_brand_exclusions` | Draft the whole safe state for a brand exclusion in one step: AI Max on, search term matching off on every non-removed ad group, text and final-URL automation opted out. Touches nothing else. | `campaign_id`, optional `include_paused_ad_groups` |
 | `pause_entity` | Propose pausing campaign/ad group/ad/keyword/asset group | `entity_type` (incl. `asset_group` for PMax), `entity_id` |
 | `enable_entity` | Propose enabling paused entity | `entity_type` (incl. `asset_group`), `entity_id` |
-| `remove_entity` | Propose REMOVING an entity (irreversible) | `entity_type` (incl. "asset_group", "negative_keyword", "shared_criterion", "ad_group_criterion", "campaign_criterion", "campaign_asset", "asset", "customer_asset"), `entity_id` |
+| `remove_entity` | Propose REMOVING an entity (irreversible) | `entity_type` (incl. "asset_group", "negative_keyword", "shared_criterion", "ad_group_criterion", "campaign_criterion", "campaign_asset", "ad_group_asset", "asset", "customer_asset"), `entity_id` |
 | `confirm_and_apply` | Execute a previously previewed change | `plan_id` from a draft tool, `dry_run` (default true) |
 
 ### Reddit Ads Write Tools (ALL require safety confirmation)
