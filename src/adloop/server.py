@@ -4405,6 +4405,225 @@ def add_ad_schedule(
     )
 
 
+@_tool(title="Draft a promotion asset", annotations=_WRITE, tags={"ads"})
+@_safe
+def draft_promotion(
+    promotion_target: str,
+    final_url: str,
+    language_code: str,
+    money_off: float = 0,
+    percent_off: float = 0,
+    campaign_id: str = "",
+    ad_group_id: str = "",
+    scope: str = "",
+    currency_code: str = "",
+    promotion_code: str = "",
+    orders_over_amount: float = 0,
+    occasion: str = "",
+    discount_modifier: str = "",
+    start_date: str = "",
+    end_date: str = "",
+    redemption_start_date: str = "",
+    redemption_end_date: str = "",
+    customer_id: str = "",
+) -> dict:
+    """Draft a promotion asset ("20% off winter tyres") — returns a PREVIEW.
+
+    Creates the promotion and links it where the id points: ad_group_id
+    links to that ad group, campaign_id to that campaign. Account-wide
+    linking needs scope="account" and no id. The final_url is checked for
+    reachability. Returns a preview with a plan_id.
+
+    Args:
+        promotion_target: What the promotion is for, shown in the ad (at
+            most 20 characters).
+        final_url: Landing page of the promotion.
+        language_code: Language of the promotion's text ("de", "en").
+            Required: Google shows the promotion in that language.
+        money_off: Fixed discount, in the account currency unless
+            currency_code says otherwise. Pass this or percent_off.
+        percent_off: Percentage discount, greater than 0 and at most 100
+            (15.5 for 15.5%). Pass this or money_off.
+        campaign_id: Numeric ID of the campaign to link the promotion to.
+        ad_group_id: Numeric ID of the ad group to link it to, instead of a
+            campaign.
+        scope: Empty (follows the id), "campaign", "ad_group" or "account".
+        currency_code: ISO 4217 code for money_off and orders_over_amount.
+            Empty uses the account currency (shown in the preview).
+        promotion_code: Optional coupon code (at most 15 characters). Pass
+            this or orders_over_amount, not both.
+        orders_over_amount: Optional minimum order value that unlocks the
+            promotion.
+        occasion: Optional occasion such as BLACK_FRIDAY, CHRISTMAS or
+            SUMMER_SALE.
+        discount_modifier: "UP_TO" shows "Up to 20% off"; empty for none.
+        start_date: First day the promotion shows, YYYY-MM-DD.
+        end_date: Last day the promotion shows, YYYY-MM-DD.
+        redemption_start_date: First day the offer can be redeemed, YYYY-MM-DD.
+        redemption_end_date: Last day the offer can be redeemed, YYYY-MM-DD.
+        customer_id: Google Ads customer ID (digits, dashes optional). Defaults to
+            the configured account.
+    """
+    from adloop.ads.assets import draft_promotion as _impl
+
+    return _impl(
+        current_config(),
+        customer_id=customer_id or current_config().ads.customer_id,
+        campaign_id=campaign_id,
+        ad_group_id=ad_group_id,
+        scope=scope,
+        language_code=language_code,
+        currency_code=currency_code,
+        promotion_target=promotion_target,
+        final_url=final_url,
+        money_off=money_off,
+        percent_off=percent_off,
+        promotion_code=promotion_code,
+        orders_over_amount=orders_over_amount,
+        occasion=occasion,
+        discount_modifier=discount_modifier,
+        start_date=start_date,
+        end_date=end_date,
+        redemption_start_date=redemption_start_date,
+        redemption_end_date=redemption_end_date,
+    )
+
+
+@_tool(title="Draft a promotion edit", annotations=_WRITE, tags={"ads"})
+@_safe
+def update_promotion(
+    asset_id: str,
+    promotion_target: str = "",
+    final_url: str = "",
+    money_off: float = 0,
+    percent_off: float = 0,
+    currency_code: str = "",
+    promotion_code: str = "",
+    orders_over_amount: float = 0,
+    occasion: str = "",
+    discount_modifier: str = "",
+    language_code: str = "",
+    start_date: str = "",
+    end_date: str = "",
+    redemption_start_date: str = "",
+    redemption_end_date: str = "",
+    clear_fields: _StrList = [],  # noqa: B006
+    customer_id: str = "",
+) -> dict:
+    """Draft changing a promotion asset in place — returns a PREVIEW.
+
+    Only the fields passed change; everything else stays as it is. The
+    asset keeps its ID and history, and the change shows everywhere it is
+    linked. Passing money_off replaces a percent_off (and the other way
+    round); passing promotion_code replaces an orders_over_amount (and the
+    other way round). The preview shows old and new values; an edit in
+    Google Ads before the apply stops it.
+
+    Args:
+        asset_id: Numeric ID of the PROMOTION asset.
+        promotion_target: New target text, at most 20 characters.
+        final_url: New landing page; must be reachable.
+        money_off: New fixed discount.
+        percent_off: New percentage discount, at most 100.
+        currency_code: ISO 4217 code for the amounts. Empty keeps the
+            promotion's currency (or uses the account currency).
+        promotion_code: New coupon code, at most 15 characters.
+        orders_over_amount: New minimum order value.
+        occasion: New occasion such as BLACK_FRIDAY.
+        discount_modifier: "UP_TO", or clear it with clear_fields.
+        language_code: New language of the promotion's text.
+        start_date: First day the promotion shows, YYYY-MM-DD.
+        end_date: Last day the promotion shows, YYYY-MM-DD.
+        redemption_start_date: First day the offer can be redeemed, YYYY-MM-DD.
+        redemption_end_date: Last day the offer can be redeemed, YYYY-MM-DD.
+        clear_fields: Optional fields to remove: promotion_code,
+            orders_over_amount, occasion, discount_modifier, start_date,
+            end_date, redemption_start_date, redemption_end_date.
+        customer_id: Google Ads customer ID (digits, dashes optional). Defaults to
+            the configured account.
+    """
+    from adloop.ads.assets import update_promotion as _impl
+
+    return _impl(
+        current_config(),
+        customer_id=customer_id or current_config().ads.customer_id,
+        asset_id=asset_id,
+        language_code=language_code,
+        currency_code=currency_code,
+        clear_fields=clear_fields,
+        promotion_target=promotion_target,
+        final_url=final_url,
+        money_off=money_off,
+        percent_off=percent_off,
+        promotion_code=promotion_code,
+        orders_over_amount=orders_over_amount,
+        occasion=occasion,
+        discount_modifier=discount_modifier,
+        start_date=start_date,
+        end_date=end_date,
+        redemption_start_date=redemption_start_date,
+        redemption_end_date=redemption_end_date,
+    )
+
+
+@_tool(title="Draft a price asset", annotations=_WRITE, tags={"ads"})
+@_safe
+def draft_price_asset(
+    offerings: _DictList,
+    price_type: str,
+    language_code: str,
+    campaign_id: str = "",
+    ad_group_id: str = "",
+    scope: str = "",
+    price_qualifier: str = "",
+    currency_code: str = "",
+    customer_id: str = "",
+) -> dict:
+    """Draft a price asset (the row of prices under an ad) — returns a PREVIEW.
+
+    Creates a price asset with 3-8 offerings and links it where the id
+    points: ad_group_id links to that ad group, campaign_id to that
+    campaign. Account-wide linking needs scope="account" and no id. Every
+    offering URL is checked for reachability. Google disapproves prices that
+    differ from the landing page. Returns a preview with a plan_id.
+
+    Args:
+        offerings: 3-8 dicts, each with header and description (at most 25
+            characters each, headers unique), price (greater than 0),
+            final_url, and optional final_mobile_url and unit (PER_HOUR,
+            PER_DAY, PER_WEEK, PER_MONTH, PER_YEAR, PER_NIGHT).
+        price_type: SERVICES, BRANDS, EVENTS, LOCATIONS, NEIGHBORHOODS,
+            PRODUCT_CATEGORIES, PRODUCT_TIERS, SERVICE_CATEGORIES or
+            SERVICE_TIERS.
+        language_code: Language of the offerings' text ("de", "en").
+            Required.
+        campaign_id: Numeric ID of the campaign to link the prices to.
+        ad_group_id: Numeric ID of the ad group to link them to, instead of
+            a campaign.
+        scope: Empty (follows the id), "campaign", "ad_group" or "account".
+        price_qualifier: FROM ("From 49 EUR"), UP_TO or AVERAGE; empty for
+            none.
+        currency_code: ISO 4217 code of the prices. Empty uses the account
+            currency (shown in the preview).
+        customer_id: Google Ads customer ID (digits, dashes optional). Defaults to
+            the configured account.
+    """
+    from adloop.ads.assets import draft_price_asset as _impl
+
+    return _impl(
+        current_config(),
+        customer_id=customer_id or current_config().ads.customer_id,
+        campaign_id=campaign_id,
+        ad_group_id=ad_group_id,
+        scope=scope,
+        price_type=price_type,
+        price_qualifier=price_qualifier,
+        language_code=language_code,
+        currency_code=currency_code,
+        offerings=offerings,
+    )
+
+
 @_tool(title="Draft a business name asset", annotations=_WRITE, tags={"ads"})
 @_safe
 def draft_business_name_asset(

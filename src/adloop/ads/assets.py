@@ -18,6 +18,7 @@ Based on work by Illia Sapryga (PR #95).
 
 from __future__ import annotations
 
+import re
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -1248,3 +1249,507 @@ def _apply_add_ad_schedule(client, cid: str, changes: dict) -> dict:
     response = client.get_service("CampaignCriterionService").mutate_campaign_criteria(
         customer_id=cid, operations=operations)
     return {"campaign_criteria": [r.resource_name for r in response.results]}
+
+
+# ---------------------------------------------------------------------------
+# Promotion and price assets (after PR #97 by Illia Sapryga)
+#
+# Units on the v25 protos: PromotionAsset.percent_off 1,000,000 = 100%
+# (10% -> 100_000); money (money_amount_off, orders_over_amount,
+# PriceOffering.price) in micros. Amounts are in the account's currency
+# unless currency_code says otherwise, and the text's language is always
+# named: neither has a silent default.
+# ---------------------------------------------------------------------------
+
+_PROMOTION_TARGET_MAX = 20
+_PROMOTION_CODE_MAX = 15
+_PRICE_TEXT_MAX = 25
+_PRICE_OFFERINGS = (3, 8)
+_DATE_FIELDS = ("start_date", "end_date", "redemption_start_date", "redemption_end_date")
+_LANGUAGE_RE = re.compile(r"^[A-Za-z]{2,3}(-[A-Za-z0-9]{2,8})*$")
+_CURRENCY_RE = re.compile(r"^[A-Z]{3}$")
+
+
+def _amount(value: object, label: str, errors: list[str]) -> float:
+    """A non-negative amount (0 when empty); errors are recorded, not raised."""
+    if value is None or value == "":
+        return 0.0
+    if isinstance(value, bool):
+        errors.append(f"{label} must be a number")
+        return 0.0
+    try:
+        amount = float(value)
+    except (TypeError, ValueError):
+        errors.append(f"{label} must be a number")
+        return 0.0
+    if amount < 0:
+        errors.append(f"{label} must not be negative, got {value}")
+        return 0.0
+    return amount
+
+
+def _micros(amount: float) -> int:
+    """Currency units to micros, rounded (19.99 -> 19_990_000)."""
+    return round(float(amount) * 1_000_000)
+
+
+def _iso_date(value: str) -> bool:
+    from datetime import date
+
+    if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", value or ""):
+        return False
+    try:
+        date.fromisoformat(value)
+    except ValueError:
+        return False
+    return True
+
+
+def _language(code: str, errors: list[str]) -> str:
+    code = _clean(code)
+    if not code:
+        errors.append(
+            "language_code is required: the language of the asset's text, such as 'de' "
+            "or 'en' (Google shows it to people searching in that language)"
+        )
+    elif not _LANGUAGE_RE.match(code):
+        errors.append(f"language_code '{code}' is not a language tag such as 'de', 'en' or 'pt-BR'")
+    head, _, rest = code.partition("-")
+    return head.lower() + (f"-{rest}" if rest else "")
+
+
+def _resolve_currency(config: AdLoopConfig, customer_id: str, explicit: str) -> tuple[str, list[str], list[str]]:
+    """``(currency, errors, warnings)``: explicit, else the account's currency."""
+    explicit = _clean(explicit).upper()
+    if explicit and not _CURRENCY_RE.match(explicit):
+        return "", [f"currency_code '{explicit}' must be a 3-letter ISO 4217 code such as EUR"], []
+    account = _account_settings(config, customer_id)["currency_code"]
+    if explicit:
+        if account and explicit != account:
+            return explicit, [], [f"Amounts are in {explicit}, but the account bills in {account}."]
+        return explicit, [], []
+    if not account:
+        return "", ["currency_code could not be read from the account; pass it"], []
+    return account, [], [f"Amounts are in {account}, the account currency."]
+
+
+def _urls_reachable(urls: list[str]) -> tuple[list[str], list[str]]:
+    """``(errors, warnings)`` for landing pages (unreachable blocks, inconclusive warns)."""
+    from adloop.ads.write import _validate_urls
+
+    checks, inconclusive = _validate_urls(list(dict.fromkeys(u for u in urls if u)))
+    errors = [f"final_url '{u}' is not reachable: {err}" for u, err in checks.items() if err]
+    return errors, [f"'{u}': {msg}" for u, msg in inconclusive.items()]
+
+
+def _check_promotion(fields: dict) -> list[str]:
+    """Errors for a complete promotion (all fields present, amounts parsed)."""
+    from adloop.ads.enums import enum_names
+
+    errors: list[str] = []
+    target = fields["promotion_target"]
+    if not target:
+        errors.append("promotion_target is required")
+    elif len(target) > _PROMOTION_TARGET_MAX:
+        errors.append(f"promotion_target '{target}' is {len(target)} chars (max {_PROMOTION_TARGET_MAX})")
+    if not fields["final_url"]:
+        errors.append("final_url is required")
+    money, percent = fields["money_off"], fields["percent_off"]
+    if money and percent:
+        errors.append("Pass money_off or percent_off, not both")
+    elif not money and not percent:
+        errors.append("money_off or percent_off is required (greater than 0)")
+    if percent > 100:
+        errors.append(f"percent_off must be at most 100, got {percent}")
+    code = fields["promotion_code"]
+    if len(code) > _PROMOTION_CODE_MAX:
+        errors.append(f"promotion_code '{code}' is {len(code)} chars (max {_PROMOTION_CODE_MAX})")
+    if code and fields["orders_over_amount"]:
+        errors.append("Pass promotion_code or orders_over_amount, not both (Google takes one trigger)")
+    if fields["occasion"] and fields["occasion"] not in enum_names("PromotionExtensionOccasionEnum"):
+        errors.append(f"occasion '{fields['occasion']}' is not one of "
+                      f"{sorted(enum_names('PromotionExtensionOccasionEnum'))}")
+    if fields["discount_modifier"] and fields["discount_modifier"] != "UP_TO":
+        errors.append("discount_modifier must be UP_TO ('Up to 20% off') or empty")
+    for field in _DATE_FIELDS:
+        if fields[field] and not _iso_date(fields[field]):
+            errors.append(f"{field} '{fields[field]}' must be a date YYYY-MM-DD")
+    for start, end in (("start_date", "end_date"), ("redemption_start_date", "redemption_end_date")):
+        if (fields[start] and fields[end] and _iso_date(fields[start]) and _iso_date(fields[end])
+                and fields[end] < fields[start]):
+            errors.append(f"{end} {fields[end]} is before {start} {fields[start]}")
+    return errors
+
+
+def _promotion_warnings(fields: dict) -> list[str]:
+    from datetime import UTC, datetime
+
+    if fields["end_date"] and fields["end_date"] < datetime.now(UTC).date().isoformat():
+        return [f"end_date {fields['end_date']} is in the past, so the promotion would never show."]
+    return []
+
+
+def _promotion_input(**raw) -> tuple[dict, list[str]]:
+    """Cleaned promotion fields from tool arguments, plus parse errors."""
+    errors: list[str] = []
+    fields = {
+        "promotion_target": _clean(raw.get("promotion_target")),
+        "final_url": _clean(raw.get("final_url")),
+        "money_off": _amount(raw.get("money_off"), "money_off", errors),
+        "percent_off": _amount(raw.get("percent_off"), "percent_off", errors),
+        "promotion_code": _clean(raw.get("promotion_code")),
+        "orders_over_amount": _amount(raw.get("orders_over_amount"), "orders_over_amount", errors),
+        "occasion": _clean(raw.get("occasion")).upper(),
+        "discount_modifier": _clean(raw.get("discount_modifier")).upper(),
+        **{field: _clean(raw.get(field)) for field in _DATE_FIELDS},
+    }
+    return fields, errors
+
+
+def draft_promotion(
+    config: AdLoopConfig,
+    *,
+    customer_id: str = "",
+    campaign_id: str = "",
+    ad_group_id: str = "",
+    scope: str = "",
+    language_code: str = "",
+    currency_code: str = "",
+    **promotion,
+) -> dict:
+    """Draft a promotion asset linked to an ad group, a campaign or the account.
+
+    ``promotion`` takes promotion_target, final_url, money_off or percent_off,
+    promotion_code or orders_over_amount, occasion, discount_modifier and the
+    four dates.
+    """
+    from adloop.safety.preview import ChangePlan, store_plan
+
+    if blocked := _blocked("create_promotion", config):
+        return blocked
+    scope, campaign_id, ad_group_id, errors = resolve_scope(scope, campaign_id, ad_group_id)
+    fields, parse_errors = _promotion_input(**promotion)
+    fields["language_code"] = _language(language_code, errors)
+    errors += parse_errors or _check_promotion(fields)
+    if errors:
+        return {"error": "Validation failed", "details": errors}
+
+    warnings: list[str] = []
+    fields["currency_code"] = ""
+    if fields["money_off"] or fields["orders_over_amount"]:
+        fields["currency_code"], errors, warnings = _resolve_currency(config, customer_id, currency_code)
+        if errors:
+            return {"error": "Validation failed", "details": errors}
+    url_errors, url_warnings = _urls_reachable([fields["final_url"]])
+    if url_errors:
+        return {"error": "Validation failed", "details": url_errors}
+
+    entity_type, entity_id = scope_entity(scope, customer_id, campaign_id, ad_group_id)
+    plan = ChangePlan(
+        operation="create_promotion",
+        entity_type=entity_type,
+        entity_id=entity_id,
+        customer_id=customer_id,
+        changes={"scope": scope, "campaign_id": campaign_id, "ad_group_id": ad_group_id, "promotion": fields},
+    )
+    store_plan(plan)
+    preview = plan.to_preview()
+    preview["warnings"] = [*warnings, *_promotion_warnings(fields), *url_warnings] + (
+        [_account_scope_warning("promotions")] if scope == "account" else [])
+    return preview
+
+
+_PROMOTION_FIELDS = {
+    "promotion_target": "asset.promotion_asset.promotion_target",
+    "final_url": "asset.final_urls",
+    "percent_off": "asset.promotion_asset.percent_off",
+    "money_off_micros": "asset.promotion_asset.money_amount_off.amount_micros",
+    "money_off_currency": "asset.promotion_asset.money_amount_off.currency_code",
+    "promotion_code": "asset.promotion_asset.promotion_code",
+    "orders_over_micros": "asset.promotion_asset.orders_over_amount.amount_micros",
+    "orders_over_currency": "asset.promotion_asset.orders_over_amount.currency_code",
+    "occasion": "asset.promotion_asset.occasion",
+    "discount_modifier": "asset.promotion_asset.discount_modifier",
+    "language_code": "asset.promotion_asset.language_code",
+    **{field: f"asset.promotion_asset.{field}" for field in _DATE_FIELDS},
+}
+_CLEARABLE = ("promotion_code", "orders_over_amount", "occasion", "discount_modifier", *_DATE_FIELDS)
+
+
+def _promotion_from_google(raw: dict) -> dict:
+    """A promotion as Google stores it, in the shape draft_promotion takes."""
+    return {
+        "promotion_target": raw["promotion_target"],
+        "final_url": raw["final_url"],
+        "money_off": (raw["money_off_micros"] or 0) / 1_000_000,
+        "percent_off": (raw["percent_off"] or 0) / 10_000,
+        "currency_code": raw["money_off_currency"] or raw["orders_over_currency"] or "",
+        "promotion_code": raw["promotion_code"],
+        "orders_over_amount": (raw["orders_over_micros"] or 0) / 1_000_000,
+        "occasion": raw["occasion"],
+        "discount_modifier": raw["discount_modifier"],
+        "language_code": raw["language_code"],
+        **{field: raw[field] for field in _DATE_FIELDS},
+    }
+
+
+def update_promotion(
+    config: AdLoopConfig,
+    *,
+    customer_id: str = "",
+    asset_id: str = "",
+    language_code: str = "",
+    currency_code: str = "",
+    clear_fields: list[str] | None = None,
+    **promotion,
+) -> dict:
+    """Draft an in-place edit of a promotion asset; fields not passed stay as they are."""
+    if blocked := _blocked("update_promotion", config):
+        return blocked
+    asset_id = _clean(asset_id)
+    errors: list[str] = [] if _is_numeric_id(asset_id) else [f"asset_id must be numeric, got '{asset_id}'"]
+    passed, parse_errors = _promotion_input(**promotion)
+    errors += parse_errors
+    passed = {k: v for k, v in passed.items() if v}
+    if _clean(language_code):
+        passed["language_code"] = _language(language_code, errors)
+    clear = [_clean(f).lower() for f in clear_fields or []]
+    for field in clear:
+        if field not in _CLEARABLE:
+            errors.append(f"clear_fields: '{field}' cannot be cleared; clearable: {list(_CLEARABLE)}")
+        elif field in passed:
+            errors.append(f"clear_fields: '{field}' is also passed with a new value")
+    if not errors and not passed and not clear and not _clean(currency_code):
+        errors.append("No changes specified: pass the fields to change, or clear_fields")
+    if errors:
+        return {"error": "Validation failed", "details": errors}
+
+    raw, error = _asset_for_edit(config, customer_id, asset_id, _PROMOTION_FIELDS, "PROMOTION")
+    if error:
+        return error
+    current = _promotion_from_google(raw)
+    merged = {**current, **passed}
+    # One discount and one trigger at a time: a new one replaces the other.
+    if "money_off" in passed:
+        merged["percent_off"] = 0.0
+    if "percent_off" in passed:
+        merged["money_off"] = 0.0
+    if "promotion_code" in passed:
+        merged["orders_over_amount"] = 0.0
+    if "orders_over_amount" in passed:
+        merged["promotion_code"] = ""
+    for field in clear:
+        merged[field] = 0.0 if field == "orders_over_amount" else ""
+    errors = _check_promotion(merged)
+    if errors:
+        return {"error": "Validation failed", "details": errors}
+
+    warnings: list[str] = []
+    if merged["money_off"] or merged["orders_over_amount"]:
+        if _clean(currency_code) or not current["currency_code"]:
+            merged["currency_code"], errors, warnings = _resolve_currency(config, customer_id, currency_code)
+            if errors:
+                return {"error": "Validation failed", "details": errors}
+    else:
+        merged["currency_code"] = ""
+    if "final_url" in passed and passed["final_url"] != current["final_url"]:
+        url_errors, url_warnings = _urls_reachable([passed["final_url"]])
+        if url_errors:
+            return {"error": "Validation failed", "details": url_errors}
+        warnings += url_warnings
+
+    changed = {k: v for k, v in merged.items() if v != current[k]}
+    if not changed:
+        return {"error": f"Promotion {asset_id} already has these values; nothing to change"}
+    preview = _edit_plan("update_promotion", customer_id, asset_id,
+                         {"set": changed, "promotion": merged},
+                         {k: current[k] for k in changed}, pinned={k: raw[k] for k in _PROMOTION_FIELDS})
+    preview["warnings"] += warnings + _promotion_warnings(merged)
+    return preview
+
+
+def _populate_promotion(client, asset, promo: dict) -> None:
+    p = asset.promotion_asset
+    p.promotion_target = promo["promotion_target"]
+    if promo.get("money_off"):
+        p.money_amount_off.amount_micros = _micros(promo["money_off"])
+        p.money_amount_off.currency_code = promo["currency_code"]
+    elif promo.get("percent_off"):
+        p.percent_off = round(float(promo["percent_off"]) * 10_000)
+    if promo.get("promotion_code"):
+        p.promotion_code = promo["promotion_code"]
+    elif promo.get("orders_over_amount"):
+        p.orders_over_amount.amount_micros = _micros(promo["orders_over_amount"])
+        p.orders_over_amount.currency_code = promo["currency_code"]
+    if promo.get("occasion"):
+        p.occasion = getattr(client.enums.PromotionExtensionOccasionEnum, promo["occasion"])
+    if promo.get("discount_modifier"):
+        p.discount_modifier = getattr(client.enums.PromotionExtensionDiscountModifierEnum, promo["discount_modifier"])
+    p.language_code = promo["language_code"]
+    for field in _DATE_FIELDS:
+        if promo.get(field):
+            setattr(p, field, promo[field])
+    asset.final_urls.append(promo["final_url"])
+
+
+def _apply_create_promotion(client, cid: str, changes: dict) -> dict:
+    return _create_and_link(client, cid, [changes["promotion"]], client.enums.AssetFieldTypeEnum.PROMOTION,
+                            lambda asset, promo: _populate_promotion(client, asset, promo), changes)
+
+
+def _apply_update_promotion(client, cid: str, changes: dict) -> dict:
+    _check_unchanged(client, cid, changes, _PROMOTION_FIELDS)
+    changed, promo, before = changes["set"], changes["promotion"], changes["previous"]
+
+    def set_fields(asset):
+        p, paths = asset.promotion_asset, []
+        if "promotion_target" in changed:
+            p.promotion_target = promo["promotion_target"]
+            paths.append("promotion_asset.promotion_target")
+        if "final_url" in changed:
+            asset.final_urls.append(promo["final_url"])
+            paths.append("final_urls")
+        if changed.keys() & {"money_off", "percent_off", "currency_code"}:
+            if promo["percent_off"]:
+                p.percent_off = round(float(promo["percent_off"]) * 10_000)
+                paths.append("promotion_asset.percent_off")
+            else:
+                p.money_amount_off.amount_micros = _micros(promo["money_off"])
+                p.money_amount_off.currency_code = promo["currency_code"]
+                paths.append("promotion_asset.money_amount_off")
+        if changed.keys() & {"promotion_code", "orders_over_amount", "currency_code"}:
+            if promo["promotion_code"]:
+                p.promotion_code = promo["promotion_code"]
+                paths.append("promotion_asset.promotion_code")
+            elif promo["orders_over_amount"]:
+                p.orders_over_amount.amount_micros = _micros(promo["orders_over_amount"])
+                p.orders_over_amount.currency_code = promo["currency_code"]
+                paths.append("promotion_asset.orders_over_amount")
+            else:  # cleared: the masked, unset field is removed
+                paths += [f"promotion_asset.{f}" for f in ("promotion_code", "orders_over_amount") if before.get(f)]
+        for field, enum in (("occasion", "PromotionExtensionOccasionEnum"),
+                            ("discount_modifier", "PromotionExtensionDiscountModifierEnum")):
+            if field in changed:
+                if promo[field]:
+                    setattr(p, field, getattr(getattr(client.enums, enum), promo[field]))
+                paths.append(f"promotion_asset.{field}")
+        for field in ("language_code", *_DATE_FIELDS):
+            if field in changed:
+                if promo[field]:
+                    setattr(p, field, promo[field])
+                paths.append(f"promotion_asset.{field}")
+        return list(dict.fromkeys(paths))
+
+    return _apply_asset_update(client, cid, changes["asset_id"], set_fields)
+
+
+def draft_price_asset(
+    config: AdLoopConfig,
+    *,
+    customer_id: str = "",
+    campaign_id: str = "",
+    ad_group_id: str = "",
+    scope: str = "",
+    price_type: str = "",
+    price_qualifier: str = "",
+    language_code: str = "",
+    currency_code: str = "",
+    offerings: list[dict] | None = None,
+) -> dict:
+    """Draft a price asset (3-8 offerings) linked to an ad group, a campaign or the account."""
+    from adloop.ads.enums import enum_names
+    from adloop.safety.preview import ChangePlan, store_plan
+
+    if blocked := _blocked("create_price_asset", config):
+        return blocked
+    scope, campaign_id, ad_group_id, errors = resolve_scope(scope, campaign_id, ad_group_id)
+    ptype = _clean(price_type).upper()
+    types = sorted(enum_names("PriceExtensionTypeEnum"))
+    if ptype not in types:
+        errors.append(f"price_type is required, one of {types}")
+    qualifier = _clean(price_qualifier).upper()
+    if qualifier and qualifier not in enum_names("PriceExtensionPriceQualifierEnum"):
+        errors.append("price_qualifier must be FROM, UP_TO, AVERAGE or empty for none")
+    language = _language(language_code, errors)
+    rows = offerings or []
+    low, high = _PRICE_OFFERINGS
+    if not low <= len(rows) <= high:
+        errors.append(f"A price asset takes {low}-{high} offerings, got {len(rows)}")
+    units = enum_names("PriceExtensionPriceUnitEnum")
+    cleaned: list[dict] = []
+    headers: set[str] = set()
+    for i, row in enumerate(rows):
+        where = f"offerings[{i}]"
+        if not isinstance(row, dict):
+            errors.append(f"{where}: must be an object with header, description, price, final_url")
+            continue
+        item = {"header": _clean(row.get("header")), "description": _clean(row.get("description")),
+                "price": _amount(row.get("price"), f"{where}: price", errors),
+                "final_url": _clean(row.get("final_url")), "final_mobile_url": _clean(row.get("final_mobile_url")),
+                "unit": _clean(row.get("unit")).upper()}
+        for name in ("header", "description"):
+            if not item[name]:
+                errors.append(f"{where}: {name} is required")
+            elif len(item[name]) > _PRICE_TEXT_MAX:
+                errors.append(f"{where}: {name} '{item[name]}' is {len(item[name])} chars (max {_PRICE_TEXT_MAX})")
+        if item["header"] and item["header"].casefold() in headers:
+            errors.append(f"{where}: header '{item['header']}' is used twice; Google needs unique headers")
+        headers.add(item["header"].casefold())
+        if item["price"] <= 0:
+            errors.append(f"{where}: price must be greater than 0")
+        if not item["final_url"]:
+            errors.append(f"{where}: final_url is required")
+        if item["unit"] and item["unit"] not in units:
+            errors.append(f"{where}: unit must be one of {sorted(units)} or empty")
+        cleaned.append(item)
+    if errors:
+        return {"error": "Validation failed", "details": errors}
+
+    currency, errors, warnings = _resolve_currency(config, customer_id, currency_code)
+    if errors:
+        return {"error": "Validation failed", "details": errors}
+    url_errors, url_warnings = _urls_reachable([u for item in cleaned for u in (item["final_url"], item["final_mobile_url"])])
+    if url_errors:
+        return {"error": "Validation failed", "details": url_errors}
+
+    entity_type, entity_id = scope_entity(scope, customer_id, campaign_id, ad_group_id)
+    plan = ChangePlan(
+        operation="create_price_asset",
+        entity_type=entity_type,
+        entity_id=entity_id,
+        customer_id=customer_id,
+        changes={"scope": scope, "campaign_id": campaign_id, "ad_group_id": ad_group_id,
+                 "price": {"price_type": ptype, "price_qualifier": qualifier, "language_code": language,
+                           "currency_code": currency, "offerings": cleaned}},
+    )
+    store_plan(plan)
+    preview = plan.to_preview()
+    preview["warnings"] = [
+        ("Google disapproves price assets whose prices differ from the landing page; its "
+         "review compares each offering with its final_url, this draft does not."),
+        *warnings, *url_warnings,
+    ] + ([_account_scope_warning("price assets")] if scope == "account" else [])
+    return preview
+
+
+def _apply_create_price_asset(client, cid: str, changes: dict) -> dict:
+    def populate(asset, price):
+        p = asset.price_asset
+        p.type_ = getattr(client.enums.PriceExtensionTypeEnum, price["price_type"])
+        if price.get("price_qualifier"):
+            p.price_qualifier = getattr(client.enums.PriceExtensionPriceQualifierEnum, price["price_qualifier"])
+        p.language_code = price["language_code"]
+        for row in price["offerings"]:
+            offering = client.get_type("PriceOffering")
+            offering.header = row["header"]
+            offering.description = row["description"]
+            offering.price.amount_micros = _micros(row["price"])
+            offering.price.currency_code = price["currency_code"]
+            offering.final_url = row["final_url"]
+            if row.get("final_mobile_url"):
+                offering.final_mobile_url = row["final_mobile_url"]
+            if row.get("unit"):
+                offering.unit = getattr(client.enums.PriceExtensionPriceUnitEnum, row["unit"])
+            p.price_offerings.append(offering)
+
+    return _create_and_link(client, cid, [changes["price"]], client.enums.AssetFieldTypeEnum.PRICE, populate, changes)
