@@ -4185,28 +4185,38 @@ def update_ad_group(
 @_tool(title="Draft callouts", annotations=_WRITE, tags={"ads"})
 @_safe
 def draft_callouts(
-    campaign_id: str,
     callouts: _StrList,
+    campaign_id: str = "",
+    ad_group_id: str = "",
+    scope: str = "",
     customer_id: str = "",
 ) -> dict:
-    """Draft campaign callout assets — returns a PREVIEW.
+    """Draft callout assets for an ad group, a campaign or the account — returns a PREVIEW.
 
-    Creates callout assets and links them to the campaign. Returns a preview
-    with a plan_id; nothing changes until confirm_and_apply applies it.
+    Creates callout assets and links them where the id points: ad_group_id
+    links to that ad group, campaign_id to that campaign. Account-wide
+    linking (every campaign without callouts of its own) needs
+    scope="account" and no id. Returns a preview with a plan_id; nothing
+    changes until confirm_and_apply applies it.
 
     Args:
-        campaign_id: Numeric ID of the campaign to attach the callouts to.
         callouts: Callout texts (at least one), each non-empty and at most 25
             characters after trimming.
+        campaign_id: Numeric ID of the campaign to link the callouts to.
+        ad_group_id: Numeric ID of the ad group to link them to, instead of a
+            campaign.
+        scope: Empty (follows the id), "campaign", "ad_group" or "account".
         customer_id: Google Ads customer ID (digits, dashes optional). Defaults to
             the configured account.
     """
-    from adloop.ads.write import draft_callouts as _impl
+    from adloop.ads.assets import draft_callouts as _impl
 
     return _impl(
         current_config(),
         customer_id=customer_id or current_config().ads.customer_id,
         campaign_id=campaign_id,
+        ad_group_id=ad_group_id,
+        scope=scope,
         callouts=callouts,
     )
 
@@ -4214,32 +4224,207 @@ def draft_callouts(
 @_tool(title="Draft structured snippets", annotations=_WRITE, tags={"ads"})
 @_safe
 def draft_structured_snippets(
-    campaign_id: str,
     snippets: _DictList,
+    campaign_id: str = "",
+    ad_group_id: str = "",
+    scope: str = "",
     customer_id: str = "",
 ) -> dict:
-    """Draft campaign structured snippet assets — returns a PREVIEW.
+    """Draft structured snippet assets for an ad group, a campaign or the account — returns a PREVIEW.
 
-    Creates structured snippet assets and links them to the campaign. Returns a
-    preview with a plan_id; nothing changes until confirm_and_apply applies it.
+    Creates structured snippet assets and links them where the id points:
+    ad_group_id links to that ad group, campaign_id to that campaign.
+    Account-wide linking needs scope="account" and no id. Returns a preview
+    with a plan_id; nothing changes until confirm_and_apply applies it.
 
     Args:
-        campaign_id: Numeric ID of the campaign to attach the snippets to.
         snippets: At least one dict with "header" and "values". header is one of
             Amenities, Brands, Courses, Degree programs, Destinations, Featured
             Hotels, Insurance coverage, Models, Neighborhoods, Services, Shows,
             Styles, Types (exact spelling). values is a list of 3-10 non-empty
             strings, each at most 25 characters.
+        campaign_id: Numeric ID of the campaign to link the snippets to.
+        ad_group_id: Numeric ID of the ad group to link them to, instead of a
+            campaign.
+        scope: Empty (follows the id), "campaign", "ad_group" or "account".
         customer_id: Google Ads customer ID (digits, dashes optional). Defaults to
             the configured account.
     """
-    from adloop.ads.write import draft_structured_snippets as _impl
+    from adloop.ads.assets import draft_structured_snippets as _impl
 
     return _impl(
         current_config(),
         customer_id=customer_id or current_config().ads.customer_id,
         campaign_id=campaign_id,
+        ad_group_id=ad_group_id,
+        scope=scope,
         snippets=snippets,
+    )
+
+
+@_tool(title="Draft a business name asset", annotations=_WRITE, tags={"ads"})
+@_safe
+def draft_business_name_asset(
+    business_name: str,
+    campaign_id: str = "",
+    scope: str = "",
+    customer_id: str = "",
+) -> dict:
+    """Draft a business name asset for a campaign or the account — returns a PREVIEW.
+
+    Creates a text asset and links it as the business name shown with the
+    ads. Google links business names at campaign or account level only.
+    Account-wide needs scope="account" and no campaign_id. Returns a preview
+    with a plan_id.
+
+    Args:
+        business_name: The name, at most 25 characters.
+        campaign_id: Numeric ID of the campaign to link it to.
+        scope: Empty (campaign, from campaign_id), "campaign" or "account".
+        customer_id: Google Ads customer ID (digits, dashes optional). Defaults to
+            the configured account.
+    """
+    from adloop.ads.assets import draft_business_name_asset as _impl
+
+    return _impl(
+        current_config(),
+        customer_id=customer_id or current_config().ads.customer_id,
+        business_name=business_name,
+        campaign_id=campaign_id,
+        scope=scope,
+    )
+
+
+@_tool(title="Draft account-level asset links", annotations=_WRITE, tags={"ads"})
+@_safe
+def link_asset_to_customer(
+    links: _DictList,
+    customer_id: str = "",
+) -> dict:
+    """Draft linking existing assets at account level — returns a PREVIEW.
+
+    Account-level assets serve on every eligible campaign that has no asset
+    of the same type linked at campaign or ad-group level. Each asset is
+    checked to exist and to match its field type. Returns a preview with a
+    plan_id.
+
+    Args:
+        links: Dicts with "asset_id" (numeric) and "field_type", one of
+            BUSINESS_NAME, BUSINESS_LOGO, CALL, CALLOUT, HOTEL_CALLOUT,
+            MOBILE_APP, PRICE, PROMOTION, SITELINK, STRUCTURED_SNIPPET.
+        customer_id: Google Ads customer ID (digits, dashes optional). Defaults to
+            the configured account.
+    """
+    from adloop.ads.assets import link_asset_to_customer as _impl
+
+    return _impl(
+        current_config(),
+        customer_id=customer_id or current_config().ads.customer_id,
+        links=links,
+    )
+
+
+@_tool(title="Draft a callout edit", annotations=_WRITE, tags={"ads"})
+@_safe
+def update_callout(
+    asset_id: str,
+    callout_text: str,
+    customer_id: str = "",
+) -> dict:
+    """Draft changing a callout asset's text in place — returns a PREVIEW.
+
+    The asset keeps its ID and performance history, and the new text shows
+    everywhere it is linked. The preview pins the current text; if someone
+    edits the asset in Google Ads before the apply, nothing is sent.
+
+    Args:
+        asset_id: Numeric ID of the callout asset.
+        callout_text: The new text, at most 25 characters.
+        customer_id: Google Ads customer ID (digits, dashes optional). Defaults to
+            the configured account.
+    """
+    from adloop.ads.assets import update_callout as _impl
+
+    return _impl(
+        current_config(),
+        customer_id=customer_id or current_config().ads.customer_id,
+        asset_id=asset_id,
+        callout_text=callout_text,
+    )
+
+
+@_tool(title="Draft a sitelink edit", annotations=_WRITE, tags={"ads"})
+@_safe
+def update_sitelink(
+    asset_id: str,
+    link_text: str = "",
+    final_url: str = "",
+    description1: str = "",
+    description2: str = "",
+    customer_id: str = "",
+) -> dict:
+    """Draft changing a sitelink asset in place — returns a PREVIEW.
+
+    Only the fields passed change; empty fields stay as they are. The asset
+    keeps its ID and performance history everywhere it is linked. A new
+    final_url is checked for reachability. The preview pins the current
+    values; an edit in Google Ads before the apply stops it.
+
+    Args:
+        asset_id: Numeric ID of the sitelink asset.
+        link_text: New link text, at most 25 characters.
+        final_url: New landing page URL; must be reachable.
+        description1: New first description line, at most 35 characters.
+        description2: New second description line, at most 35 characters.
+            Google needs both description lines or neither.
+        customer_id: Google Ads customer ID (digits, dashes optional). Defaults to
+            the configured account.
+    """
+    from adloop.ads.assets import update_sitelink as _impl
+
+    return _impl(
+        current_config(),
+        customer_id=customer_id or current_config().ads.customer_id,
+        asset_id=asset_id,
+        link_text=link_text,
+        final_url=final_url,
+        description1=description1,
+        description2=description2,
+    )
+
+
+@_tool(title="Draft a structured snippet edit", annotations=_WRITE, tags={"ads"})
+@_safe
+def update_structured_snippet(
+    asset_id: str,
+    values: _StrList,
+    header: str = "",
+    customer_id: str = "",
+) -> dict:
+    """Draft changing a structured snippet asset in place — returns a PREVIEW.
+
+    Replaces the snippet's values (and header, if given). The asset keeps
+    its ID and performance history everywhere it is linked. The preview
+    pins the current header and values; an edit in Google Ads before the
+    apply stops it.
+
+    Args:
+        asset_id: Numeric ID of the structured snippet asset.
+        values: The complete new list of 3-10 values, each at most 25
+            characters.
+        header: New header (same list as draft_structured_snippets); empty
+            keeps the current one.
+        customer_id: Google Ads customer ID (digits, dashes optional). Defaults to
+            the configured account.
+    """
+    from adloop.ads.assets import update_structured_snippet as _impl
+
+    return _impl(
+        current_config(),
+        customer_id=customer_id or current_config().ads.customer_id,
+        asset_id=asset_id,
+        header=header,
+        values=values,
     )
 
 
@@ -4369,8 +4554,9 @@ def remove_entity(
 
     Args:
         entity_type: "campaign", "ad_group", "ad", "keyword", "asset_group",
-            "negative_keyword", "shared_criterion", "campaign_asset", "asset",
-            "customer_asset", "ad_group_criterion", or "campaign_criterion".
+            "negative_keyword", "shared_criterion", "campaign_asset",
+            "ad_group_asset", "asset", "customer_asset", "ad_group_criterion", or
+            "campaign_criterion".
         entity_id: The resource ID. campaign / ad_group / asset_group / asset: simple numeric
             ID. ad: "adGroupId~adId" (a bare ad ID is resolved to its ad group).
             keyword and ad_group_criterion: "adGroupId~criterionId".
@@ -4378,7 +4564,8 @@ def remove_entity(
             (the resource_id field from get_negative_keywords).
             shared_criterion: "sharedSetId~criterionId" (the resource_id field
             from get_negative_keyword_list_keywords). campaign_asset:
-            "campaignId~assetId~fieldType". customer_asset: "assetId~fieldType".
+            "campaignId~assetId~fieldType". ad_group_asset:
+            "adGroupId~assetId~fieldType". customer_asset: "assetId~fieldType".
         customer_id: Google Ads customer ID (digits, dashes optional). Defaults to
             the configured account.
     """
