@@ -363,7 +363,7 @@ def test_draft_structured_snippets_rejects_invalid_header(config):
     )
 
     assert result["error"] == "Validation failed"
-    assert "header must be one of" in result["details"][0]
+    assert "is not one of Google's snippet headers" in result["details"][0]
 
 
 def test_draft_callouts_returns_preview(config):

@@ -276,3 +276,49 @@ def test_ad_group_asset_links_can_be_removed(config):
     assert client.ads.operations[0].ad_group_asset_operation.remove == "customers/1/adGroupAssets/2002~7~CALLOUT"
     with pytest.raises(ValueError, match="adGroupId~assetId~fieldType"):
         write._apply_remove(client, "1", "ad_group_asset", "x~7")
+
+
+# ---------------------------------------------------------------------------
+# Snippet headers in every language Google lists
+# ---------------------------------------------------------------------------
+
+
+def test_google_translated_headers_are_accepted_in_their_exact_spelling(config):
+    from adloop.ads.snippet_headers import LOCALIZED_HEADERS, canonical_header, english_header
+
+    assert all(len(headers) == 13 for _language, headers in LOCALIZED_HEADERS.values())
+    assert (canonical_header("typen"), english_header("Typen")) == ("Typen", "Types")
+    # Exact spellings are kept even where two listed headers differ only by case.
+    assert canonical_header("модели") == "модели" and canonical_header("Модели") == "Модели"
+    assert canonical_header("Featured hotels") == "Featured hotels"
+    assert canonical_header("Freistellung") is None
+
+    german = assets.draft_structured_snippets(
+        config, customer_id="1", campaign_id="1001",
+        snippets=[{"header": "dienstleistungen", "values": ["Beratung", "Planung", "Montage"]}])
+    assert german["changes"]["snippets"][0]["header"] == "Dienstleistungen"
+    wrong = assets.draft_structured_snippets(
+        config, customer_id="1", campaign_id="1001",
+        snippets=[{"header": "Leistungen", "values": ["A", "B", "C"]}])
+    assert "'Leistungen' is not one of Google's snippet headers" in wrong["details"][0]
+
+
+def test_an_update_keeps_the_header_google_already_holds(config):
+    row = {"asset.id": 7, "asset.type": "STRUCTURED_SNIPPET",
+           "asset.structured_snippet_asset.header": "Typen",
+           "asset.structured_snippet_asset.values": ["SOKA-Bau", "PQ-Zertifikat", "UB Krankenkasse"]}
+    with _gaql([row]):
+        kept = assets.update_structured_snippet(
+            config, customer_id="1", asset_id="7", values=["SOKA-Bau", "PQ-Zertifikat", "A1-Bescheinigung"])
+        explicit = assets.update_structured_snippet(
+            config, customer_id="1", asset_id="7", header="Typen", values=["A", "B", "C"])
+    assert kept["changes"]["header"] == "Typen" and explicit["changes"]["header"] == "Typen"
+
+    # Even a header outside the table is kept when left unchanged: Google stores it.
+    legacy = {**row, "asset.structured_snippet_asset.header": "Sorten"}
+    with _gaql([legacy]):
+        result = assets.update_structured_snippet(config, customer_id="1", asset_id="7", values=["A", "B", "C"])
+        changed = assets.update_structured_snippet(
+            config, customer_id="1", asset_id="7", header="Arten", values=["A", "B", "C"])
+    assert result["changes"]["header"] == "Sorten"
+    assert "'Arten' is not one of" in changed["details"][0]

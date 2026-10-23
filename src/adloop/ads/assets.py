@@ -151,8 +151,22 @@ def _validate_callout_texts(callouts: list[str]) -> tuple[list[str], list[str]]:
     return validated, errors
 
 
-def _validate_snippet_items(snippets: list[dict]) -> tuple[list[dict], list[str]]:
-    from adloop.ads.write import _STRUCTURED_SNIPPET_HEADERS
+def _header_error(index: int, header: str) -> str:
+    from adloop.ads.snippet_headers import ENGLISH_HEADERS
+
+    return (
+        f"Structured snippet {index + 1}: header '{header}' is not one of Google's snippet "
+        f"headers. English: {', '.join(ENGLISH_HEADERS)}. Google's translations are "
+        "accepted too, in the language of the values (German 'Typen', 'Marken', "
+        "'Dienstleistungen'): https://developers.google.com/google-ads/api/data/structured-snippet-headers"
+    )
+
+
+def _validate_snippet_items(
+    snippets: list[dict], *, keep_header: str = ""
+) -> tuple[list[dict], list[str]]:
+    """Check snippets; ``keep_header`` is an existing asset's header, accepted as is."""
+    from adloop.ads.snippet_headers import canonical_header
 
     errors: list[str] = []
     validated: list[dict] = []
@@ -161,11 +175,12 @@ def _validate_snippet_items(snippets: list[dict]) -> tuple[list[dict], list[str]
     for index, snippet in enumerate(snippets):
         header = _clean(snippet.get("header", ""))
         values = [_clean(value) for value in snippet.get("values", []) or []]
-        if header not in _STRUCTURED_SNIPPET_HEADERS:
-            errors.append(
-                f"Structured snippet {index + 1}: header must be one of "
-                f"{sorted(_STRUCTURED_SNIPPET_HEADERS)}"
-            )
+        if keep_header and header == keep_header:
+            pass  # Google already holds this header; it is not ours to reject.
+        elif canonical := canonical_header(header):
+            header = canonical
+        else:
+            errors.append(_header_error(index, header))
         if len(values) < 3 or len(values) > 10:
             errors.append(f"Structured snippet {index + 1}: values must contain 3-10 items")
         for value_index, value in enumerate(values):
@@ -543,9 +558,11 @@ def update_structured_snippet(
         current, error = _asset_for_edit(config, customer_id, asset_id, _SNIPPET_FIELDS, "STRUCTURED_SNIPPET")
         if error:
             return error
-    # An empty header keeps the current one; values are always the full list.
-    snippet = {"header": _clean(header) or (current or {}).get("header", ""), "values": values or []}
-    validated, snippet_errors = _validate_snippet_items([snippet])
+    # An empty header keeps the current one, accepted as Google stores it;
+    # values are always the full list.
+    kept = (current or {}).get("header", "")
+    snippet = {"header": _clean(header) or kept, "values": values or []}
+    validated, snippet_errors = _validate_snippet_items([snippet], keep_header=kept)
     errors.extend(snippet_errors)
     if errors:
         return {"error": "Validation failed", "details": errors}

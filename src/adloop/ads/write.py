@@ -16,22 +16,6 @@ if TYPE_CHECKING:
     from adloop.config import AdLoopConfig
 
 
-_STRUCTURED_SNIPPET_HEADERS = {
-    "Amenities",
-    "Brands",
-    "Courses",
-    "Degree programs",
-    "Destinations",
-    "Featured Hotels",
-    "Insurance coverage",
-    "Models",
-    "Neighborhoods",
-    "Services",
-    "Shows",
-    "Styles",
-    "Types",
-}
-
 _VALID_IMAGE_MIME_TYPES = {
     "image/gif": "IMAGE_GIF",
     "image/jpeg": "IMAGE_JPEG",

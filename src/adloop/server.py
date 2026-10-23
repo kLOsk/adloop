@@ -4239,10 +4239,13 @@ def draft_structured_snippets(
 
     Args:
         snippets: At least one dict with "header" and "values". header is one of
-            Amenities, Brands, Courses, Degree programs, Destinations, Featured
-            Hotels, Insurance coverage, Models, Neighborhoods, Services, Shows,
-            Styles, Types (exact spelling). values is a list of 3-10 non-empty
-            strings, each at most 25 characters.
+            Google's snippet headers, in the language of the values: Amenities,
+            Brands, Courses, Degree programs, Destinations, Featured Hotels,
+            Insurance coverage, Models, Neighborhoods, Services, Shows, Styles,
+            Types, or Google's translation of one (German: Typen, Marken,
+            Dienstleistungen, Modelle, Kurse, ...; case does not matter).
+            values is a list of 3-10 non-empty strings, each at most 25
+            characters.
         campaign_id: Numeric ID of the campaign to link the snippets to.
         ad_group_id: Numeric ID of the ad group to link them to, instead of a
             campaign.
@@ -4412,8 +4415,9 @@ def update_structured_snippet(
         asset_id: Numeric ID of the structured snippet asset.
         values: The complete new list of 3-10 values, each at most 25
             characters.
-        header: New header (same list as draft_structured_snippets); empty
-            keeps the current one.
+        header: New header (English or translated, as in
+            draft_structured_snippets); empty keeps the current one as Google
+            stores it, whatever its language.
         customer_id: Google Ads customer ID (digits, dashes optional). Defaults to
             the configured account.
     """
