@@ -2267,8 +2267,11 @@ def update_campaign(
     )
     errors.extend(alias_errors)
 
+    campaign_id = str(campaign_id or "").strip()
     if not campaign_id:
         errors.append("campaign_id is required")
+    elif not campaign_id.isdigit():
+        errors.append(f"campaign_id must be numeric, got '{campaign_id}'")
 
     bs = bidding_strategy.upper() if bidding_strategy else ""
     if bs and bs not in _VALID_BIDDING_STRATEGIES:
@@ -2361,7 +2364,46 @@ def update_campaign(
                 'entity_type="campaign_criterion".'
             )
 
+    # A budget can be shared by several campaigns, and a portfolio bid
+    # strategy too: say who else a budget change reaches, and that a bidding
+    # change takes the campaign out of its portfolio. Both need a double
+    # confirmation, and apply re-checks the state the preview showed.
+    shared: dict = {}
+    requires_double_confirm = False
+    if daily_budget or bs or max_cpc:
+        shared = _budget_and_bidding_context(
+            config, customer_id, campaign_id,
+            budget=bool(daily_budget), portfolio=bool(bs or max_cpc),
+        )
+        if shared is None:
+            return {"error": f"Campaign {campaign_id} was not found in this account"}
+    if daily_budget and shared["budget_shared_with"]:
+        others = ", ".join(f"'{c['name']}' ({c['id']})" for c in shared["budget_shared_with"])
+        warnings.append(
+            f"Shared budget: '{shared['budget_name']}' also funds {others}. The new "
+            "amount is the daily budget of ALL of them together, not of this campaign "
+            "alone. To change only this campaign, give it its own budget in Google Ads first."
+        )
+        requires_double_confirm = True
+    if (bs or max_cpc) and shared.get("bidding_strategy_resource"):
+        others = ", ".join(f"'{c['name']}'" for c in shared["portfolio_shared_with"]) or "no other campaigns"
+        warnings.append(
+            f"Portfolio bid strategy: this campaign uses '{shared['portfolio_name']}' "
+            f"(also used by {others}). This change gives the campaign its own strategy "
+            "and takes it out of the portfolio; the portfolio and its other campaigns stay "
+            "as they are. To change the portfolio's targets for all of them, edit it in Google Ads."
+        )
+        requires_double_confirm = True
+
     changes: dict = {"campaign_id": campaign_id}
+    if daily_budget:
+        changes["current_daily_budget"] = shared["budget_amount"]
+        changes["budget_name"] = shared["budget_name"]
+        # Pinned: apply refuses if the campaign's budget or its sharing changed.
+        changes["budget_resource"] = shared["budget_resource"]
+        changes["budget_shared_with"] = sorted(c["id"] for c in shared["budget_shared_with"])
+    if bs or max_cpc:
+        changes["bidding_strategy_resource"] = shared["bidding_strategy_resource"]
     if bs:
         changes["bidding_strategy"] = bs
     if target_cpa:
@@ -2387,6 +2429,7 @@ def update_campaign(
         entity_id=campaign_id,
         customer_id=customer_id,
         changes=changes,
+        requires_double_confirm=requires_double_confirm,
     )
     store_plan(plan)
     preview = plan.to_preview()
@@ -3092,6 +3135,95 @@ def _campaign_bidding_strategy(
     if not rows:
         return None
     return rows[0].get("campaign.bidding_strategy_type")
+
+
+_SHARED_RESOURCE_RE = re.compile(r"customers/\d+/(campaignBudgets|biddingStrategies)/\d+")
+
+
+def _campaigns_using(config: AdLoopConfig, customer_id: str, field: str, resource: str,
+                     campaign_id: str) -> list[dict]:
+    """Other non-removed campaigns whose ``campaign.<field>`` is ``resource``."""
+    from adloop.ads.gaql import execute_query
+
+    if not _SHARED_RESOURCE_RE.fullmatch(resource or ""):
+        return []
+    rows = execute_query(config, customer_id, (
+        f"SELECT campaign.id, campaign.name FROM campaign WHERE campaign.{field} = '{resource}' "
+        "AND campaign.status != 'REMOVED'"))
+    return [{"id": str(r.get("campaign.id")), "name": r.get("campaign.name") or ""}
+            for r in rows if str(r.get("campaign.id")) != str(campaign_id)]
+
+
+def _budget_and_bidding_context(
+    config: AdLoopConfig, customer_id: str, campaign_id: str, *, budget: bool, portfolio: bool
+) -> dict | None:
+    """The campaign's budget and portfolio bid strategy, with who else uses them.
+
+    None when the campaign does not exist. Read failures propagate: whether a
+    budget is shared is a safety question, not a decoration.
+    """
+    from adloop.ads.gaql import execute_query
+
+    rows = execute_query(config, customer_id, (
+        "SELECT campaign.id, campaign.campaign_budget, campaign.bidding_strategy, "
+        "campaign_budget.name, campaign_budget.amount_micros "
+        f"FROM campaign WHERE campaign.id = {campaign_id}"))
+    if not rows:
+        return None
+    row = rows[0]
+    budget_rn = row.get("campaign.campaign_budget") or ""
+    portfolio_rn = row.get("campaign.bidding_strategy") or ""
+    context = {
+        "budget_resource": budget_rn,
+        "budget_name": row.get("campaign_budget.name") or "",
+        "budget_amount": (row.get("campaign_budget.amount_micros") or 0) / 1_000_000,
+        "budget_shared_with": (
+            _campaigns_using(config, customer_id, "campaign_budget", budget_rn, campaign_id) if budget else []),
+        "bidding_strategy_resource": portfolio_rn,
+        "portfolio_name": "",
+        "portfolio_shared_with": [],
+    }
+    if portfolio and portfolio_rn and _SHARED_RESOURCE_RE.fullmatch(portfolio_rn):
+        names = execute_query(config, customer_id, (
+            f"SELECT bidding_strategy.name FROM bidding_strategy WHERE bidding_strategy.resource_name = '{portfolio_rn}'"))
+        context["portfolio_name"] = (names[0].get("bidding_strategy.name") if names else "") or portfolio_rn
+        context["portfolio_shared_with"] = _campaigns_using(
+            config, customer_id, "bidding_strategy", portfolio_rn, campaign_id)
+    return context
+
+
+def _check_budget_and_bidding_unchanged(service, cid: str, changes: dict) -> None:
+    """Refuse when the budget or portfolio state the preview showed has moved."""
+    pins_budget = "budget_resource" in changes
+    pins_bidding = "bidding_strategy_resource" in changes
+    if not (pins_budget or pins_bidding):
+        return  # plans drafted before 0.35.1 carry no pins
+    campaign_id = changes["campaign_id"]
+    rows = list(service.search(customer_id=cid, query=(
+        "SELECT campaign.campaign_budget, campaign.bidding_strategy "
+        f"FROM campaign WHERE campaign.id = {campaign_id}")))
+    if not rows:
+        raise ValueError(f"Campaign {campaign_id} not found")
+    campaign = rows[0].campaign
+    moved = []
+    if pins_budget:
+        if campaign.campaign_budget != changes["budget_resource"]:
+            moved.append("it uses a different budget")
+        elif _SHARED_RESOURCE_RE.fullmatch(changes["budget_resource"] or ""):
+            sharing = sorted(
+                str(r.campaign.id) for r in service.search(customer_id=cid, query=(
+                    "SELECT campaign.id FROM campaign WHERE campaign.campaign_budget = "
+                    f"'{changes['budget_resource']}' AND campaign.status != 'REMOVED'"))
+                if str(r.campaign.id) != str(campaign_id))
+            if sharing != sorted(changes.get("budget_shared_with") or []):
+                moved.append("other campaigns joined or left its budget")
+    if pins_bidding and campaign.bidding_strategy != changes["bidding_strategy_resource"]:
+        moved.append("its portfolio bid strategy changed")
+    if moved:
+        raise RuntimeError(
+            f"Campaign {campaign_id} changed after this preview ({'; '.join(moved)}); "
+            "nothing was sent. Draft the change again so the preview shows who it reaches."
+        )
 
 
 def _existing_negative_geo_exclusions(
@@ -4264,6 +4396,7 @@ def _apply_update_campaign(client: object, cid: str, changes: dict) -> dict:
 
     campaign_id = changes["campaign_id"]
     resource_name = campaign_service.campaign_path(cid, campaign_id)
+    _check_budget_and_bidding_unchanged(service, cid, changes)
 
     # Bid strategy and campaign-level setting changes
     bs = changes.get("bidding_strategy")

@@ -3337,7 +3337,11 @@ def update_campaign(
 
     Only the parameters passed are changed; omitted ones stay as they are, and at
     least one change is required. Replacing geo targets keeps the campaign's
-    negative geo exclusions (the preview lists them).
+    negative geo exclusions (the preview lists them). A budget change shows the
+    current amount; when the budget is shared with other campaigns, the
+    preview names them and needs a double confirmation, because the new amount
+    covers all of them. A bidding change on a campaign in a portfolio bid
+    strategy takes it out of the portfolio, also with a double confirmation.
 
     Returns a preview with a plan_id plus any warnings; nothing changes until
     confirm_and_apply applies it.
@@ -3354,7 +3358,8 @@ def update_campaign(
         target_roas: Target ROAS as a ratio (e.g. 4.0 = 400%); required if
             bidding_strategy is TARGET_ROAS. 0 leaves it unchanged.
         daily_budget: New daily budget in the account's currency (not micros),
-            at most the config's max_daily_budget. 0 leaves it unchanged.
+            at most the config's max_daily_budget. 0 leaves it unchanged. On a
+            shared budget it is the amount for every campaign sharing it.
         geo_target_ids: REPLACES all positive geo targets; must not be empty
             when given. Common IDs: "2276" Germany, "2040" Austria, "2756"
             Switzerland, "2840" USA, "2826" UK.

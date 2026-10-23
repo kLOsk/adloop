@@ -302,7 +302,14 @@ def test_update_campaign_normalizes_display_alias(config):
     assert result["changes"]["search_partners_enabled"] is False
 
 
+# update_campaign reads the campaign's budget and bid strategy (shared or not).
+_UNSHARED = {"budget_resource": "customers/1/campaignBudgets/5", "budget_name": "Own budget",
+             "budget_amount": 20.0, "budget_shared_with": [], "bidding_strategy_resource": "",
+             "portfolio_name": "", "portfolio_shared_with": []}
+
+
 def test_update_campaign_allows_target_spend_cpc_cap(config, monkeypatch):
+    monkeypatch.setattr(write, "_budget_and_bidding_context", lambda *_a, **_kw: _UNSHARED)
     monkeypatch.setattr(write, "_campaign_bidding_strategy", lambda *_args: "TARGET_SPEND")
     monkeypatch.setattr(write, "_current_campaign_cpc_ceiling", lambda *_args: 1.00)
 
@@ -330,6 +337,7 @@ def test_update_campaign_refuses_a_ceiling_raise_beyond_the_cap(config, monkeypa
 
 def test_update_campaign_first_ceiling_has_no_baseline(config, monkeypatch):
     """Switching to Maximize Clicks sets a ceiling where none existed."""
+    monkeypatch.setattr(write, "_budget_and_bidding_context", lambda *_a, **_kw: _UNSHARED)
     monkeypatch.setattr(write, "_campaign_bidding_strategy", lambda *_args: "TARGET_SPEND")
     monkeypatch.setattr(write, "_current_campaign_cpc_ceiling", lambda *_args: None)
 
