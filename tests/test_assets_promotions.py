@@ -276,3 +276,61 @@ def test_promotion_and_price_applies_run_validate_only(config):
         fake = _Client(rows=[row])
         apply(ValidateOnlyClient(fake), "1", changes)
         assert fake.sent() and all(request.validate_only for request in fake.sent()), apply.__name__
+
+
+# ---------------------------------------------------------------------------
+# Promotion schedules (left open in #97)
+# ---------------------------------------------------------------------------
+
+WEEKDAYS = [{"day_of_week": d, "start_hour": 8, "end_hour": 18} for d in ("MONDAY", "TUESDAY")]
+
+
+def _promo_with_schedule(client, windows):
+    row = _promo_row(client, percent=100_000)
+    for w in windows:
+        info = client.get_type("AdScheduleInfo")
+        assets._populate_schedule(client, info, {"start_minute": 0, "end_minute": 0, **w})
+        row.asset.promotion_asset.ad_schedule_targets.append(info)
+    return row
+
+
+def test_a_promotion_can_be_limited_to_hours(config):
+    with _account():
+        preview = assets.draft_promotion(config, customer_id="1", campaign_id="1001", percent_off=10,
+                                         ad_schedule=WEEKDAYS, **PROMO)
+    promo = preview["changes"]["promotion"]
+    assert [w["day_of_week"] for w in promo["ad_schedule"]] == ["MONDAY", "TUESDAY"]
+    assert any("Europe/Berlin" in w for w in preview["warnings"])
+
+    client = _Client()
+    assets._apply_create_promotion(client, "1", preview["changes"])
+    targets = client.ads.operations[0].asset_operation.create.promotion_asset.ad_schedule_targets
+    assert [(t.day_of_week, t.start_hour, t.end_hour) for t in targets] == [
+        (client.enums.DayOfWeekEnum.MONDAY, 8, 18), (client.enums.DayOfWeekEnum.TUESDAY, 8, 18)]
+
+    bad = assets.draft_promotion(config, customer_id="1", campaign_id="1001", percent_off=10,
+                                 ad_schedule=[{"day_of_week": "MONDAY", "start_hour": 8.5, "end_hour": 18}], **PROMO)
+    assert "whole numbers" in bad["details"][0]
+
+
+def test_updating_or_clearing_a_promotions_schedule(config):
+    client = _Client()
+    row = _promo_with_schedule(client, WEEKDAYS)
+    friday = [{"day_of_week": "FRIDAY", "start_hour": 9, "end_hour": 12}]
+    with patch("adloop.ads.gaql.execute_query", side_effect=[_as_gaql(row), ACCOUNT, _as_gaql(row), _as_gaql(row)]):
+        replaced = assets.update_promotion(config, customer_id="1", asset_id="7", ad_schedule=friday)
+        cleared = assets.update_promotion(config, customer_id="1", asset_id="7", clear_fields=["ad_schedule"])
+        same = assets.update_promotion(config, customer_id="1", asset_id="7", ad_schedule=WEEKDAYS)
+    assert list(replaced["changes"]["set"]) == ["ad_schedule"]
+    assert replaced["changes"]["previous"]["ad_schedule"][0]["day_of_week"] == "MONDAY"
+    assert any("Europe/Berlin" in w for w in replaced["warnings"])
+    assert cleared["changes"]["set"] == {"ad_schedule": []}
+    assert any("all hours" in w for w in cleared["warnings"])
+    assert "nothing to change" in same["error"]
+
+    for changes, expected in ((replaced["changes"], 1), (cleared["changes"], 0)):
+        apply_client = _Client(rows=[row])
+        assets._apply_update_promotion(apply_client, "1", changes)
+        op = apply_client.assets.operations[0]
+        assert list(op.update_mask.paths) == ["promotion_asset.ad_schedule_targets"]
+        assert len(op.update.promotion_asset.ad_schedule_targets) == expected

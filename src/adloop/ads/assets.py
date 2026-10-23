@@ -1415,13 +1415,14 @@ def draft_promotion(
     scope: str = "",
     language_code: str = "",
     currency_code: str = "",
+    ad_schedule: list[dict] | None = None,
     **promotion,
 ) -> dict:
     """Draft a promotion asset linked to an ad group, a campaign or the account.
 
     ``promotion`` takes promotion_target, final_url, money_off or percent_off,
     promotion_code or orders_over_amount, occasion, discount_modifier and the
-    four dates.
+    four dates. ``ad_schedule`` limits the hours it shows.
     """
     from adloop.safety.preview import ChangePlan, store_plan
 
@@ -1430,6 +1431,8 @@ def draft_promotion(
     scope, campaign_id, ad_group_id, errors = resolve_scope(scope, campaign_id, ad_group_id)
     fields, parse_errors = _promotion_input(**promotion)
     fields["language_code"] = _language(language_code, errors)
+    fields["ad_schedule"], schedule_errors = _validate_schedule(ad_schedule or [])
+    errors += schedule_errors
     errors += parse_errors or _check_promotion(fields)
     if errors:
         return {"error": "Validation failed", "details": errors}
@@ -1456,6 +1459,8 @@ def draft_promotion(
     preview = plan.to_preview()
     preview["warnings"] = [*warnings, *_promotion_warnings(fields), *url_warnings] + (
         [_account_scope_warning("promotions")] if scope == "account" else [])
+    if fields["ad_schedule"]:
+        preview["warnings"].append(_time_zone_note(_account_settings(config, customer_id)["time_zone"]))
     return preview
 
 
@@ -1472,8 +1477,10 @@ _PROMOTION_FIELDS = {
     "discount_modifier": "asset.promotion_asset.discount_modifier",
     "language_code": "asset.promotion_asset.language_code",
     **{field: f"asset.promotion_asset.{field}" for field in _DATE_FIELDS},
+    "ad_schedule": "asset.promotion_asset.ad_schedule_targets",
 }
-_CLEARABLE = ("promotion_code", "orders_over_amount", "occasion", "discount_modifier", *_DATE_FIELDS)
+_CLEARABLE = ("promotion_code", "orders_over_amount", "occasion", "discount_modifier", *_DATE_FIELDS,
+              "ad_schedule")
 
 
 def _promotion_from_google(raw: dict) -> dict:
@@ -1490,6 +1497,7 @@ def _promotion_from_google(raw: dict) -> dict:
         "discount_modifier": raw["discount_modifier"],
         "language_code": raw["language_code"],
         **{field: raw[field] for field in _DATE_FIELDS},
+        "ad_schedule": _schedule_from_google(raw["ad_schedule"]),
     }
 
 
@@ -1501,9 +1509,14 @@ def update_promotion(
     language_code: str = "",
     currency_code: str = "",
     clear_fields: list[str] | None = None,
+    ad_schedule: list[dict] | None = None,
     **promotion,
 ) -> dict:
-    """Draft an in-place edit of a promotion asset; fields not passed stay as they are."""
+    """Draft an in-place edit of a promotion asset; fields not passed stay as they are.
+
+    A non-empty ``ad_schedule`` replaces the promotion's schedule;
+    ``clear_fields=["ad_schedule"]`` removes it.
+    """
     if blocked := _blocked("update_promotion", config):
         return blocked
     asset_id = _clean(asset_id)
@@ -1511,6 +1524,10 @@ def update_promotion(
     passed, parse_errors = _promotion_input(**promotion)
     errors += parse_errors
     passed = {k: v for k, v in passed.items() if v}
+    windows, schedule_errors = _validate_schedule(ad_schedule or [])
+    errors += schedule_errors
+    if windows:
+        passed["ad_schedule"] = windows
     if _clean(language_code):
         passed["language_code"] = _language(language_code, errors)
     clear = [_clean(f).lower() for f in clear_fields or []]
@@ -1539,7 +1556,7 @@ def update_promotion(
     if "orders_over_amount" in passed:
         merged["promotion_code"] = ""
     for field in clear:
-        merged[field] = 0.0 if field == "orders_over_amount" else ""
+        merged[field] = {"orders_over_amount": 0.0, "ad_schedule": []}.get(field, "")
     errors = _check_promotion(merged)
     if errors:
         return {"error": "Validation failed", "details": errors}
@@ -1565,6 +1582,10 @@ def update_promotion(
                          {"set": changed, "promotion": merged},
                          {k: current[k] for k in changed}, pinned={k: raw[k] for k in _PROMOTION_FIELDS})
     preview["warnings"] += warnings + _promotion_warnings(merged)
+    if "ad_schedule" in changed:
+        preview["warnings"].append(
+            _time_zone_note(_account_settings(config, customer_id)["time_zone"]) if merged["ad_schedule"]
+            else "Without a schedule the promotion shows at all hours the campaign serves.")
     return preview
 
 
@@ -1589,6 +1610,10 @@ def _populate_promotion(client, asset, promo: dict) -> None:
     for field in _DATE_FIELDS:
         if promo.get(field):
             setattr(p, field, promo[field])
+    for window in promo.get("ad_schedule") or []:
+        info = client.get_type("AdScheduleInfo")
+        _populate_schedule(client, info, window)
+        p.ad_schedule_targets.append(info)
     asset.final_urls.append(promo["final_url"])
 
 
@@ -1638,6 +1663,12 @@ def _apply_update_promotion(client, cid: str, changes: dict) -> dict:
                 if promo[field]:
                     setattr(p, field, promo[field])
                 paths.append(f"promotion_asset.{field}")
+        if "ad_schedule" in changed:  # replaces the whole list; empty clears it
+            for window in promo["ad_schedule"]:
+                info = client.get_type("AdScheduleInfo")
+                _populate_schedule(client, info, window)
+                p.ad_schedule_targets.append(info)
+            paths.append("promotion_asset.ad_schedule_targets")
         return list(dict.fromkeys(paths))
 
     return _apply_asset_update(client, cid, changes["asset_id"], set_fields)

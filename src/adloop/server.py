@@ -4430,6 +4430,7 @@ def draft_promotion(
     end_date: str = "",
     redemption_start_date: str = "",
     redemption_end_date: str = "",
+    ad_schedule: _DictList = [],  # noqa: B006
     customer_id: str = "",
 ) -> dict:
     """Draft a promotion asset ("20% off winter tyres") — returns a PREVIEW.
@@ -4466,6 +4467,10 @@ def draft_promotion(
         end_date: Last day the promotion shows, YYYY-MM-DD.
         redemption_start_date: First day the offer can be redeemed, YYYY-MM-DD.
         redemption_end_date: Last day the offer can be redeemed, YYYY-MM-DD.
+        ad_schedule: Optional windows when the promotion shows, each
+            {day_of_week: MONDAY..SUNDAY, start_hour: 0-23, end_hour: 0-24,
+            start_minute/end_minute: 0, 15, 30 or 45}. Hours are in the
+            account time zone.
         customer_id: Google Ads customer ID (digits, dashes optional). Defaults to
             the configured account.
     """
@@ -4491,6 +4496,7 @@ def draft_promotion(
         end_date=end_date,
         redemption_start_date=redemption_start_date,
         redemption_end_date=redemption_end_date,
+        ad_schedule=ad_schedule,
     )
 
 
@@ -4513,6 +4519,7 @@ def update_promotion(
     redemption_start_date: str = "",
     redemption_end_date: str = "",
     clear_fields: _StrList = [],  # noqa: B006
+    ad_schedule: _DictList = [],  # noqa: B006
     customer_id: str = "",
 ) -> dict:
     """Draft changing a promotion asset in place — returns a PREVIEW.
@@ -4543,7 +4550,10 @@ def update_promotion(
         redemption_end_date: Last day the offer can be redeemed, YYYY-MM-DD.
         clear_fields: Optional fields to remove: promotion_code,
             orders_over_amount, occasion, discount_modifier, start_date,
-            end_date, redemption_start_date, redemption_end_date.
+            end_date, redemption_start_date, redemption_end_date,
+            ad_schedule.
+        ad_schedule: Windows that replace the promotion's whole schedule (same
+            shape as draft_promotion). Empty leaves the schedule as it is.
         customer_id: Google Ads customer ID (digits, dashes optional). Defaults to
             the configured account.
     """
@@ -4556,6 +4566,7 @@ def update_promotion(
         language_code=language_code,
         currency_code=currency_code,
         clear_fields=clear_fields,
+        ad_schedule=ad_schedule,
         promotion_target=promotion_target,
         final_url=final_url,
         money_off=money_off,
