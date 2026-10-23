@@ -4005,6 +4005,9 @@ def _dispatch_ads_plan(client: object, cid: str, plan: object) -> dict:
         "update_callout": _apply_update_callout,
         "update_sitelink": _apply_update_sitelink,
         "update_structured_snippet": _apply_update_structured_snippet,
+        "create_call_asset": _apply_create_call_asset,
+        "update_call_asset": _apply_update_call_asset,
+        "add_ad_schedule": _apply_add_ad_schedule,
         "create_image_assets": _apply_create_image_assets,
         "create_sitelinks": _apply_create_sitelinks,
         "create_conversion_action": _apply_create_conversion_action,
@@ -5798,10 +5801,13 @@ def _apply_ai_max_settings(client: object, cid: str, changes: dict) -> dict:
 # Asset extensions (callouts, structured snippets, business name, in-place
 # edits) live in assets.py; these names stay importable from here.
 from adloop.ads.assets import (  # noqa: E402
+    _apply_add_ad_schedule,
     _apply_create_business_name_asset,
+    _apply_create_call_asset,
     _apply_create_callouts,
     _apply_create_structured_snippets,
     _apply_link_asset_to_customer,
+    _apply_update_call_asset,
     _apply_update_callout,
     _apply_update_sitelink,
     _apply_update_structured_snippet,

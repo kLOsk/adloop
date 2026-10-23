@@ -387,10 +387,10 @@ def link_asset_to_customer(
     )
     store_plan(plan)
     preview = plan.to_preview()
-    preview["warnings"] = [
+    preview["warnings"] = [(
         "Account-level assets serve on every eligible campaign that has no asset of "
         "the same type linked at campaign or ad-group level."
-    ]
+    )]
     return preview
 
 
@@ -433,7 +433,8 @@ def _normalize(values: dict) -> dict:
         out["final_url"] = (list(urls) or [""])[0] if not isinstance(urls, str) else urls
     if "values" in out:
         out["values"] = list(out["values"] or [])
-    return {k: (v if v is not None else "") for k, v in out.items()}
+    # An unset enum reads as UNSPECIFIED; treat it like an empty field.
+    return {k: ("" if v is None or v in ("UNSPECIFIED", "UNKNOWN") else v) for k, v in out.items()}
 
 
 def _asset_for_edit(config, customer_id, asset_id, fields, expected_type) -> tuple[dict | None, dict | None]:
@@ -446,15 +447,20 @@ def _asset_for_edit(config, customer_id, asset_id, fields, expected_type) -> tup
     return current, None
 
 
-def _edit_plan(operation: str, customer_id: str, asset_id: str, changed: dict, previous: dict) -> dict:
+def _edit_plan(operation: str, customer_id: str, asset_id: str, changed: dict, previous: dict,
+               *, pinned: dict | None = None) -> dict:
+    """Store an in-place edit. ``previous`` is shown; ``pinned`` (raw values) is re-checked at apply."""
     from adloop.safety.preview import ChangePlan, store_plan
 
+    changes = {"asset_id": asset_id, **changed, "previous": previous}
+    if pinned is not None:
+        changes["pinned"] = pinned
     plan = ChangePlan(
         operation=operation,
         entity_type="asset",
         entity_id=asset_id,
         customer_id=customer_id,
-        changes={"asset_id": asset_id, **changed, "previous": previous},
+        changes=changes,
     )
     store_plan(plan)
     preview = plan.to_preview()
@@ -527,10 +533,10 @@ def update_sitelink(
         return {"error": f"Sitelink {asset_id} already has these values; nothing to change"}
     after = {**previous, **changed}
     if bool(after["description1"]) != bool(after["description2"]):
-        return {"error": "Validation failed", "details": [
+        return {"error": "Validation failed", "details": [(
             "description1 and description2 must both be set (Google rejects a sitelink "
             "with only one description line)"
-        ]}
+        )]}
     if "final_url" in changed:
         url_errors, _ = _validate_urls([changed["final_url"]])
         if url_errors.get(changed["final_url"]):
@@ -674,23 +680,27 @@ def _apply_link_asset_to_customer(client, cid: str, changes: dict) -> dict:
 
 
 def _current_values(client, cid: str, asset_id: str, fields: dict) -> dict:
-    """The asset's pinned fields as Google has them now (a read, so it also runs in a dry run)."""
+    """The asset's pinned fields as Google has them now (a read, so it also runs in a dry run).
+
+    Converted exactly as the draft's GAQL read converts them (enum names,
+    lists), so pinned and current values compare like for like.
+    """
+    from adloop.ads.gaql import _extract_field
+
     service = client.get_service("GoogleAdsService")
     query = f"SELECT asset.id, {', '.join(fields.values())} FROM asset WHERE asset.id = {asset_id}"
     for row in service.search(customer_id=cid, query=query):
-        values = {}
-        for key, field in fields.items():
-            value = row
-            for part in field.split("."):
-                value = getattr(value, part)
-            values[key] = value
-        return _normalize(values)
+        return _normalize({key: _extract_field(row, field) for key, field in fields.items()})
     raise RuntimeError(f"Asset {asset_id} no longer exists; nothing was sent.")
 
 
 def _check_unchanged(client, cid: str, changes: dict, fields: dict) -> None:
-    """Refuse when the asset changed in Google Ads after the preview."""
-    pinned = changes.get("previous") or {}
+    """Refuse when the asset changed in Google Ads after the preview.
+
+    ``pinned`` holds the raw values read at draft; plans whose preview values
+    are already raw pin them as ``previous``.
+    """
+    pinned = changes.get("pinned") or changes.get("previous") or {}
     now = _current_values(client, cid, changes["asset_id"], {k: fields[k] for k in pinned})
     moved = sorted(k for k, v in pinned.items() if now.get(k) != v)
     if moved:
@@ -749,3 +759,492 @@ def _apply_update_structured_snippet(client, cid: str, changes: dict) -> dict:
         return ["structured_snippet_asset.header", "structured_snippet_asset.values"]
 
     return _apply_asset_update(client, cid, changes["asset_id"], set_fields)
+
+
+# ---------------------------------------------------------------------------
+# Call assets and campaign ad schedules (after PR #96 by Illia Sapryga)
+# ---------------------------------------------------------------------------
+
+_DAYS = ("MONDAY", "TUESDAY", "WEDNESDAY", "THURSDAY", "FRIDAY", "SATURDAY", "SUNDAY")
+_MINUTE_TO_ENUM = {0: "ZERO", 15: "FIFTEEN", 30: "THIRTY", 45: "FORTY_FIVE"}
+_ENUM_TO_MINUTE = {name: minute for minute, name in _MINUTE_TO_ENUM.items()}
+# CriterionError.AD_SCHEDULE_EXCEEDED_INTERVALS_PER_DAY_LIMIT
+_MAX_INTERVALS_PER_DAY = 6
+_REPORTING_STATES = (
+    "DISABLED",
+    "USE_ACCOUNT_LEVEL_CALL_CONVERSION_ACTION",
+    "USE_RESOURCE_LEVEL_CALL_CONVERSION_ACTION",
+)
+_RESOURCE_LEVEL = "USE_RESOURCE_LEVEL_CALL_CONVERSION_ACTION"
+
+
+def _phone_e164(phone: str, country_code: str) -> tuple[str, str | None]:
+    """``(e164, error)``. Parsed by ``phonenumbers`` (Google's libphonenumber port).
+
+    It reads what a hand-written map got wrong: the "(0)" trunk marker in
+    "+44 (0)20 7946 0018", the "00" international prefix, Italy's kept 0.
+    ``country_code`` is required and must dial the number's country code.
+    """
+    import phonenumbers
+
+    cc = _clean(country_code).upper()
+    if not cc:
+        return "", (
+            "country_code is required with phone_number (ISO 3166-1 alpha-2 such as "
+            "'US', 'GB', 'DE'): it is stored on the call asset and decides how a "
+            "national number is read"
+        )
+    expected = phonenumbers.country_code_for_region(cc) if len(cc) == 2 and cc.isalpha() else 0
+    if not expected:
+        return "", f"country_code '{country_code}' is not a 2-letter ISO country code"
+    raw = _clean(phone)
+    if not raw:
+        return "", "phone_number is required"
+    try:
+        number = phonenumbers.parse(raw, cc)
+    except phonenumbers.NumberParseException:
+        return "", f"phone_number '{raw}' cannot be read as a phone number"
+    if number.country_code != expected:
+        return "", (
+            f"phone_number '{raw}' has country code +{number.country_code}, but "
+            f"country_code {cc} dials +{expected}"
+        )
+    if not phonenumbers.is_valid_number(number):
+        return "", f"phone_number '{raw}' is not a valid {cc} number"
+    return phonenumbers.format_number(number, phonenumbers.PhoneNumberFormat.E164), None
+
+
+def _whole_number(value: object, default: int | None = None) -> int:
+    """An integer, or ValueError / TypeError: 9.7 is refused instead of becoming 9."""
+    if value is None or value == "":
+        if default is None:
+            raise ValueError("missing")
+        return default
+    if isinstance(value, bool):
+        raise TypeError("bool")
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float) and value.is_integer():
+        return int(value)
+    if isinstance(value, str) and value.strip().isdigit():
+        return int(value.strip())
+    raise ValueError(str(value))
+
+
+def _validate_schedule(schedule: list[dict]) -> tuple[list[dict], list[str]]:
+    """``(validated, errors)`` for ad schedule windows.
+
+    Each window: day_of_week, start_hour 0-23, end_hour 0-24 (24 only with
+    minute 0), start_minute/end_minute 0, 15, 30 or 45; end after start; no
+    overlaps and at most six windows per day.
+    """
+    errors: list[str] = []
+    validated: list[dict] = []
+    for i, entry in enumerate(schedule or []):
+        where = f"schedule[{i}]"
+        if not isinstance(entry, dict):
+            errors.append(f"{where}: must be an object with day_of_week, start_hour, end_hour")
+            continue
+        day = _clean(entry.get("day_of_week")).upper()
+        if day not in _DAYS:
+            errors.append(f"{where}: day_of_week must be one of {list(_DAYS)}")
+            continue
+        try:
+            start_hour = _whole_number(entry.get("start_hour"))
+            end_hour = _whole_number(entry.get("end_hour"))
+            start_minute = _whole_number(entry.get("start_minute"), 0)
+            end_minute = _whole_number(entry.get("end_minute"), 0)
+        except (TypeError, ValueError):
+            errors.append(
+                f"{where}: start_hour and end_hour are required whole numbers, minutes "
+                "0, 15, 30 or 45 (9:30 is start_hour 9, start_minute 30)"
+            )
+            continue
+        bad = []
+        if not 0 <= start_hour <= 23:
+            bad.append(f"{where}: start_hour must be 0-23")
+        if not 0 <= end_hour <= 24:
+            bad.append(f"{where}: end_hour must be 0-24")
+        if start_minute not in _MINUTE_TO_ENUM or end_minute not in _MINUTE_TO_ENUM:
+            bad.append(f"{where}: minutes must be 0, 15, 30 or 45")
+        if end_hour == 24 and end_minute:
+            bad.append(f"{where}: end_hour 24 takes end_minute 0")
+        if not bad and (end_hour, end_minute) <= (start_hour, start_minute):
+            bad.append(
+                f"{where}: end {end_hour}:{end_minute:02d} must be after start "
+                f"{start_hour}:{start_minute:02d}"
+            )
+        if bad:
+            errors.extend(bad)
+            continue
+        validated.append({"day_of_week": day, "start_hour": start_hour, "start_minute": start_minute,
+                          "end_hour": end_hour, "end_minute": end_minute})
+    if not errors:
+        errors.extend(_schedule_conflicts(validated))
+    return validated, errors
+
+
+def _hhmm(minutes: int) -> str:
+    return f"{minutes // 60:02d}:{minutes % 60:02d}"
+
+
+def _schedule_conflicts(new: list[dict], existing: list[dict] | None = None) -> list[str]:
+    """Overlaps and the six-per-day limit across new (and existing) windows."""
+    from itertools import pairwise
+
+    by_day: dict[str, list[tuple[int, int, str]]] = {}
+    for label, items in (("existing", existing or []), ("new", new)):
+        for w in items:
+            by_day.setdefault(w["day_of_week"], []).append(
+                (w["start_hour"] * 60 + w["start_minute"], w["end_hour"] * 60 + w["end_minute"], label))
+    errors: list[str] = []
+    for day in _DAYS:
+        windows = sorted(by_day.get(day, []))
+        if len(windows) > _MAX_INTERVALS_PER_DAY:
+            errors.append(f"{day}: {len(windows)} windows; Google allows at most {_MAX_INTERVALS_PER_DAY} a day")
+        for (s1, e1, l1), (s2, e2, l2) in pairwise(windows):
+            if s2 < e1:
+                errors.append(f"{day}: {l1} window {_hhmm(s1)}-{_hhmm(e1)} overlaps {l2} window {_hhmm(s2)}-{_hhmm(e2)}")
+    return errors
+
+
+def _schedule_from_google(items: list) -> list[dict]:
+    """Windows as read from GAQL (enum names) in the shape the drafts take."""
+    out = []
+    for item in items or []:
+        item = item or {}
+        out.append({
+            "day_of_week": str(item.get("day_of_week") or ""),
+            "start_hour": int(item.get("start_hour") or 0),
+            "start_minute": _ENUM_TO_MINUTE.get(str(item.get("start_minute") or "ZERO"), 0),
+            "end_hour": int(item.get("end_hour") or 0),
+            "end_minute": _ENUM_TO_MINUTE.get(str(item.get("end_minute") or "ZERO"), 0),
+        })
+    return out
+
+
+def _populate_schedule(client, info, window: dict) -> None:
+    info.day_of_week = getattr(client.enums.DayOfWeekEnum, window["day_of_week"])
+    info.start_hour = int(window["start_hour"])
+    info.end_hour = int(window["end_hour"])
+    info.start_minute = getattr(client.enums.MinuteOfHourEnum, _MINUTE_TO_ENUM[int(window["start_minute"])])
+    info.end_minute = getattr(client.enums.MinuteOfHourEnum, _MINUTE_TO_ENUM[int(window["end_minute"])])
+
+
+def _account_settings(config: AdLoopConfig, customer_id: str) -> dict:
+    """The account's currency and time zone (both shown in previews)."""
+    from adloop.ads.gaql import execute_query
+
+    rows = execute_query(config, customer_id, "SELECT customer.currency_code, customer.time_zone FROM customer LIMIT 1")
+    row = rows[0] if rows else {}
+    return {"currency_code": str(row.get("customer.currency_code") or ""),
+            "time_zone": str(row.get("customer.time_zone") or "")}
+
+
+def _time_zone_note(time_zone: str) -> str:
+    return (
+        f"Schedule hours are in the account time zone ({time_zone or 'not readable'}), "
+        "not the searcher's local time."
+    )
+
+
+def draft_call_asset(
+    config: AdLoopConfig,
+    *,
+    customer_id: str = "",
+    phone_number: str = "",
+    country_code: str = "",
+    campaign_id: str = "",
+    ad_group_id: str = "",
+    scope: str = "",
+    call_conversion_action_id: str = "",
+    ad_schedule: list[dict] | None = None,
+) -> dict:
+    """Draft a call asset linked to an ad group, a campaign or the account."""
+    from adloop.safety.preview import ChangePlan, store_plan
+
+    if blocked := _blocked("create_call_asset", config):
+        return blocked
+    scope, campaign_id, ad_group_id, errors = resolve_scope(scope, campaign_id, ad_group_id)
+    e164, phone_error = _phone_e164(phone_number, country_code)
+    if phone_error:
+        errors.append(phone_error)
+    conversion_id = _clean(call_conversion_action_id)
+    if conversion_id and not _is_numeric_id(conversion_id):
+        errors.append(f"call_conversion_action_id must be numeric, got '{conversion_id}'")
+    schedule, schedule_errors = _validate_schedule(ad_schedule or [])
+    errors.extend(schedule_errors)
+    if errors:
+        return {"error": "Validation failed", "details": errors}
+
+    warnings = [(
+        "Google reviews the phone number before the call asset serves; it can stay under "
+        "review, or need verification in Google Ads (Assets, Calls)."
+    )]
+    if scope == "account":
+        warnings.append(_account_scope_warning("call assets"))
+    if schedule:
+        warnings.append(_time_zone_note(_account_settings(config, customer_id)["time_zone"]))
+    entity_type, entity_id = scope_entity(scope, customer_id, campaign_id, ad_group_id)
+    plan = ChangePlan(
+        operation="create_call_asset",
+        entity_type=entity_type,
+        entity_id=entity_id,
+        customer_id=customer_id,
+        changes={"scope": scope, "campaign_id": campaign_id, "ad_group_id": ad_group_id,
+                 "phone_number": e164, "country_code": _clean(country_code).upper(),
+                 "call_conversion_action_id": conversion_id, "ad_schedule": schedule},
+    )
+    store_plan(plan)
+    preview = plan.to_preview()
+    preview["warnings"] = warnings
+    return preview
+
+
+_CALL_FIELDS = {
+    "phone_number": "asset.call_asset.phone_number",
+    "country_code": "asset.call_asset.country_code",
+    "call_conversion_action": "asset.call_asset.call_conversion_action",
+    "call_conversion_reporting_state": "asset.call_asset.call_conversion_reporting_state",
+    "ad_schedule": "asset.call_asset.ad_schedule_targets",
+}
+
+
+def update_call_asset(
+    config: AdLoopConfig,
+    *,
+    customer_id: str = "",
+    asset_id: str = "",
+    phone_number: str = "",
+    country_code: str = "",
+    call_conversion_action_id: str = "",
+    call_conversion_reporting_state: str = "",
+    ad_schedule: list[dict] | None = None,
+    clear_ad_schedule: bool = False,
+) -> dict:
+    """Draft an in-place edit of a call asset; fields not passed stay as they are."""
+    if blocked := _blocked("update_call_asset", config):
+        return blocked
+    asset_id = _clean(asset_id)
+    errors: list[str] = [] if _is_numeric_id(asset_id) else [f"asset_id must be numeric, got '{asset_id}'"]
+    e164 = ""
+    if _clean(phone_number):
+        e164, phone_error = _phone_e164(phone_number, country_code)
+        if phone_error:
+            errors.append(phone_error)
+    elif _clean(country_code):
+        errors.append("country_code only changes together with phone_number; pass both")
+    conversion_id = _clean(call_conversion_action_id)
+    if conversion_id and not _is_numeric_id(conversion_id):
+        errors.append(f"call_conversion_action_id must be numeric, got '{conversion_id}'")
+    state = _clean(call_conversion_reporting_state).upper()
+    if state and state not in _REPORTING_STATES:
+        errors.append(f"call_conversion_reporting_state must be one of {list(_REPORTING_STATES)}")
+    if conversion_id:
+        if state and state != _RESOURCE_LEVEL:
+            errors.append(f"call_conversion_action_id only counts with call_conversion_reporting_state={_RESOURCE_LEVEL}")
+        state = _RESOURCE_LEVEL
+    schedule, schedule_errors = _validate_schedule(ad_schedule or [])
+    errors.extend(schedule_errors)
+    if clear_ad_schedule and schedule:
+        errors.append("Pass ad_schedule or clear_ad_schedule, not both")
+    if not errors and not (e164 or conversion_id or state or schedule or clear_ad_schedule):
+        errors.append("No changes specified: pass phone_number (with country_code), "
+                      "call_conversion_action_id, call_conversion_reporting_state, "
+                      "ad_schedule or clear_ad_schedule")
+    if errors:
+        return {"error": "Validation failed", "details": errors}
+
+    current, error = _asset_for_edit(config, customer_id, asset_id, _CALL_FIELDS, "CALL")
+    if error:
+        return error
+    if state == _RESOURCE_LEVEL and not conversion_id and not current["call_conversion_action"]:
+        return {"error": "Validation failed", "details": [
+            f"{_RESOURCE_LEVEL} needs a conversion action and the asset has none; pass call_conversion_action_id"]}
+
+    changed: dict = {}
+    if e164 and (e164, _clean(country_code).upper()) != (current["phone_number"], current["country_code"]):
+        changed.update(phone_number=e164, country_code=_clean(country_code).upper())
+    if conversion_id and not str(current["call_conversion_action"]).endswith(f"/{conversion_id}"):
+        changed["call_conversion_action_id"] = conversion_id
+    if state and state != current["call_conversion_reporting_state"]:
+        changed["call_conversion_reporting_state"] = state
+    current_schedule = _schedule_from_google(current["ad_schedule"])
+    if (schedule or clear_ad_schedule) and schedule != current_schedule:
+        changed["ad_schedule"] = schedule
+    if not changed:
+        return {"error": f"Call asset {asset_id} already has these values; nothing to change"}
+
+    pinned_keys = {"phone_number": ("phone_number", "country_code"), "country_code": (),
+                   "call_conversion_action_id": ("call_conversion_action",),
+                   "call_conversion_reporting_state": ("call_conversion_reporting_state",),
+                   "ad_schedule": ("ad_schedule",)}
+    pinned = {k: current[k] for key in changed for k in pinned_keys[key]}
+    previous = {"phone_number": current["phone_number"], "country_code": current["country_code"],
+                "call_conversion_action": current["call_conversion_action"],
+                "call_conversion_reporting_state": current["call_conversion_reporting_state"],
+                "ad_schedule": current_schedule}
+    preview = _edit_plan("update_call_asset", customer_id, asset_id, changed, previous, pinned=pinned)
+    if "phone_number" in changed:
+        preview["warnings"].append("A new number goes through Google's review again before the asset serves.")
+    if schedule:
+        preview["warnings"].append(_time_zone_note(_account_settings(config, customer_id)["time_zone"]))
+    if "ad_schedule" in changed and not schedule:
+        preview["warnings"].append("Without a schedule the number shows at all hours.")
+    return preview
+
+
+def _campaign_schedule(config: AdLoopConfig, customer_id: str, campaign_id: str) -> tuple[dict | None, list[dict]]:
+    """The campaign (name, status, account time zone) and its current windows."""
+    from adloop.ads.gaql import execute_query
+
+    rows = execute_query(config, customer_id, (
+        "SELECT campaign.id, campaign.name, campaign.status, customer.time_zone "
+        f"FROM campaign WHERE campaign.id = {campaign_id} LIMIT 1"))
+    if not rows:
+        return None, []
+    campaign = {"name": rows[0].get("campaign.name") or "", "status": rows[0].get("campaign.status") or "",
+                "time_zone": rows[0].get("customer.time_zone") or ""}
+    windows = execute_query(config, customer_id, (
+        "SELECT campaign_criterion.criterion_id, campaign_criterion.ad_schedule.day_of_week, "
+        "campaign_criterion.ad_schedule.start_hour, campaign_criterion.ad_schedule.start_minute, "
+        "campaign_criterion.ad_schedule.end_hour, campaign_criterion.ad_schedule.end_minute "
+        f"FROM campaign_criterion WHERE campaign.id = {campaign_id} "
+        "AND campaign_criterion.type = 'AD_SCHEDULE' AND campaign_criterion.status != 'REMOVED'"))
+    existing = []
+    for row in windows:
+        window = _schedule_from_google([{
+            key: row.get(f"campaign_criterion.ad_schedule.{key}")
+            for key in ("day_of_week", "start_hour", "start_minute", "end_hour", "end_minute")
+        }])[0]
+        window["remove_id"] = f"{campaign_id}~{row.get('campaign_criterion.criterion_id')}"
+        existing.append(window)
+    return campaign, existing
+
+
+def add_ad_schedule(
+    config: AdLoopConfig,
+    *,
+    customer_id: str = "",
+    campaign_id: str = "",
+    schedule: list[dict] | None = None,
+) -> dict:
+    """Draft ad schedule windows for a campaign (added; existing windows stay)."""
+    from adloop.safety.preview import ChangePlan, store_plan
+
+    if blocked := _blocked("add_ad_schedule", config):
+        return blocked
+    campaign_id = _clean(campaign_id)
+    errors: list[str] = [] if _is_numeric_id(campaign_id) else [f"campaign_id must be numeric, got '{campaign_id}'"]
+    windows, schedule_errors = _validate_schedule(schedule or [])
+    errors.extend(schedule_errors)
+    if not schedule_errors and not windows:
+        errors.append("schedule needs at least one window")
+    if errors:
+        return {"error": "Validation failed", "details": errors}
+
+    campaign, existing = _campaign_schedule(config, customer_id, campaign_id)
+    if campaign is None:
+        return {"error": f"Campaign {campaign_id} was not found in this account"}
+    if campaign["status"] == "REMOVED":
+        return {"error": f"Campaign {campaign_id} is removed"}
+    conflicts = _schedule_conflicts(windows, existing)
+    if conflicts:
+        return {"error": "Validation failed", "details": conflicts, "existing_schedule": existing}
+
+    warnings = [_time_zone_note(campaign["time_zone"])]
+    first = not existing
+    if first:
+        warnings.append(
+            f"Campaign '{campaign['name']}' has no ad schedule, so it serves at all hours. "
+            "With these windows it serves only inside them: every other hour, and every "
+            "day without a window, stops serving."
+        )
+    if campaign["status"] != "ENABLED":
+        warnings.append(f"The campaign is {campaign['status']}; the schedule applies once it is enabled.")
+    plan = ChangePlan(
+        operation="add_ad_schedule",
+        entity_type="campaign_criterion",
+        entity_id=campaign_id,
+        customer_id=customer_id,
+        changes={"campaign_id": campaign_id, "campaign_name": campaign["name"],
+                 "account_time_zone": campaign["time_zone"], "schedule": windows,
+                 "existing_schedule": existing},
+        # A campaign's first windows switch off every hour outside them.
+        requires_double_confirm=first,
+    )
+    store_plan(plan)
+    preview = plan.to_preview()
+    preview["warnings"] = warnings
+    return preview
+
+
+def _apply_create_call_asset(client, cid: str, changes: dict) -> dict:
+    def populate(asset, payload):
+        call = asset.call_asset
+        call.country_code = payload["country_code"]
+        call.phone_number = payload["phone_number"]
+        if payload.get("call_conversion_action_id"):
+            call.call_conversion_action = client.get_service("ConversionActionService").conversion_action_path(
+                cid, payload["call_conversion_action_id"])
+            call.call_conversion_reporting_state = (
+                client.enums.CallConversionReportingStateEnum.USE_RESOURCE_LEVEL_CALL_CONVERSION_ACTION)
+        for window in payload.get("ad_schedule") or []:
+            info = client.get_type("AdScheduleInfo")
+            _populate_schedule(client, info, window)
+            call.ad_schedule_targets.append(info)
+
+    return _create_and_link(client, cid, [changes], client.enums.AssetFieldTypeEnum.CALL, populate, changes)
+
+
+def _apply_update_call_asset(client, cid: str, changes: dict) -> dict:
+    _check_unchanged(client, cid, changes, _CALL_FIELDS)
+
+    def set_fields(asset):
+        call, paths = asset.call_asset, []
+        if "phone_number" in changes:
+            call.phone_number = changes["phone_number"]
+            call.country_code = changes["country_code"]
+            paths += ["call_asset.phone_number", "call_asset.country_code"]
+        if changes.get("call_conversion_action_id"):
+            call.call_conversion_action = client.get_service("ConversionActionService").conversion_action_path(
+                cid, changes["call_conversion_action_id"])
+            paths.append("call_asset.call_conversion_action")
+        if changes.get("call_conversion_reporting_state"):
+            call.call_conversion_reporting_state = getattr(
+                client.enums.CallConversionReportingStateEnum, changes["call_conversion_reporting_state"])
+            paths.append("call_asset.call_conversion_reporting_state")
+        if "ad_schedule" in changes:  # replaces the whole list; empty clears it
+            for window in changes["ad_schedule"]:
+                info = client.get_type("AdScheduleInfo")
+                _populate_schedule(client, info, window)
+                call.ad_schedule_targets.append(info)
+            paths.append("call_asset.ad_schedule_targets")
+        return paths
+
+    return _apply_asset_update(client, cid, changes["asset_id"], set_fields)
+
+
+def _apply_add_ad_schedule(client, cid: str, changes: dict) -> dict:
+    campaign_id = changes["campaign_id"]
+    if changes.get("existing_schedule"):
+        # Drafted as an addition to existing windows. If those are gone now,
+        # these windows would switch off every other hour without the double
+        # confirmation a first schedule gets.
+        query = ("SELECT campaign_criterion.criterion_id FROM campaign_criterion "
+                 f"WHERE campaign.id = {campaign_id} AND campaign_criterion.type = 'AD_SCHEDULE' "
+                 "AND campaign_criterion.status != 'REMOVED'")
+        if not list(client.get_service("GoogleAdsService").search(customer_id=cid, query=query)):
+            raise RuntimeError(
+                f"Campaign {campaign_id} no longer has the ad schedule this preview added to, so "
+                "these windows would now switch off every other hour. Nothing was sent; draft again.")
+    campaign = client.get_service("CampaignService").campaign_path(cid, campaign_id)
+    operations = []
+    for window in changes["schedule"]:
+        op = client.get_type("CampaignCriterionOperation")
+        op.create.campaign = campaign
+        _populate_schedule(client, op.create.ad_schedule, window)
+        operations.append(op)
+    response = client.get_service("CampaignCriterionService").mutate_campaign_criteria(
+        customer_id=cid, operations=operations)
+    return {"campaign_criteria": [r.resource_name for r in response.results]}

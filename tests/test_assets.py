@@ -49,13 +49,16 @@ class _Paths:
 
 class _GoogleAds(_Paths):
     def __init__(self, rows=None, n=0):
-        self.rows, self.operations, self.n = rows or [], None, n
+        self.rows, self.operations, self.n, self.requests = rows or [], None, n, []
 
     def search(self, customer_id, query):
         self.query = query
         return iter(self.rows)
 
-    def mutate(self, customer_id, mutate_operations):
+    def mutate(self, customer_id=None, mutate_operations=None, request=None):
+        if request is not None:  # sent through ValidateOnlyClient
+            self.requests.append(request)
+            mutate_operations = request.mutate_operations
         self.operations = list(mutate_operations)
         responses = []
         for op in self.operations:
@@ -71,11 +74,26 @@ class _GoogleAds(_Paths):
 
 class _AssetService(_Paths):
     def __init__(self):
-        self.operations = None
+        self.operations, self.requests = None, []
 
-    def mutate_assets(self, customer_id, operations):
+    def mutate_assets(self, customer_id=None, operations=None, request=None):
+        if request is not None:
+            self.requests.append(request)
+            operations = request.operations
         self.operations = list(operations)
         return SimpleNamespace(results=[SimpleNamespace(resource_name="customers/1/assets/7")])
+
+
+class _CriterionService(_Paths):
+    def __init__(self):
+        self.operations, self.requests = None, []
+
+    def mutate_campaign_criteria(self, customer_id=None, operations=None, request=None):
+        if request is not None:
+            self.requests.append(request)
+            operations = request.operations
+        self.operations = list(operations)
+        return SimpleNamespace(results=[SimpleNamespace(resource_name=f"res/{i}") for i in range(len(operations))])
 
 
 class _Client:
@@ -83,10 +101,15 @@ class _Client:
         base = GoogleAdsClient(credentials=None, developer_token="t", use_proto_plus=True,
                                version=GOOGLE_ADS_API_VERSION)
         self.enums, self.get_type = base.enums, base.get_type
-        self.ads, self.assets = _GoogleAds(rows), _AssetService()
+        self.ads, self.assets, self.criteria = _GoogleAds(rows), _AssetService(), _CriterionService()
 
     def get_service(self, name):
-        return {"GoogleAdsService": self.ads, "AssetService": self.assets}[name]
+        return {"GoogleAdsService": self.ads, "AssetService": self.assets,
+                "CampaignCriterionService": self.criteria}.get(name) or _Paths()
+
+    def sent(self):
+        """Every request the dry-run wrapper sent."""
+        return self.ads.requests + self.assets.requests + self.criteria.requests
 
 
 def _row(**fields):
@@ -114,7 +137,7 @@ def _row(**fields):
     ("campaign", " 1001 ", "", "campaign"),
 ])
 def test_scope_follows_the_id_and_account_is_explicit(scope, campaign, ad_group, expected):
-    resolved, campaign_id, ad_group_id, errors = assets.resolve_scope(scope, campaign, ad_group)
+    resolved, campaign_id, _, errors = assets.resolve_scope(scope, campaign, ad_group)
     assert (resolved, errors) == (expected, [])
     assert campaign_id == campaign.strip()  # stored stripped
 
@@ -284,7 +307,11 @@ def test_ad_group_asset_links_can_be_removed(config):
 
 
 def test_google_translated_headers_are_accepted_in_their_exact_spelling(config):
-    from adloop.ads.snippet_headers import LOCALIZED_HEADERS, canonical_header, english_header
+    from adloop.ads.snippet_headers import (
+        LOCALIZED_HEADERS,
+        canonical_header,
+        english_header,
+    )
 
     assert all(len(headers) == 13 for _language, headers in LOCALIZED_HEADERS.values())
     assert (canonical_header("typen"), english_header("Typen")) == ("Typen", "Types")

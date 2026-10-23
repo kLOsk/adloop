@@ -3631,7 +3631,7 @@ def draft_custom_conversion_goal(
 def draft_update_custom_conversion_goal(
     custom_conversion_goal_id: str,
     name: str = "",
-    conversion_action_ids: _StrList = [],  # noqa: B006 — mutable default required for MCP JSON schema
+    conversion_action_ids: _StrList = [],  # noqa: B006
     customer_id: str = "",
 ) -> dict:
     """Rename and/or re-scope an existing custom conversion goal — PREVIEW.
@@ -3981,7 +3981,7 @@ def draft_ai_max_settings(
     campaign_id: str,
     enable_ai_max: bool | None = None,
     disable_search_term_matching: bool | None = None,
-    ad_group_ids: _StrList = [],  # noqa: B006 — mutable default required for MCP JSON schema
+    ad_group_ids: _StrList = [],  # noqa: B006
     include_paused_ad_groups: bool = True,
     text_asset_automation: str = "UNCHANGED",
     final_url_expansion: str = "UNCHANGED",
@@ -4088,7 +4088,7 @@ def draft_demographic_targeting(
     customer_id: str = "",
     ad_group_id: str = "",
     campaign_id: str = "",
-    # noqa: B006 — mutable default required for MCP JSON schema. Using
+    # noqa: B006. Using
     # `_StrList = []` produces a flat `{"type": "array", "default": []}`
     # schema that naive MCP clients handle; `_StrListOpt = None` would
     # produce an `anyOf: [array, null]` form that some clients ignore.
@@ -4265,6 +4265,146 @@ def draft_structured_snippets(
     )
 
 
+@_tool(title="Draft a call asset", annotations=_WRITE, tags={"ads"})
+@_safe
+def draft_call_asset(
+    phone_number: str,
+    country_code: str,
+    campaign_id: str = "",
+    ad_group_id: str = "",
+    scope: str = "",
+    call_conversion_action_id: str = "",
+    ad_schedule: _DictList = [],  # noqa: B006
+    customer_id: str = "",
+) -> dict:
+    """Draft a call asset (a phone number shown with the ads) — returns a PREVIEW.
+
+    Creates the call asset and links it where the id points: ad_group_id
+    links to that ad group, campaign_id to that campaign. Account-wide
+    linking needs scope="account" and no id. Google reviews the number
+    before it serves. Returns a preview with a plan_id.
+
+    Args:
+        phone_number: The number, national ("030 1234567", "(916) 555-0142")
+            or international ("+49 30 1234567"). Normalised to E.164.
+        country_code: ISO 3166-1 alpha-2 country of the number ("DE", "US").
+            Required; it decides how a national number is read and must
+            match the country code of an international one.
+        campaign_id: Numeric ID of the campaign to link the number to.
+        ad_group_id: Numeric ID of the ad group to link it to, instead of a
+            campaign.
+        scope: Empty (follows the id), "campaign", "ad_group" or "account".
+        call_conversion_action_id: Numeric ID of the conversion action that
+            counts calls from this number. Empty keeps the account's call
+            conversion setting.
+        ad_schedule: Optional windows when the number shows, each
+            {day_of_week: MONDAY..SUNDAY, start_hour: 0-23, end_hour: 0-24,
+            start_minute/end_minute: 0, 15, 30 or 45}. Hours are in the
+            account time zone.
+        customer_id: Google Ads customer ID (digits, dashes optional). Defaults to
+            the configured account.
+    """
+    from adloop.ads.assets import draft_call_asset as _impl
+
+    return _impl(
+        current_config(),
+        customer_id=customer_id or current_config().ads.customer_id,
+        phone_number=phone_number,
+        country_code=country_code,
+        campaign_id=campaign_id,
+        ad_group_id=ad_group_id,
+        scope=scope,
+        call_conversion_action_id=call_conversion_action_id,
+        ad_schedule=ad_schedule,
+    )
+
+
+@_tool(title="Draft a call asset edit", annotations=_WRITE, tags={"ads"})
+@_safe
+def update_call_asset(
+    asset_id: str,
+    phone_number: str = "",
+    country_code: str = "",
+    call_conversion_action_id: str = "",
+    call_conversion_reporting_state: str = "",
+    ad_schedule: _DictList = [],  # noqa: B006
+    clear_ad_schedule: bool = False,
+    customer_id: str = "",
+) -> dict:
+    """Draft changing a call asset in place — returns a PREVIEW.
+
+    Only the fields passed change. The asset keeps its ID and its links, so
+    the change shows everywhere it is linked. The preview shows the current
+    values and pins them; an edit in Google Ads before the apply stops it.
+
+    Args:
+        asset_id: Numeric ID of the CALL asset.
+        phone_number: New number, national or international; needs
+            country_code.
+        country_code: ISO 3166-1 alpha-2 country of the new number. Required
+            with phone_number, and only accepted together with it.
+        call_conversion_action_id: Numeric ID of the conversion action that
+            counts calls; sets USE_RESOURCE_LEVEL_CALL_CONVERSION_ACTION.
+        call_conversion_reporting_state: DISABLED,
+            USE_ACCOUNT_LEVEL_CALL_CONVERSION_ACTION or
+            USE_RESOURCE_LEVEL_CALL_CONVERSION_ACTION.
+        ad_schedule: Windows that replace the number's whole schedule (same
+            shape as draft_call_asset). Empty leaves the schedule as it is.
+        clear_ad_schedule: True removes the schedule, so the number shows at
+            all hours.
+        customer_id: Google Ads customer ID (digits, dashes optional). Defaults to
+            the configured account.
+    """
+    from adloop.ads.assets import update_call_asset as _impl
+
+    return _impl(
+        current_config(),
+        customer_id=customer_id or current_config().ads.customer_id,
+        asset_id=asset_id,
+        phone_number=phone_number,
+        country_code=country_code,
+        call_conversion_action_id=call_conversion_action_id,
+        call_conversion_reporting_state=call_conversion_reporting_state,
+        ad_schedule=ad_schedule,
+        clear_ad_schedule=clear_ad_schedule,
+    )
+
+
+@_tool(title="Draft a campaign ad schedule", annotations=_WRITE, tags={"ads"})
+@_safe
+def add_ad_schedule(
+    campaign_id: str,
+    schedule: _DictList,
+    customer_id: str = "",
+) -> dict:
+    """Draft ad schedule windows for a campaign — returns a PREVIEW.
+
+    Adds the windows; existing ones stay. The preview lists the current
+    windows (each with the remove_id that remove_entity takes as a
+    campaign_criterion) and the account time zone the hours are in.
+    Overlapping windows and more than six a day are refused. A campaign
+    without any window serves at all hours, so its first windows restrict it
+    to them: that preview needs a double confirmation.
+
+    Args:
+        campaign_id: Numeric ID of the campaign.
+        schedule: Windows to add, each {day_of_week: MONDAY..SUNDAY,
+            start_hour: 0-23, end_hour: 0-24, start_minute/end_minute: 0, 15,
+            30 or 45 (default 0)}. Whole numbers only. Hours are in the
+            account time zone.
+        customer_id: Google Ads customer ID (digits, dashes optional). Defaults to
+            the configured account.
+    """
+    from adloop.ads.assets import add_ad_schedule as _impl
+
+    return _impl(
+        current_config(),
+        customer_id=customer_id or current_config().ads.customer_id,
+        campaign_id=campaign_id,
+        schedule=schedule,
+    )
+
+
 @_tool(title="Draft a business name asset", annotations=_WRITE, tags={"ads"})
 @_safe
 def draft_business_name_asset(
@@ -4436,7 +4576,7 @@ def update_structured_snippet(
 @_safe
 def draft_image_assets(
     campaign_id: str,
-    image_paths: _StrList = [],  # noqa: B006 — mutable default required for MCP JSON schema
+    image_paths: _StrList = [],  # noqa: B006
     image_urls: _StrList = [],  # noqa: B006
     customer_id: str = "",
     upload_ids: _StrList = [],  # noqa: B006
@@ -6650,7 +6790,7 @@ def estimate_budget(
 @_tool(title="Keyword ideas", annotations=_READONLY, tags={"ads"})
 @_safe
 def discover_keywords(
-    seed_keywords: _StrList = [],  # noqa: B006 — mutable default required for MCP JSON schema
+    seed_keywords: _StrList = [],  # noqa: B006
     url: str = "",
     geo_target_id: str = "2276",
     language_id: str = "1000",
@@ -6707,7 +6847,7 @@ def discover_keywords(
 @_safe
 def suggest_brands(
     brand_prefix: str,
-    selected_brand_ids: _StrList = [],  # noqa: B006 — mutable default required for MCP JSON schema
+    selected_brand_ids: _StrList = [],  # noqa: B006
     customer_id: str = "",
 ) -> dict:
     """Resolve a brand name to the brands Google recognizes for it.
@@ -6847,7 +6987,7 @@ def get_brand_list_campaigns(
 def propose_brand_list(
     list_name: str,
     brand_ids: _StrList,
-    campaign_ids: _StrList = [],  # noqa: B006 — mutable default required for MCP JSON schema
+    campaign_ids: _StrList = [],  # noqa: B006
     negative: bool = True,
     customer_id: str = "",
 ) -> dict:
