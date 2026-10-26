@@ -306,6 +306,7 @@ All write operations follow a **draft → preview → confirm** workflow. Nothin
 | `draft_update_custom_conversion_goal` | Rename a custom conversion goal and/or replace its action list (list replace, not append) |
 | `draft_assign_custom_conversion_goal` | Point a campaign at a custom conversion goal (`goal_config_level = CAMPAIGN`) |
 | `draft_clear_custom_conversion_goal` | Put a campaign back on the account-level goals (rollback) |
+| `draft_dismiss_recommendations` | Dismiss Google recommendations you won't take, so they stop reappearing (Google can show them again later) |
 | `pause_entity` | Pause a campaign, ad group, ad, keyword or PMax asset group |
 | `enable_entity` | Re-enable a paused entity |
 | `remove_entity` | Permanently remove an entity (irreversible — prefers pause). Supports keywords, negative keywords, ads, ad groups, campaigns. |

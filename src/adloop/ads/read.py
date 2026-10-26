@@ -843,6 +843,10 @@ def get_recommendations(
         pot_conversions = _round_metric(getattr(pot, "conversions", 0))
 
         entry = {
+            # The ID (last segment of the resource name) is what
+            # draft_dismiss_recommendations takes.
+            "recommendation.id": rec.resource_name.rsplit("/", 1)[-1],
+            "recommendation.resource_name": rec.resource_name,
             "recommendation.type": rec_type,
             "recommendation.campaign": rec.campaign,
             "recommendation.ad_group": rec.ad_group or "",

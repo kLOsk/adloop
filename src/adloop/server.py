@@ -1546,10 +1546,12 @@ def get_recommendations(
 ) -> dict:
     """Retrieve Google's auto-generated recommendations with estimated impact.
 
-    Returns each recommendation's type, associated campaign/ad group, current
-    (base) and projected (potential) metrics, and the estimated improvement.
-    Includes insights that flag budget-increase recommendations (their projected
-    gain comes from spending more) and highlight high-impact suggestions.
+    Returns each recommendation's ID, type, associated campaign/ad group,
+    current (base) and projected (potential) metrics, and the estimated
+    improvement. Includes insights that flag budget-increase recommendations
+    (their projected gain comes from spending more) and highlight high-impact
+    suggestions. The `recommendation.id` is what draft_dismiss_recommendations
+    takes.
 
     Args:
         customer_id: Google Ads customer ID, digits with or without dashes
@@ -1567,6 +1569,44 @@ def get_recommendations(
         customer_id=customer_id or current_config().ads.customer_id,
         recommendation_types=recommendation_types,
         campaign_id=campaign_id,
+    )
+
+
+@_tool(title="Draft dismissing recommendations", annotations=_WRITE, tags={"ads"})
+@_safe
+def draft_dismiss_recommendations(
+    recommendation_ids: _StrList,
+    customer_id: str = "",
+) -> dict:
+    """Dismiss Google Ads recommendations — returns a PREVIEW.
+
+    Turns down recommendations you will not take (e.g. "add broad match" on a
+    deliberately narrow account) so they stop reappearing in
+    get_recommendations. Nothing in the account changes, and Google can show a
+    dismissed recommendation again later, so a single confirmation is enough.
+
+    Each ID must be an active recommendation: unknown or already dismissed
+    IDs are refused by name. The preview lists each one's type, campaign and
+    estimated improvement, so the user sees what they are turning down.
+
+    DismissRecommendation has no validate-only mode: the dry run re-reads the
+    account and checks every recommendation is still active instead of
+    sending the call to Google. The returned plan_id is applied with
+    confirm_and_apply.
+
+    Args:
+        recommendation_ids: `recommendation.id` values from
+            get_recommendations, or full resource names
+            (customers/{customer_id}/recommendations/{id}). Duplicates are
+            collapsed.
+        customer_id: Ads account ID. Defaults to the configured account.
+    """
+    from adloop.ads.recommendations import draft_dismiss_recommendations as _impl
+
+    return _impl(
+        current_config(),
+        customer_id=customer_id or current_config().ads.customer_id,
+        recommendation_ids=recommendation_ids,
     )
 
 
