@@ -3980,6 +3980,43 @@ def get_ai_max_settings(
         campaign_id=campaign_id,
     )
 
+
+@_tool(title="Campaign settings", annotations=_READONLY, tags={"ads"})
+@_safe
+def get_campaign_settings(
+    campaign_id: str = "",
+    customer_id: str = "",
+) -> dict:
+    """Read every setting that decides how far a Search campaign reaches, in one call.
+
+    Returns one flat record per campaign: status, bidding strategy and its
+    target or CPC ceiling, daily budget and whether it is shared, the Google
+    Search / search partner / Display network flags, the location option
+    (positive_geo_target_type) and its negative counterpart, campaign-level
+    broad match (keyword_match_type), the tracking template, final URL suffix
+    and custom parameters, and the AI Max state get_ai_max_settings reports
+    (enable_ai_max, asset automation per type). Money is in the account
+    currency (`currency`).
+
+    Each campaign lists its `widening_settings`: search partners or Display on,
+    a presence-or-interest location option, broad match on, AI Max on, an
+    automation opted in. `insights[]` names the campaigns that have any. Made
+    for recurring audits: the same call every week diffs cleanly.
+
+    Args:
+        campaign_id: Numeric campaign ID. When omitted, every non-removed
+            Search campaign in the account is listed.
+        customer_id: Google Ads customer ID (digits, dashes optional). Defaults to
+            the configured account.
+    """
+    from adloop.ads.campaign_settings import get_campaign_settings as _impl
+
+    return _impl(
+        current_config(),
+        customer_id=customer_id or current_config().ads.customer_id,
+        campaign_id=campaign_id,
+    )
+
 @_tool(title="Draft AI Max settings", annotations=_WRITE, tags={"ads"})
 @_safe
 def draft_ai_max_settings(

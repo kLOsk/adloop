@@ -72,6 +72,7 @@ You have access to AdLoop MCP tools that connect Google Ads, Reddit Ads and Goog
 | `get_brand_list_brands` | Contents of a brand list, with `entity_id` (the MID) and `criterion_id` (needed for removal) | `shared_set_id` (required) |
 | `get_brand_list_campaigns` | Which campaigns a brand list is attached to, and whether each attachment excludes (`role: excluded`) or targets (`role: targeted`) | `shared_set_id` (optional) |
 | `get_ai_max_settings` | The AI Max knobs of Search campaigns: `enable_ai_max`, `bundling_required`, the full `asset_automation_settings` list, and each ad group's `disable_search_term_matching` | `campaign_id` (optional) |
+| `get_campaign_settings` | Every setting that decides how far a Search campaign reaches, one flat record per campaign: networks, location option, campaign-level broad match, bidding and budget, tracking template / URL suffix / custom parameters, and the AI Max state. `widening_settings` and `insights[]` name anything that lets ads reach beyond the chosen keywords and locations. The one call for a recurring "did Google switch something on?" audit | `campaign_id` (optional) |
 | `get_custom_conversion_goals` | Custom conversion goals (named sets of conversion actions) and one campaign's goal config | `campaign_id` (optional) |
 | `run_gaql` | Custom queries not covered by other tools | `query`, `format` (table/json/csv) |
 

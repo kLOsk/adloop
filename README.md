@@ -120,6 +120,7 @@ The best features come from real workflows. If you're using AdLoop and find your
 | `get_brand_list_brands` | List the brands inside a list, with the Commercial KG MID and the criterion ID for removals |
 | `get_brand_list_campaigns` | Which campaigns a brand list is attached to, and whether each attachment excludes or targets |
 | `get_ai_max_settings` | AI Max knobs per campaign and ad group — `enable_ai_max`, `bundling_required`, the full `asset_automation_settings` list and each ad group's `disable_search_term_matching` |
+| `get_campaign_settings` | One flat record per Search campaign — networks, location option, campaign-level broad match, bidding, budget, URL options and AI Max — with the settings that widen reach flagged |
 | `get_custom_conversion_goals` | Custom conversion goals with their actions, plus one campaign's goal config |
 | `run_gaql` | Arbitrary GAQL queries for anything else |
 
