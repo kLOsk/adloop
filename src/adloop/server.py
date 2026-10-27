@@ -3362,7 +3362,8 @@ def draft_campaign(
             PRESENCE_OR_INTEREST. Anything but PRESENCE adds a warning.
         negative_location_option: Who the location exclusions exclude.
             PRESENCE or PRESENCE_OR_INTEREST; empty leaves Google's default,
-            PRESENCE_OR_INTEREST.
+            PRESENCE_OR_INTEREST. PRESENCE excludes fewer people (only those
+            physically there), so it widens reach and the preview warns.
     """
     from adloop.ads.write import draft_campaign as _impl
 
@@ -3499,7 +3500,8 @@ def update_campaign(
             but PRESENCE. Empty leaves it unchanged.
         negative_location_option: PRESENCE | PRESENCE_OR_INTEREST. Who the
             location exclusions exclude; the preview shows the current value.
-            Empty leaves it unchanged.
+            PRESENCE excludes fewer people (only those physically there), so
+            it widens reach and the preview warns. Empty leaves it unchanged.
     """
     from adloop.ads.write import update_campaign as _impl
 
