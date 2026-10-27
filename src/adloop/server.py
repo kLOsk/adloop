@@ -3468,6 +3468,7 @@ def update_campaign(
     tracking_url_template: str | None = None,
     final_url_suffix: str | None = None,
     url_custom_parameters: _DictListOpt = None,
+    keyword_match_type: str = "",
 ) -> dict:
     """Draft an update to an existing campaign — returns a PREVIEW, does NOT apply.
 
@@ -3531,6 +3532,18 @@ def update_campaign(
             removal, and gives example_click: one of the campaign's final URLs
             with the campaign's options applied. It is approximate: a template
             on the ad group, ad or keyword overrides the campaign's.
+        keyword_match_type: Campaign-level broad match. BROAD turns it on and
+            CONVERTS every existing phrase and exact keyword in the campaign to
+            broad match (the originals show as Removed; turning it off does not
+            restore them), and since September 2026 Google upgrades such
+            campaigns to AI Max. Refused unless the campaign uses Smart Bidding
+            (MAXIMIZE_CONVERSIONS, MAXIMIZE_CONVERSION_VALUE, TARGET_CPA,
+            TARGET_ROAS), checked again at apply; needs a double confirmation.
+            UNSPECIFIED turns it off: no further conversions, but converted
+            keywords stay broad. Moving a campaign with broad match on to a
+            non-Smart bidding_strategy is refused unless the same call passes
+            UNSPECIFIED. The preview shows the current value. Empty leaves it
+            unchanged.
     """
     from adloop.ads.write import update_campaign as _impl
 
@@ -3553,6 +3566,7 @@ def update_campaign(
         tracking_url_template=tracking_url_template,
         final_url_suffix=final_url_suffix,
         url_custom_parameters=url_custom_parameters,
+        keyword_match_type=keyword_match_type,
     )
 
 
