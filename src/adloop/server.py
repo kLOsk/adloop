@@ -1610,6 +1610,69 @@ def draft_dismiss_recommendations(
     )
 
 
+@_tool(title="Auto-apply recommendation subscriptions", annotations=_READONLY, tags={"ads"})
+@_safe
+def get_recommendation_subscriptions(customer_id: str = "") -> dict:
+    """List the recommendation types Google applies automatically (auto-apply).
+
+    A subscription makes Google apply every new recommendation of its type
+    without asking, so changes reach the account with no preview. Returns each
+    subscription's type, status (ENABLED or PAUSED), create_date_time and
+    modify_date_time. A type that is not listed is not auto-applied.
+    insights[] names every ENABLED type and flags one modified in the last 30
+    days, so a recurring audit can catch auto-apply being switched on.
+
+    Args:
+        customer_id: Google Ads customer ID, digits with or without dashes
+            (e.g. "123-456-7890"). Defaults to the configured ads.customer_id.
+    """
+    from adloop.ads.recommendation_subscriptions import (
+        get_recommendation_subscriptions as _impl,
+    )
+
+    return _impl(
+        current_config(),
+        customer_id=customer_id or current_config().ads.customer_id,
+    )
+
+
+@_tool(title="Draft pausing auto-apply recommendations", annotations=_WRITE, tags={"ads"})
+@_safe
+def draft_recommendation_subscriptions(
+    recommendation_types: _StrList,
+    customer_id: str = "",
+) -> dict:
+    """Pause auto-apply for recommendation types — returns a PREVIEW.
+
+    Pausing is the only change this tool can make: it sets each type's
+    subscription to PAUSED, so Google stops applying those recommendations on
+    its own. Their recommendations still appear in get_recommendations.
+    Re-enabling auto-apply is deliberately not supported; it lets Google change
+    the account without a preview, so it stays a decision for the Google Ads
+    UI. Pausing reduces automation, so a single confirmation is enough.
+
+    Each type must have an ENABLED subscription (see
+    get_recommendation_subscriptions); a type with none, or one already
+    paused, is refused by name. The dry run sends the request to Google with
+    validate_only. The returned plan_id is applied with confirm_and_apply.
+
+    Args:
+        recommendation_types: RecommendationType names with an ENABLED
+            subscription, e.g. ["KEYWORD", "USE_BROAD_MATCH_KEYWORD"].
+            Duplicates are collapsed.
+        customer_id: Ads account ID. Defaults to the configured account.
+    """
+    from adloop.ads.recommendation_subscriptions import (
+        draft_recommendation_subscriptions as _impl,
+    )
+
+    return _impl(
+        current_config(),
+        customer_id=customer_id or current_config().ads.customer_id,
+        recommendation_types=recommendation_types,
+    )
+
+
 @_tool(title="Performance Max performance", annotations=_READONLY, tags={"ads"})
 @_safe
 def get_pmax_performance(

@@ -4101,6 +4101,9 @@ def _dispatch_ads_plan(client: object, cid: str, plan: object) -> dict:
     from adloop.ads.pmax import apply_asset_group_signals as _apply_asset_group_signals
     from adloop.ads.pmax import apply_pmax_product_filter as _apply_pmax_product_filter
     from adloop.ads.recommendations import _apply_dismiss_recommendations
+    from adloop.ads.recommendation_subscriptions import (
+        _apply_pause_recommendation_subscriptions,
+    )
     # Custom conversion goals live in their own module for the same reason.
     from adloop.ads.custom_conversion_goals import (
         _apply_assign_custom_conversion_goal,
@@ -4136,6 +4139,7 @@ def _dispatch_ads_plan(client: object, cid: str, plan: object) -> dict:
         "detach_brand_list_from_campaigns": _apply_detach_brand_list_from_campaigns,
         "update_ai_max_settings": _apply_ai_max_settings,
         "dismiss_recommendations": _apply_dismiss_recommendations,
+        "pause_recommendation_subscriptions": _apply_pause_recommendation_subscriptions,
         "create_custom_conversion_goal": _apply_create_custom_conversion_goal,
         "update_custom_conversion_goal": _apply_update_custom_conversion_goal,
         "assign_custom_conversion_goal": _apply_assign_custom_conversion_goal,

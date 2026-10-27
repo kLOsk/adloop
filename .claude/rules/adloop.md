@@ -53,6 +53,7 @@ You have access to AdLoop MCP tools that connect Google Ads, Reddit Ads and Goog
 | `get_negative_keyword_list_keywords` | List the keywords inside a specific shared negative keyword list | `shared_set_id` (required) |
 | `get_negative_keyword_list_campaigns` | List which campaigns a shared negative keyword list is attached to | `shared_set_id` (optional) |
 | `get_recommendations` | Google's auto-generated recommendations with estimated impact — budget, keyword, bid strategy, ad copy suggestions | `recommendation_types` (optional filter), `campaign_id` (optional) |
+| `get_recommendation_subscriptions` | Which recommendation types Google auto-applies without a preview: type, status (ENABLED/PAUSED), create/modify dates. `insights[]` names every ENABLED type and flags one modified in the last 30 days. A type not listed is not auto-applied | none |
 | `get_pmax_performance` | Performance Max campaign metrics with network breakdown + asset group ad strength | `date_range_start`, `date_range_end` |
 | `get_pmax_assets` | Per-asset details for PMax — field type, serving status, content. Use with `get_detailed_asset_performance` for quality signals | `campaign_id` (optional) |
 | `get_asset_group_signals` | A PMax asset group's search themes and audience signal (with `signal_id` and approval status), plus the account's audiences that can become its signal | `asset_group_id` |
@@ -318,6 +319,7 @@ Conversions that happen offline (a sales call, a lead that turned into a deal) g
 | `add_to_negative_keyword_list` | Append keywords to an EXISTING shared negative keyword list (does NOT add) | `shared_set_id` (from `get_negative_keyword_lists`), keyword list, `match_type` |
 | `attach_shared_set_to_campaigns` | Attach an EXISTING shared set (e.g. shared negative keyword list) to one or more campaigns. Use after creating a campaign to inherit pre-built negatives. | `shared_set_id` (from `get_negative_keyword_lists`), `campaign_ids` list |
 | `detach_shared_set_from_campaigns` | Detach a shared set from one or more campaigns. Removes only the linkage; the shared set and its keywords stay intact. | `shared_set_id`, `campaign_ids` list |
+| `draft_recommendation_subscriptions` | Pause auto-apply for recommendation types. Can only set PAUSED; re-enabling is not supported and stays in the Google Ads UI. Each type needs an ENABLED subscription. Single confirmation; the dry run uses validate_only | `recommendation_types` |
 | `draft_dismiss_recommendations` | Dismiss Google recommendations the user has decided not to take. Nothing in the account changes and Google can show them again later; unknown or already dismissed IDs are refused. No validate-only mode: the dry run re-reads the account and checks each one is still active | `recommendation_ids` (`recommendation.id` from `get_recommendations`) |
 | `draft_demographic_targeting` | Propose demographic criteria (age, gender, parental status, income range) at ad group or campaign level. Defaults to EXCLUSION (`negative=True`). | exactly one of `ad_group_id` or `campaign_id`, at least one of `age_ranges`/`genders`/`parental_statuses`/`income_ranges`, optional `negative` (default True) |
 | `draft_audience_attachment` | Attach audiences to a campaign or ad group as OBSERVATION (default: bids and reporting, reach unchanged), TARGETING (ads only reach the audiences; double confirmation) or exclusion. Refuses incompatible pairings, Search lists too small to target, audiences at both campaign and ad group level, and Performance Max | exactly one of `campaign_id` or `ad_group_id`; any of `user_list_ids`, `segment_ids`, `custom_audience_ids`, `combined_audience_ids`; `mode` observation/targeting; `exclude` |
@@ -660,6 +662,7 @@ Reddit's structure is campaign → ad group (budget, bid, pixel, targeting) → 
 5. For keyword recommendations, call `get_keyword_performance` to check existing keyword overlap before acting
 6. Present recommendations grouped by type with your assessment of each — the user should understand which ones are genuinely helpful vs which ones just increase Google's revenue
 7. For the ones the user decides not to take, offer `draft_dismiss_recommendations` with their IDs, so they stop reappearing. Dismiss only what the user turned down: a dismissal is not a verdict you make on their behalf
+8. Call `get_recommendation_subscriptions` too: an ENABLED subscription means Google applies that type on its own, without any preview. Tell the user, and offer `draft_recommendation_subscriptions` to pause it. Never suggest re-enabling auto-apply; if the user wants it, it is done in the Google Ads UI
 
 ### When user asks about audience performance or targeting
 
