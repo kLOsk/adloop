@@ -2080,6 +2080,8 @@ def draft_campaign(
     display_network_enabled: bool | None = None,
     display_expansion_enabled: bool | None = None,
     max_cpc: float = 0,
+    location_option: str = "",
+    negative_location_option: str = "",
 ) -> dict:
     """Draft a full campaign structure — returns preview, does NOT execute.
 
@@ -2091,6 +2093,8 @@ def draft_campaign(
         ["2840"] for USA). REQUIRED — campaigns must target specific countries.
     language_ids: list of language constant IDs (e.g. ["1001"] for German,
         ["1000"] for English). REQUIRED — campaigns must target specific languages.
+    location_option / negative_location_option: campaign.geo_target_type_setting.
+        Empty leaves Google's default (PRESENCE_OR_INTEREST for both).
     """
     from adloop.safety.guards import (
         SafetyViolation,
@@ -2112,6 +2116,12 @@ def draft_campaign(
         return {"error": "Validation failed", "details": alias_errors}
     if normalized_display_network_enabled is None:
         normalized_display_network_enabled = False
+
+    location_option, negative_location_option, location_errors = (
+        _normalize_location_options(location_option, negative_location_option)
+    )
+    if location_errors:
+        return {"error": "Validation failed", "details": location_errors}
 
     errors, warnings = _validate_campaign(
         config,
@@ -2137,6 +2147,13 @@ def draft_campaign(
     except SafetyViolation as e:
         return {"error": str(e)}
 
+    warnings.extend(_location_option_warnings(location_option, negative_location_option))
+    location_changes = {}
+    if location_option:
+        location_changes["location_option"] = location_option
+    if negative_location_option:
+        location_changes["negative_location_option"] = negative_location_option
+
     plan = ChangePlan(
         operation="create_campaign",
         entity_type="campaign",
@@ -2155,6 +2172,7 @@ def draft_campaign(
             "search_partners_enabled": search_partners_enabled,
             "display_network_enabled": normalized_display_network_enabled,
             "max_cpc": max_cpc if max_cpc else None,
+            **location_changes,
         },
     )
     store_plan(plan)
@@ -2239,11 +2257,14 @@ def update_campaign(
     display_network_enabled: bool | None = None,
     display_expansion_enabled: bool | None = None,
     max_cpc: float = 0,
+    location_option: str = "",
+    negative_location_option: str = "",
 ) -> dict:
     """Draft an update to an existing campaign — returns preview, does NOT execute.
 
     All parameters except campaign_id are optional — only include what you want
     to change. Geo/language targets are REPLACED entirely (not appended).
+    A location option change shows the current value next to the new one.
     """
     from adloop.safety.guards import (
         SafetyViolation,
@@ -2266,6 +2287,11 @@ def update_campaign(
         display_expansion_enabled,
     )
     errors.extend(alias_errors)
+
+    location_option, negative_location_option, location_errors = (
+        _normalize_location_options(location_option, negative_location_option)
+    )
+    errors.extend(location_errors)
 
     campaign_id = str(campaign_id or "").strip()
     if not campaign_id:
@@ -2322,6 +2348,8 @@ def update_campaign(
         search_partners_enabled is not None,
         normalized_display_network_enabled is not None,
         max_cpc,
+        location_option,
+        negative_location_option,
     ])
     if not has_any_change:
         errors.append("No changes specified — provide at least one parameter to update")
@@ -2363,6 +2391,20 @@ def update_campaign(
                 "negative exclusion, use remove_entity with "
                 'entity_type="campaign_criterion".'
             )
+
+    current_locations: dict = {}
+    if location_option or negative_location_option:
+        current_locations = _current_location_options(config, customer_id, campaign_id)
+        if current_locations is None:
+            return {"error": f"Campaign {campaign_id} was not found in this account"}
+        # Warn about a change, not about a value the campaign already has.
+        warnings.extend(_location_option_warnings(
+            location_option
+            if location_option != current_locations["location_option"] else "",
+            negative_location_option
+            if negative_location_option != current_locations["negative_location_option"]
+            else "",
+        ))
 
     # A budget can be shared by several campaigns, and a portfolio bid
     # strategy too: say who else a budget change reaches, and that a bidding
@@ -2422,6 +2464,14 @@ def update_campaign(
         changes["display_network_enabled"] = normalized_display_network_enabled
     if max_cpc:
         changes["max_cpc"] = max_cpc
+    if location_option:
+        changes["current_location_option"] = current_locations["location_option"]
+        changes["location_option"] = location_option
+    if negative_location_option:
+        changes["current_negative_location_option"] = (
+            current_locations["negative_location_option"]
+        )
+        changes["negative_location_option"] = negative_location_option
 
     plan = ChangePlan(
         operation="update_campaign",
@@ -3547,6 +3597,68 @@ _VALID_BIDDING_STRATEGIES = {
 
 _VALID_CHANNEL_TYPES = {"SEARCH", "DISPLAY", "SHOPPING", "VIDEO", "PERFORMANCE_MAX"}
 
+# campaign.geo_target_type_setting. Google's default for a new campaign is
+# PRESENCE_OR_INTEREST, which also reaches people elsewhere who show interest
+# in the targeted locations.
+_LOCATION_OPTIONS = {"PRESENCE", "PRESENCE_OR_INTEREST", "SEARCH_INTEREST"}
+_NEGATIVE_LOCATION_OPTIONS = {"PRESENCE", "PRESENCE_OR_INTEREST"}
+
+
+def _normalize_location_options(
+    location_option: str, negative_location_option: str
+) -> tuple[str, str, list[str]]:
+    """Upper-case both options; empty means "leave as is". Returns (pos, neg, errors)."""
+    pos = (location_option or "").strip().upper()
+    neg = (negative_location_option or "").strip().upper()
+    errors = []
+    if pos and pos not in _LOCATION_OPTIONS:
+        errors.append(
+            f"location_option must be one of {sorted(_LOCATION_OPTIONS)}, got '{location_option}'"
+        )
+    if neg and neg not in _NEGATIVE_LOCATION_OPTIONS:
+        errors.append(
+            "negative_location_option must be one of "
+            f"{sorted(_NEGATIVE_LOCATION_OPTIONS)}, got '{negative_location_option}'"
+        )
+    return pos, neg, errors
+
+
+def _location_option_warnings(pos: str, neg: str) -> list[str]:
+    """Say when a location option lets the campaign reach beyond its locations."""
+    warnings = []
+    if pos and pos != "PRESENCE":
+        warnings.append(
+            f"Location option {pos} widens reach: ads can also show to people outside "
+            "the targeted locations who search for or show interest in them. PRESENCE "
+            "limits ads to people in or regularly in the targeted locations."
+        )
+    if neg == "PRESENCE":
+        warnings.append(
+            "Negative location option PRESENCE excludes only people in the excluded "
+            "locations; people elsewhere who show interest in them can still see the ads."
+        )
+    return warnings
+
+
+def _current_location_options(
+    config: AdLoopConfig, customer_id: str, campaign_id: str
+) -> dict | None:
+    """The campaign's location options as they are now; None when it does not exist."""
+    from adloop.ads.gaql import execute_query
+
+    rows = execute_query(config, customer_id, (
+        "SELECT campaign.geo_target_type_setting.positive_geo_target_type, "
+        "campaign.geo_target_type_setting.negative_geo_target_type "
+        f"FROM campaign WHERE campaign.id = {campaign_id}"))
+    if not rows:
+        return None
+    return {
+        "location_option": rows[0].get(
+            "campaign.geo_target_type_setting.positive_geo_target_type") or "",
+        "negative_location_option": rows[0].get(
+            "campaign.geo_target_type_setting.negative_geo_target_type") or "",
+    }
+
 
 def _validate_campaign(
     config: AdLoopConfig,
@@ -4277,6 +4389,14 @@ def _apply_create_campaign(client: object, cid: str, changes: dict) -> dict:
     campaign.network_settings.target_content_network = changes.get(
         "display_network_enabled", False
     )
+    if changes.get("location_option"):
+        campaign.geo_target_type_setting.positive_geo_target_type = getattr(
+            client.enums.PositiveGeoTargetTypeEnum, changes["location_option"]
+        )
+    if changes.get("negative_location_option"):
+        campaign.geo_target_type_setting.negative_geo_target_type = getattr(
+            client.enums.NegativeGeoTargetTypeEnum, changes["negative_location_option"]
+        )
 
     # EU political advertising declaration — required for campaigns that may
     # serve in EU countries. This is an ENUM, not a bool. Value 3 means
@@ -4419,11 +4539,15 @@ def _apply_update_campaign(client: object, cid: str, changes: dict) -> dict:
     bs = changes.get("bidding_strategy")
     search_partners_enabled = changes.get("search_partners_enabled")
     display_network_enabled = changes.get("display_network_enabled")
+    location_option = changes.get("location_option")
+    negative_location_option = changes.get("negative_location_option")
     if (
         bs
         or search_partners_enabled is not None
         or display_network_enabled is not None
         or changes.get("max_cpc")
+        or location_option
+        or negative_location_option
     ):
         campaign_op = client.get_type("MutateOperation")
         campaign = campaign_op.campaign_operation.update
@@ -4470,6 +4594,16 @@ def _apply_update_campaign(client: object, cid: str, changes: dict) -> dict:
         if display_network_enabled is not None:
             campaign.network_settings.target_content_network = display_network_enabled
             field_paths.append("network_settings.target_content_network")
+        if location_option:
+            campaign.geo_target_type_setting.positive_geo_target_type = getattr(
+                client.enums.PositiveGeoTargetTypeEnum, location_option
+            )
+            field_paths.append("geo_target_type_setting.positive_geo_target_type")
+        if negative_location_option:
+            campaign.geo_target_type_setting.negative_geo_target_type = getattr(
+                client.enums.NegativeGeoTargetTypeEnum, negative_location_option
+            )
+            field_paths.append("geo_target_type_setting.negative_geo_target_type")
 
         if field_paths:
             campaign_op.campaign_operation.update_mask.CopyFrom(

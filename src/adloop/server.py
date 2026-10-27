@@ -3300,6 +3300,8 @@ def draft_campaign(
     display_network_enabled: bool | None = None,
     display_expansion_enabled: bool | None = None,
     max_cpc: float = 0,
+    location_option: str = "",
+    negative_location_option: str = "",
 ) -> dict:
     """Draft a full campaign structure — returns a PREVIEW, does NOT create anything.
 
@@ -3353,6 +3355,14 @@ def draft_campaign(
             ad group when bidding_strategy is MANUAL_CPC, or the Maximize Clicks
             CPC cap when bidding_strategy is TARGET_SPEND. Not allowed with
             other strategies; 0 means none.
+        location_option: Who the geo targets reach. PRESENCE (people in or
+            regularly in the locations), PRESENCE_OR_INTEREST (also people
+            elsewhere who show interest in them) or SEARCH_INTEREST (people
+            searching for them). Empty leaves Google's default,
+            PRESENCE_OR_INTEREST. Anything but PRESENCE adds a warning.
+        negative_location_option: Who the location exclusions exclude.
+            PRESENCE or PRESENCE_OR_INTEREST; empty leaves Google's default,
+            PRESENCE_OR_INTEREST.
     """
     from adloop.ads.write import draft_campaign as _impl
 
@@ -3373,6 +3383,8 @@ def draft_campaign(
         display_network_enabled=display_network_enabled,
         display_expansion_enabled=display_expansion_enabled,
         max_cpc=max_cpc,
+        location_option=location_option,
+        negative_location_option=negative_location_option,
     )
 
 
@@ -3435,6 +3447,8 @@ def update_campaign(
     display_network_enabled: bool | None = None,
     display_expansion_enabled: bool | None = None,
     max_cpc: float = 0,
+    location_option: str = "",
+    negative_location_option: str = "",
 ) -> dict:
     """Draft an update to an existing campaign — returns a PREVIEW, does NOT apply.
 
@@ -3479,6 +3493,13 @@ def update_campaign(
             bidding_strategy is TARGET_SPEND, or when the existing campaign
             already uses TARGET_SPEND. Increases are limited by the config's
             max_bid_increase_pct. 0 leaves it unchanged.
+        location_option: PRESENCE | PRESENCE_OR_INTEREST | SEARCH_INTEREST.
+            Who the geo targets reach; the preview shows the current value
+            (current_location_option) and warns when the new one is anything
+            but PRESENCE. Empty leaves it unchanged.
+        negative_location_option: PRESENCE | PRESENCE_OR_INTEREST. Who the
+            location exclusions exclude; the preview shows the current value.
+            Empty leaves it unchanged.
     """
     from adloop.ads.write import update_campaign as _impl
 
@@ -3496,6 +3517,8 @@ def update_campaign(
         display_network_enabled=display_network_enabled,
         display_expansion_enabled=display_expansion_enabled,
         max_cpc=max_cpc,
+        location_option=location_option,
+        negative_location_option=negative_location_option,
     )
 
 
