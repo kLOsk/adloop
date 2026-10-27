@@ -2082,6 +2082,9 @@ def draft_campaign(
     max_cpc: float = 0,
     location_option: str = "",
     negative_location_option: str = "",
+    tracking_url_template: str | None = None,
+    final_url_suffix: str | None = None,
+    url_custom_parameters: list[dict] | None = None,
 ) -> dict:
     """Draft a full campaign structure — returns preview, does NOT execute.
 
@@ -2095,6 +2098,8 @@ def draft_campaign(
         ["1000"] for English). REQUIRED — campaigns must target specific languages.
     location_option / negative_location_option: campaign.geo_target_type_setting.
         Empty leaves Google's default (PRESENCE_OR_INTEREST for both).
+    tracking_url_template / final_url_suffix / url_custom_parameters: campaign
+        URL options. Omitted or empty leaves them unset.
     """
     from adloop.safety.guards import (
         SafetyViolation,
@@ -2122,6 +2127,13 @@ def draft_campaign(
     )
     if location_errors:
         return {"error": "Validation failed", "details": location_errors}
+    url_options, url_errors = _normalize_url_options(
+        tracking_url_template, final_url_suffix, url_custom_parameters
+    )
+    if url_errors:
+        return {"error": "Validation failed", "details": url_errors}
+    # A new campaign has nothing to clear: only values that are set go in.
+    url_options = {key: value for key, value in url_options.items() if value}
 
     errors, warnings = _validate_campaign(
         config,
@@ -2173,6 +2185,7 @@ def draft_campaign(
             "display_network_enabled": normalized_display_network_enabled,
             "max_cpc": max_cpc if max_cpc else None,
             **location_changes,
+            **url_options,
         },
     )
     store_plan(plan)
@@ -2259,12 +2272,17 @@ def update_campaign(
     max_cpc: float = 0,
     location_option: str = "",
     negative_location_option: str = "",
+    tracking_url_template: str | None = None,
+    final_url_suffix: str | None = None,
+    url_custom_parameters: list[dict] | None = None,
 ) -> dict:
     """Draft an update to an existing campaign — returns preview, does NOT execute.
 
     All parameters except campaign_id are optional — only include what you want
     to change. Geo/language targets are REPLACED entirely (not appended).
     A location option change shows the current value next to the new one.
+    URL options: None leaves one unchanged, an empty string or list clears it;
+    the preview shows the current values and an example click URL.
     """
     from adloop.safety.guards import (
         SafetyViolation,
@@ -2292,6 +2310,10 @@ def update_campaign(
         _normalize_location_options(location_option, negative_location_option)
     )
     errors.extend(location_errors)
+    url_options, url_errors = _normalize_url_options(
+        tracking_url_template, final_url_suffix, url_custom_parameters
+    )
+    errors.extend(url_errors)
 
     campaign_id = str(campaign_id or "").strip()
     if not campaign_id:
@@ -2350,6 +2372,7 @@ def update_campaign(
         max_cpc,
         location_option,
         negative_location_option,
+        url_options,
     ])
     if not has_any_change:
         errors.append("No changes specified — provide at least one parameter to update")
@@ -2405,6 +2428,23 @@ def update_campaign(
             if negative_location_option != current_locations["negative_location_option"]
             else "",
         ))
+    current_urls: dict = {}
+    url_example: dict = {}
+    if url_options:
+        current_urls = _current_url_options(config, customer_id, campaign_id)
+        if current_urls is None:
+            return {"error": f"Campaign {campaign_id} was not found in this account"}
+        for field in _URL_OPTION_FIELDS:
+            if field in url_options and not url_options[field] and current_urls[field]:
+                warnings.append(
+                    f"Removes the campaign's {field} (currently {current_urls[field]!r})."
+                )
+        if current_urls["final_url"]:
+            effective = {
+                field: url_options.get(field, current_urls[field])
+                for field in _URL_OPTION_FIELDS
+            }
+            url_example = _example_click_urls(current_urls["final_url"], effective)
 
     # A budget can be shared by several campaigns, and a portfolio bid
     # strategy too: say who else a budget change reaches, and that a bidding
@@ -2472,6 +2512,10 @@ def update_campaign(
             current_locations["negative_location_option"]
         )
         changes["negative_location_option"] = negative_location_option
+    for field in _URL_OPTION_FIELDS:
+        if field in url_options:
+            changes[f"current_{field}"] = current_urls[field]
+            changes[field] = url_options[field]
 
     plan = ChangePlan(
         operation="update_campaign",
@@ -2489,6 +2533,8 @@ def update_campaign(
         preview["preserved_negative_geo_target_ids"] = sorted(
             preserved_negative_geos
         )
+    if url_example:
+        preview["example_click"] = url_example
     return preview
 
 
@@ -3658,6 +3704,111 @@ def _current_location_options(
         "negative_location_option": rows[0].get(
             "campaign.geo_target_type_setting.negative_geo_target_type") or "",
     }
+# Campaign URL options. Validation is deliberately light: the template must
+# insert the landing page somewhere, and custom parameters must fit Google's
+# lengths. The validate_only dry run catches anything else Google rejects.
+# {lpurl}, {lpurl+2}, {lpurl+3}, {unescapedlpurl}, {escapedlpurl}, {escapedlpurl+2}, ...
+_LPURL_RE = re.compile(r"\{(un)?(escaped)?lpurl(\+[23])?\}", re.IGNORECASE)
+_CUSTOM_PARAMETER_KEY_RE = re.compile(r"^[A-Za-z0-9]{1,8}$")
+_CUSTOM_PARAMETER_VALUE_MAX = 250
+_URL_OPTION_FIELDS = ("tracking_url_template", "final_url_suffix", "url_custom_parameters")
+
+
+def _normalize_url_options(
+    tracking_url_template: str | None,
+    final_url_suffix: str | None,
+    url_custom_parameters: list[dict] | None,
+) -> tuple[dict, list[str]]:
+    """The URL options that were given, normalised. None means "leave as is";
+    an empty string or list means "clear". Returns (options, errors)."""
+    options: dict = {}
+    errors: list[str] = []
+    if tracking_url_template is not None:
+        template = str(tracking_url_template).strip()
+        if template and not _LPURL_RE.search(template):
+            errors.append(
+                "tracking_url_template must contain {lpurl} or a variant ({lpurl+2}, "
+                "{unescapedlpurl}, {escapedlpurl+3}, ...) so the click still reaches the "
+                "landing page"
+            )
+        options["tracking_url_template"] = template
+    if final_url_suffix is not None:
+        options["final_url_suffix"] = str(final_url_suffix).strip().lstrip("?&")
+    if url_custom_parameters is not None:
+        params = []
+        for i, item in enumerate(url_custom_parameters):
+            key = str((item or {}).get("key", "")).strip().lstrip("_")
+            value = str((item or {}).get("value", "")).strip()
+            if not key or not value:
+                errors.append(f"url_custom_parameters[{i}] needs a key and a value")
+            if key and not _CUSTOM_PARAMETER_KEY_RE.match(key):
+                errors.append(
+                    f"url_custom_parameters[{i}] key '{key}' must be alphanumeric, "
+                    "at most 8 characters"
+                )
+            if len(value) > _CUSTOM_PARAMETER_VALUE_MAX:
+                errors.append(
+                    f"url_custom_parameters[{i}] value is longer than "
+                    f"{_CUSTOM_PARAMETER_VALUE_MAX} characters"
+                )
+            params.append({"key": key, "value": value})
+        options["url_custom_parameters"] = params
+    return options, errors
+
+
+def _current_url_options(
+    config: AdLoopConfig, customer_id: str, campaign_id: str
+) -> dict | None:
+    """The campaign's URL options and one of its ads' final URLs; None when it
+    does not exist."""
+    from adloop.ads.gaql import execute_query
+
+    rows = execute_query(config, customer_id, (
+        "SELECT campaign.tracking_url_template, campaign.final_url_suffix, "
+        "campaign.url_custom_parameters "
+        f"FROM campaign WHERE campaign.id = {campaign_id}"))
+    if not rows:
+        return None
+    params = rows[0].get("campaign.url_custom_parameters")
+    current = {
+        "tracking_url_template": rows[0].get("campaign.tracking_url_template") or "",
+        "final_url_suffix": rows[0].get("campaign.final_url_suffix") or "",
+        "url_custom_parameters": [
+            {"key": p.get("key", ""), "value": p.get("value", "")}
+            for p in (params if isinstance(params, list) else []) if isinstance(p, dict)
+        ],
+        "final_url": "",
+    }
+    ads = execute_query(config, customer_id, (
+        "SELECT ad_group_ad.ad.final_urls FROM ad_group_ad "
+        f"WHERE campaign.id = {campaign_id} AND ad_group_ad.status != 'REMOVED' LIMIT 1"))
+    final_urls = ads[0].get("ad_group_ad.ad.final_urls") if ads else None
+    if isinstance(final_urls, list) and final_urls:
+        current["final_url"] = str(final_urls[0])
+    return current
+
+
+def _example_click_urls(final_url: str, options: dict) -> dict:
+    """What a click looks like with these options, for the preview.
+
+    Approximate on purpose: a template on the ad group, ad or keyword overrides
+    the campaign's; Google fills ValueTrack parameters such as {keyword} at
+    click time and escapes {lpurl} by its position, so those are left as they
+    are, and {lpurl} is shown as the bare final URL. The point is to make a
+    typo visible before it applies.
+    """
+    suffix = options.get("final_url_suffix") or ""
+    landing = final_url
+    if suffix:
+        landing += ("&" if "?" in final_url else "?") + suffix
+    example = {"final_url": final_url, "landing_page_url": landing}
+    template = options.get("tracking_url_template") or ""
+    if template:
+        tracking = _LPURL_RE.sub(lambda _m: final_url, template)
+        for param in options.get("url_custom_parameters") or []:
+            tracking = tracking.replace("{_" + param["key"] + "}", param["value"])
+        example["tracking_url"] = tracking
+    return example
 
 
 def _validate_campaign(
@@ -4397,6 +4548,12 @@ def _apply_create_campaign(client: object, cid: str, changes: dict) -> dict:
         campaign.geo_target_type_setting.negative_geo_target_type = getattr(
             client.enums.NegativeGeoTargetTypeEnum, changes["negative_location_option"]
         )
+    if changes.get("tracking_url_template"):
+        campaign.tracking_url_template = changes["tracking_url_template"]
+    if changes.get("final_url_suffix"):
+        campaign.final_url_suffix = changes["final_url_suffix"]
+    for param in changes.get("url_custom_parameters") or []:
+        campaign.url_custom_parameters.append(_custom_parameter(client, param))
 
     # EU political advertising declaration — required for campaigns that may
     # serve in EU countries. This is an ENUM, not a bool. Value 3 means
@@ -4522,6 +4679,13 @@ def _apply_create_ad_group(client: object, cid: str, changes: dict) -> dict:
     return results
 
 
+def _custom_parameter(client: object, param: dict) -> object:
+    custom = client.get_type("CustomParameter")
+    custom.key = param["key"]
+    custom.value = param["value"]
+    return custom
+
+
 def _apply_update_campaign(client: object, cid: str, changes: dict) -> dict:
     """Update an existing campaign's settings."""
     from google.protobuf import field_mask_pb2
@@ -4541,6 +4705,7 @@ def _apply_update_campaign(client: object, cid: str, changes: dict) -> dict:
     display_network_enabled = changes.get("display_network_enabled")
     location_option = changes.get("location_option")
     negative_location_option = changes.get("negative_location_option")
+    url_fields = [field for field in _URL_OPTION_FIELDS if field in changes]
     if (
         bs
         or search_partners_enabled is not None
@@ -4548,6 +4713,7 @@ def _apply_update_campaign(client: object, cid: str, changes: dict) -> dict:
         or changes.get("max_cpc")
         or location_option
         or negative_location_option
+        or url_fields
     ):
         campaign_op = client.get_type("MutateOperation")
         campaign = campaign_op.campaign_operation.update
@@ -4604,6 +4770,14 @@ def _apply_update_campaign(client: object, cid: str, changes: dict) -> dict:
                 client.enums.NegativeGeoTargetTypeEnum, negative_location_option
             )
             field_paths.append("geo_target_type_setting.negative_geo_target_type")
+        # An empty value under the mask clears the field.
+        if "tracking_url_template" in changes:
+            campaign.tracking_url_template = changes["tracking_url_template"]
+        if "final_url_suffix" in changes:
+            campaign.final_url_suffix = changes["final_url_suffix"]
+        for param in changes.get("url_custom_parameters") or []:
+            campaign.url_custom_parameters.append(_custom_parameter(client, param))
+        field_paths.extend(url_fields)
 
         if field_paths:
             campaign_op.campaign_operation.update_mask.CopyFrom(
