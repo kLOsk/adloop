@@ -4044,8 +4044,8 @@ def get_campaign_settings(
     for recurring audits: the same call every week diffs cleanly.
 
     Args:
-        campaign_id: Numeric campaign ID. When omitted, every non-removed
-            Search campaign in the account is listed.
+        campaign_id: Numeric campaign ID of a Search campaign. When omitted,
+            every non-removed Search campaign in the account is listed.
         customer_id: Google Ads customer ID (digits, dashes optional). Defaults to
             the configured account.
     """
@@ -4056,6 +4056,7 @@ def get_campaign_settings(
         customer_id=customer_id or current_config().ads.customer_id,
         campaign_id=campaign_id,
     )
+
 
 @_tool(title="Draft AI Max settings", annotations=_WRITE, tags={"ads"})
 @_safe

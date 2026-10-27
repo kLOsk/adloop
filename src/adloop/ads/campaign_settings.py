@@ -38,7 +38,6 @@ _SETTINGS_SELECT = """
            campaign.network_settings.target_google_search,
            campaign.network_settings.target_search_network,
            campaign.network_settings.target_content_network,
-           campaign.network_settings.target_partner_search_network,
            campaign.geo_target_type_setting.positive_geo_target_type,
            campaign.geo_target_type_setting.negative_geo_target_type,
            campaign.keyword_match_type,
@@ -50,9 +49,8 @@ _SETTINGS_SELECT = """
     ORDER BY campaign.name
 """
 
-_WHERE_ALL = (
-    "campaign.status != 'REMOVED' AND campaign.advertising_channel_type = 'SEARCH'"
-)
+_SEARCH_ONLY = "campaign.advertising_channel_type = 'SEARCH'"
+_WHERE_ALL = f"campaign.status != 'REMOVED' AND {_SEARCH_ONLY}"
 
 # Google's default; it also reaches people elsewhere who search *about* the
 # targeted locations.
@@ -137,7 +135,9 @@ def read_campaign_settings(client: object, cid: str, *, campaign_id: str = "") -
     if campaign_id and not str(campaign_id).isdigit():
         # The id goes into the query text; anything else must not reach GAQL.
         raise ValueError("campaign_id must be a numeric ID")
-    where = f"campaign.id = {campaign_id}" if campaign_id else _WHERE_ALL
+    # An explicit ID stays Search-only too: the AI Max and location settings
+    # read here don't apply to Performance Max or Display campaigns.
+    where = f"campaign.id = {campaign_id} AND {_SEARCH_ONLY}" if campaign_id else _WHERE_ALL
     rows = _search(
         client.get_service("GoogleAdsService"), cid, _SETTINGS_SELECT.format(where=where)
     )

@@ -36,7 +36,6 @@ def _settings_row(campaign_id=NARROW, *, name="Search — narrow", **overrides):
         "campaign.network_settings.target_google_search": True,
         "campaign.network_settings.target_search_network": False,
         "campaign.network_settings.target_content_network": False,
-        "campaign.network_settings.target_partner_search_network": False,
         "campaign.geo_target_type_setting.positive_geo_target_type": "PRESENCE",
         "campaign.geo_target_type_setting.negative_geo_target_type": "PRESENCE",
         "campaign.keyword_match_type": "UNSPECIFIED",
@@ -226,6 +225,9 @@ class TestRead:
 
         assert [c["campaign_id"] for c in result["campaigns"]] == [str(NARROW)]
         assert f"campaign.id = {NARROW}" in queries[0]
+        # An explicit ID stays Search-only: AI Max and location settings
+        # don't apply to other campaign types.
+        assert "advertising_channel_type = 'SEARCH'" in queries[0]
 
     def test_no_campaigns(self, monkeypatch):
         _patch(monkeypatch, [], [])
