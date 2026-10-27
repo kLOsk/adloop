@@ -5737,6 +5737,7 @@ def estimate_reddit_ad_group(
     devices: _DictListOpt = None,
     carriers: _StrListOpt = None,
     ad_account_id: str = "",
+    view_through_conversion_type: str = "",
 ) -> dict:
     """Audience size, delivery estimate and Reddit's suggested bid for a planned ad group — read-only.
 
@@ -5766,6 +5767,9 @@ def estimate_reddit_ad_group(
             suggested minimum.
         optimization_goal: Pixel event to optimize for (PURCHASE, SIGN_UP,
             LEAD, PAGE_VISIT, ...). Empty means none.
+        view_through_conversion_type: SEVEN_DAY_CLICKS or
+            SEVEN_DAY_CLICKS_ONE_DAY_VIEW, as draft_reddit_ad_group takes it.
+            Empty: Reddit's default for CONVERSIONS and CATALOG_SALES.
         start_time: Schedule start, ISO 8601 (e.g. 2026-10-01T00:00:00Z).
             Empty means tomorrow 00:00 UTC.
         end_time: Schedule end, ISO 8601. Empty means 30 days after the
@@ -5821,6 +5825,7 @@ def estimate_reddit_ad_group(
         start_time=start_time,
         end_time=end_time,
         targeting=targeting,
+        view_through_conversion_type=view_through_conversion_type,
     )
 
 
@@ -6240,6 +6245,7 @@ def draft_reddit_campaign(
     start_time: str = "",
     end_time: str = "",
     schedule: _DictListOpt = None,
+    view_through_conversion_type: str = "",
 ) -> dict:
     """Draft a new Reddit campaign (created PAUSED) — returns a PREVIEW.
 
@@ -6288,6 +6294,12 @@ def draft_reddit_campaign(
             "end_hour": 3}. [] clears it (deliver at any time). Hours apply in
             each viewer's local time, not the account time zone. A campaign
             schedule replaces every ad group's.
+        view_through_conversion_type: The conversion attribution window of a
+            CBO campaign, inherited by its ad groups: SEVEN_DAY_CLICKS or
+            SEVEN_DAY_CLICKS_ONE_DAY_VIEW. Empty: Reddit's default
+            SEVEN_DAY_CLICKS_ONE_DAY_VIEW for CONVERSIONS and CATALOG_SALES.
+            Cannot be changed after publishing. Without CBO, set it on each ad
+            group instead.
     """
     from adloop.reddit.write import draft_reddit_campaign as _impl
 
@@ -6309,6 +6321,7 @@ def draft_reddit_campaign(
         start_time=start_time,
         end_time=end_time,
         schedule=schedule,
+        view_through_conversion_type=view_through_conversion_type,
     )
 
 
@@ -6346,6 +6359,7 @@ def draft_reddit_ad_group(
     view_modes: _StrListOpt = None,
     custom_audience_ids: _StrListOpt = None,
     excluded_custom_audience_ids: _StrListOpt = None,
+    view_through_conversion_type: str = "",
 ) -> dict:
     """Draft a new Reddit ad group (created PAUSED) — returns a PREVIEW.
 
@@ -6423,6 +6437,12 @@ def draft_reddit_ad_group(
             get_reddit_audiences), e.g. website visitors for retargeting.
         excluded_custom_audience_ids: Custom audiences to exclude, e.g.
             people who already bought.
+        view_through_conversion_type: The conversion attribution window:
+            SEVEN_DAY_CLICKS (conversions within 7 days of a click) or
+            SEVEN_DAY_CLICKS_ONE_DAY_VIEW (also within 1 day of a view).
+            Empty: Reddit's default SEVEN_DAY_CLICKS_ONE_DAY_VIEW for
+            CONVERSIONS and CATALOG_SALES campaigns, which require one. Under
+            campaign budget optimization the ad group inherits the campaign's.
     """
     from adloop.reddit.write import draft_reddit_ad_group as _impl
 
@@ -6459,6 +6479,7 @@ def draft_reddit_ad_group(
         view_modes=view_modes,
         custom_audience_ids=custom_audience_ids,
         excluded_custom_audience_ids=excluded_custom_audience_ids,
+        view_through_conversion_type=view_through_conversion_type,
     )
 
 

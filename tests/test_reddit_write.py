@@ -1227,3 +1227,103 @@ class TestCustomAudiences:
         assert any("Buyers is PENDING" in w for w in preview["warnings"])
         assert any("Unknown custom audience ids: aud9" in d for d in unknown["details"])
         assert any("targeted and excluded at once" in d for d in clash["details"])
+
+
+# ---------------------------------------------------------------------------
+# view_through_conversion_type (#112)
+# ---------------------------------------------------------------------------
+
+
+def _ad_group_routes(campaign):
+    return {
+        ("GET", "campaigns/c1"): campaign, ("GET", "ad_accounts/a2_acct"): _ACCOUNT,
+        ("POST", "targeting/keyword_validations"): {"data": []},
+        ("POST", "targeting/geolocations_validations"): {"data": [{"geolocation": {"id": "DE"}, "error_message": ""}]},
+    }
+
+
+def _draft_group(campaign, **extra):
+    _, ctx = _fake_api(_ad_group_routes(campaign))
+    with ctx:
+        return write.draft_reddit_ad_group(
+            _config(), campaign_id="c1", ad_group_name="DE", conversion_pixel_id="px1",
+            daily_budget=20, bid_strategy="BIDLESS", bid_type="CPM", geolocations=["DE"],
+            languages=["DE"], **extra,
+        )
+
+
+def _campaign(**fields):
+    return {"data": {**_CAMPAIGN["data"], **fields}}
+
+
+class TestViewThroughConversionType:
+    def test_conversions_ad_group_gets_reddits_default(self):
+        """Reddit refuses a CONVERSIONS ad group without it, but only at apply (#112)."""
+        preview = _draft_group(_CAMPAIGN, optimization_goal="SIGN_UP")
+
+        assert preview["changes"]["payload"]["view_through_conversion_type"] == "SEVEN_DAY_CLICKS_ONE_DAY_VIEW"
+        assert preview["changes"]["display"]["view_through_conversion_type"] == "SEVEN_DAY_CLICKS_ONE_DAY_VIEW"
+        assert any("view_through_conversion_type defaults" in w for w in preview["warnings"])
+
+    def test_an_explicit_window_is_sent_as_given(self):
+        preview = _draft_group(_CAMPAIGN, view_through_conversion_type="seven_day_clicks")
+
+        assert preview["changes"]["payload"]["view_through_conversion_type"] == "SEVEN_DAY_CLICKS"
+        assert not any("defaults" in w for w in preview["warnings"])
+
+    def test_an_unknown_window_is_refused(self):
+        result = _draft_group(_CAMPAIGN, view_through_conversion_type="THIRTY_DAYS")
+
+        assert any("view_through_conversion_type must be one of" in d for d in result["details"])
+
+    def test_clicks_ad_groups_leave_it_to_reddit(self):
+        preview = _draft_group(_campaign(objective="CLICKS"))
+
+        assert "view_through_conversion_type" not in preview["changes"]["payload"]
+
+    def test_catalog_purchase_needs_the_view_window(self):
+        result = _draft_group(
+            _campaign(objective="CATALOG_SALES"),
+            optimization_goal="PURCHASE", view_through_conversion_type="SEVEN_DAY_CLICKS",
+        )
+
+        assert any("CATALOG_SALES" in d for d in result["details"])
+
+    def test_cbo_ad_groups_inherit_and_refuse_a_mismatch(self):
+        cbo = {"data": {**_CBO_CAMPAIGN["data"], "id": "c1", "objective": "CONVERSIONS",
+                        "view_through_conversion_type": "SEVEN_DAY_CLICKS"}}
+        _, ctx = _fake_api(_ad_group_routes(cbo))
+        with ctx:
+            inherited = write.draft_reddit_ad_group(
+                _config(), campaign_id="c1", ad_group_name="DE", conversion_pixel_id="px1",
+                geolocations=["DE"], languages=["DE"],
+            )
+            mismatch = write.draft_reddit_ad_group(
+                _config(), campaign_id="c1", ad_group_name="DE", conversion_pixel_id="px1",
+                geolocations=["DE"], languages=["DE"],
+                view_through_conversion_type="SEVEN_DAY_CLICKS_ONE_DAY_VIEW",
+            )
+
+        assert "view_through_conversion_type" not in inherited["changes"]["payload"]
+        assert inherited["changes"]["display"]["view_through_conversion_type"] == "SEVEN_DAY_CLICKS"
+        assert any("inherit the campaign's view_through_conversion_type" in d for d in mismatch["details"])
+
+    def test_cbo_conversions_campaign_gets_the_default(self):
+        _, ctx = _fake_api({("GET", "ad_accounts/a2_acct"): _ACCOUNT})
+        with ctx:
+            preview = write.draft_reddit_campaign(
+                _config(), campaign_name="Q4", objective="CONVERSIONS", funding_instrument_id="fi1",
+                campaign_budget_optimization=True, daily_budget=30, bid_strategy="MAXIMIZE_VOLUME",
+                bid_type="CPC", conversion_pixel_id="px1",
+            )
+
+        assert preview["changes"]["payload"]["view_through_conversion_type"] == "SEVEN_DAY_CLICKS_ONE_DAY_VIEW"
+        assert any("cannot be changed after publishing" in w for w in preview["warnings"])
+
+    def test_a_campaign_window_without_cbo_is_refused(self):
+        result = write.draft_reddit_campaign(
+            _config(), campaign_name="Q4", objective="CONVERSIONS", funding_instrument_id="fi1",
+            view_through_conversion_type="SEVEN_DAY_CLICKS",
+        )
+
+        assert any("only with campaign_budget_optimization=true" in d for d in result["details"])

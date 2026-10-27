@@ -56,6 +56,15 @@ _KNOWN_OBJECTIVES = {
 _CAMPAIGN_BID_STRATEGIES = {"BIDLESS", "MAXIMIZE_VOLUME", "TARGET_CPX"}
 _AD_GROUP_BID_STRATEGIES = {"BIDLESS", "MANUAL_BIDDING", "MAXIMIZE_VOLUME", "TARGET_CPX"}
 _BID_TYPES = {"CPC", "CPM", "CPV", "CPV6", "CPV15"}
+# The conversion attribution window (Reddit's v3 spec): 7 days after a click,
+# or 7 days after a click plus 1 day after a view. Reddit requires it on ad
+# groups of conversion objectives (the spec omits it for manual ad groups; the
+# API answers "View Through Conversion is required for this campaign objective
+# type", #112). Under CBO the ad group inherits the campaign's, which cannot
+# change after publishing.
+_VIEW_THROUGH_TYPES = {"SEVEN_DAY_CLICKS", "SEVEN_DAY_CLICKS_ONE_DAY_VIEW"}
+_VIEW_THROUGH_DEFAULT = "SEVEN_DAY_CLICKS_ONE_DAY_VIEW"  # Reddit's documented default
+_VIEW_THROUGH_REQUIRED = {"CONVERSIONS", "CATALOG_SALES"}
 _GOAL_TYPES = {"DAILY_SPEND", "LIFETIME_SPEND"}
 _POST_TYPES = {"TEXT", "IMAGE", "VIDEO", "CAROUSEL"}
 _GENDERS = {"FEMALE", "MALE"}
@@ -1032,6 +1041,7 @@ def draft_reddit_campaign(
     start_time: str = "",
     end_time: str = "",
     schedule: list | None = None,
+    view_through_conversion_type: str = "",
 ) -> dict:
     """Draft a new campaign (created PAUSED). Budget and schedule live on ad groups unless CBO."""
     blocked = _guard("draft_reddit_campaign", config)
@@ -1078,6 +1088,14 @@ def draft_reddit_campaign(
     bid_type = (bid_type or "").strip().upper()
     optimization_goal = (optimization_goal or "").strip().upper()
     conversion_pixel_id = (conversion_pixel_id or "").strip()
+    view_through = (view_through_conversion_type or "").strip().upper()
+    if view_through and view_through not in _VIEW_THROUGH_TYPES:
+        errors.append(f"view_through_conversion_type must be one of {sorted(_VIEW_THROUGH_TYPES)}")
+    elif view_through and not campaign_budget_optimization:
+        errors.append(
+            "view_through_conversion_type is set on the campaign only with "
+            "campaign_budget_optimization=true; otherwise pass it to draft_reddit_ad_group."
+        )
 
     goal_type, goal_value, daily_equivalent = _daily_equivalent(
         daily_budget=daily_budget, lifetime_budget=lifetime_budget,
@@ -1137,6 +1155,15 @@ def draft_reddit_campaign(
             payload["bid_value"] = to_micro(bid_value)
         if optimization_goal:
             payload["optimization_goal"] = optimization_goal
+        if not view_through and objective in _VIEW_THROUGH_REQUIRED:
+            view_through = _VIEW_THROUGH_DEFAULT
+            warnings.append(
+                f"view_through_conversion_type defaults to {_VIEW_THROUGH_DEFAULT} (Reddit's "
+                "default: 7 days after a click or 1 day after a view). Its ad groups inherit "
+                "it, and it cannot be changed after publishing."
+            )
+        if view_through:
+            payload["view_through_conversion_type"] = view_through
     else:
         payload["is_campaign_budget_optimization"] = False
         if conversion_pixel_id:
@@ -1172,6 +1199,7 @@ def draft_reddit_campaign(
                     "campaign_budget_optimization": campaign_budget_optimization,
                     "budget": goal_value,
                     "goal_type": goal_type or None,
+                    "view_through_conversion_type": payload.get("view_through_conversion_type"),
                     "currency": meta["currency"],
                     "status_on_create": "PAUSED",
                 },
@@ -1216,6 +1244,7 @@ def draft_reddit_ad_group(
     view_modes: list | None = None,
     custom_audience_ids: list | None = None,
     excluded_custom_audience_ids: list | None = None,
+    view_through_conversion_type: str = "",
 ) -> dict:
     """Draft a new ad group (created PAUSED) with budget, bid, pixel, schedule and targeting."""
     blocked = _guard("draft_reddit_ad_group", config)
@@ -1256,6 +1285,9 @@ def draft_reddit_ad_group(
         errors.append("MANUAL_BIDDING needs bid_value")
     if bid_strategy == "TARGET_CPX" and bid_value is None:
         errors.append("TARGET_CPX needs bid_value (the target cost per result)")
+    view_through = (view_through_conversion_type or "").strip().upper()
+    if view_through and view_through not in _VIEW_THROUGH_TYPES:
+        errors.append(f"view_through_conversion_type must be one of {sorted(_VIEW_THROUGH_TYPES)}")
     targeting = _targeting_payload(
         geolocations=geolocations, excluded_geolocations=excluded_geolocations,
         communities=communities, excluded_communities=excluded_communities,
@@ -1300,6 +1332,12 @@ def draft_reddit_ad_group(
             errors.append(
                 f"CBO ad groups must match the campaign bid_strategy ({campaign.get('bid_strategy')})."
             )
+        campaign_view_through = campaign.get("view_through_conversion_type")
+        if view_through and view_through != campaign_view_through:
+            errors.append(
+                "CBO ad groups inherit the campaign's view_through_conversion_type "
+                f"({campaign_view_through or 'not set'}); leave it off."
+            )
     else:
         if goal_value is None:
             errors.append("daily_budget (or lifetime_budget + end_time) is required")
@@ -1335,6 +1373,25 @@ def draft_reddit_ad_group(
     except Exception as exc:  # validation endpoints down: warn, don't block
         warnings.append(f"Targeting could not be pre-validated with Reddit ({exc}); the apply may still refuse it.")
     _targeting_notes(config, targeting, errors, warnings, account)
+    objective = campaign.get("objective") or ""
+    effective_goal = optimization_goal or (campaign.get("optimization_goal") if is_cbo else "")
+    if not is_cbo:
+        if not view_through and objective in _VIEW_THROUGH_REQUIRED:
+            view_through = _VIEW_THROUGH_DEFAULT
+            warnings.append(
+                f"view_through_conversion_type defaults to {_VIEW_THROUGH_DEFAULT} (Reddit's "
+                "default: 7 days after a click or 1 day after a view). Pass SEVEN_DAY_CLICKS "
+                "to count only conversions after a click."
+            )
+        if (
+            objective == "CATALOG_SALES"
+            and effective_goal == "PURCHASE"
+            and view_through != _VIEW_THROUGH_DEFAULT
+        ):
+            errors.append(
+                f"CATALOG_SALES ad groups optimizing for PURCHASE need view_through_conversion_type "
+                f"{_VIEW_THROUGH_DEFAULT} (Reddit rule)."
+            )
     if campaign.get("objective") == "APP_INSTALLS" and len(targeting.get("devices") or []) != 1:
         errors.append(
             "APP_INSTALLS campaigns need exactly one device target (Reddit rule), e.g. "
@@ -1367,6 +1424,8 @@ def draft_reddit_ad_group(
         payload["optimization_goal"] = optimization_goal
     elif is_cbo and campaign.get("optimization_goal"):
         payload["optimization_goal"] = campaign["optimization_goal"]
+    if view_through and not is_cbo:
+        payload["view_through_conversion_type"] = view_through
     # Reddit requires start_time on ad group creation (the spec marks it
     # optional; the API answers "Input should be a valid datetime").
     payload["start_time"] = start_time or datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -1409,6 +1468,9 @@ def draft_reddit_ad_group(
                     },
                     "targeting": targeting,
                     "schedule": describe_schedule(schedule_blocks),
+                    "view_through_conversion_type": (
+                        campaign.get("view_through_conversion_type") if is_cbo else view_through
+                    ) or None,
                     "currency": meta["currency"],
                     "status_on_create": "PAUSED",
                 },

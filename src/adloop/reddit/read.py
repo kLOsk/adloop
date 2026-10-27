@@ -248,6 +248,7 @@ def _campaign_summary(c: dict) -> dict:
         "bid_type": c.get("bid_type"),
         "bid_value": from_micro(c.get("bid_value")),
         "optimization_goal": c.get("optimization_goal"),
+        "view_through_conversion_type": c.get("view_through_conversion_type"),
         "conversion_pixel_id": c.get("conversion_pixel_id"),
         "funding_instrument_id": c.get("funding_instrument_id"),
         "start_time": c.get("start_time"),
@@ -320,6 +321,8 @@ def _ad_group_summary(g: dict) -> dict:
         "bid_type": g.get("bid_type"),
         "bid_value": from_micro(g.get("bid_value")),
         "optimization_goal": g.get("optimization_goal"),
+        # The conversion attribution window; null under CBO (inherited).
+        "view_through_conversion_type": g.get("view_through_conversion_type"),
         "conversion_pixel_id": g.get("conversion_pixel_id"),
         "start_time": g.get("start_time"),
         "end_time": g.get("end_time"),
@@ -1395,6 +1398,7 @@ def estimate_reddit_ad_group(
     start_time: str = "",
     end_time: str = "",
     targeting: dict | None = None,
+    view_through_conversion_type: str = "",
 ) -> dict:
     """Audience size, delivery estimates and Reddit's bid suggestion for a planned ad group."""
     from adloop.reddit.auth import RedditApiError
@@ -1446,6 +1450,15 @@ def estimate_reddit_ad_group(
         ad_group_config["bid_value"] = to_micro(float(bid_value))
     if optimization_goal:
         ad_group_config["optimization_goal"] = optimization_goal.strip().upper()
+    # Same default as draft_reddit_ad_group, so the estimate describes the
+    # ad group that would actually be created.
+    from adloop.reddit.write import _VIEW_THROUGH_DEFAULT, _VIEW_THROUGH_REQUIRED
+
+    view_through = (view_through_conversion_type or "").strip().upper()
+    if not view_through and objective in _VIEW_THROUGH_REQUIRED:
+        view_through = _VIEW_THROUGH_DEFAULT
+    if view_through:
+        ad_group_config["view_through_conversion_type"] = view_through
 
     result: dict[str, Any] = {
         "ad_account_id": account,
@@ -1490,6 +1503,7 @@ def estimate_reddit_ad_group(
                         "targeting": targeting,
                         "duration": {"start_time": start, "end_time": end},
                         **({"optimization_goal": optimization_goal.strip().upper()} if optimization_goal else {}),
+                        **({"view_through_conversion_type": view_through} if view_through else {}),
                     }
                 },
             )
