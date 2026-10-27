@@ -73,3 +73,25 @@ def test_google_setup_still_runs_its_steps(tmp_path, monkeypatch):
     assert config["google"]["project_id"] == "my-project"
     assert config["ads"]["customer_id"] == "1234567890"
     assert config["ga4"]["property_id"] == "properties/42"
+
+
+def test_tests_never_see_the_real_home(isolated_home):
+    """conftest gives every test its own home (#113): the wizard once installed
+    the rules into the developer's real ~/.claude/CLAUDE.md."""
+    from pathlib import Path
+
+    assert Path.home() == isolated_home
+    assert cli._ADLOOP_DIR == isolated_home / ".adloop"
+
+
+def test_the_wizard_installs_lazy_rules_by_default(isolated_home, monkeypatch):
+    (isolated_home / ".claude").mkdir()
+    monkeypatch.setattr(cli, "_prompt_bool", lambda label, default=True: default)
+    monkeypatch.setattr(builtins, "input", lambda prompt="": "")
+
+    cli._maybe_offer_global_rules_install()
+
+    block = (isolated_home / ".claude" / "CLAUDE.md").read_text()
+    assert "~/.adloop/rules/adloop.md" in block and len(block) < 2000
+    assert (isolated_home / ".adloop" / "rules" / "adloop.md").exists()
+    assert not (isolated_home / ".claude" / "rules").exists()

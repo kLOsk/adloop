@@ -495,8 +495,8 @@ adloop install-rules
 
 This writes a managed block to `~/.claude/CLAUDE.md` and copies the slash commands (prefixed `adloop-*`) into `~/.claude/commands/`. The block is delimited by sentinel comments so it's safe to run multiple times — re-running just refreshes the content. Two install modes:
 
-- **inline** (default) — full rules embedded in `~/.claude/CLAUDE.md`. Reliable but adds ~10K tokens to every Claude Code session.
-- **lazy** (`adloop install-rules --lazy`) — small directive in `CLAUDE.md` pointing at `~/.claude/rules/adloop.md`. Cheaper baseline cost; the LLM reads the rules file only when AdLoop tools are in scope.
+- **inline** (default for `install-rules`) — full rules embedded in `~/.claude/CLAUDE.md`. Reliable, but they load into every Claude Code session in every repository, about 30K tokens, whether AdLoop is connected or not.
+- **lazy** (`adloop install-rules --lazy`, and the default in `adloop init`) — a short directive in `CLAUDE.md` pointing at `~/.adloop/rules/adloop.md`. The LLM reads the rules file only when AdLoop tools are in scope, so sessions without AdLoop stay almost free. The file sits outside `~/.claude/` on purpose: Claude Code loads everything in `~/.claude/rules/` into every session.
 
 To refresh after upgrading AdLoop: `adloop update-rules`. To remove cleanly: `adloop uninstall-rules` — only the managed block and `adloop-*` commands are touched, never your own content.
 

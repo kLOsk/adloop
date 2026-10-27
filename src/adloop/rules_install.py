@@ -20,12 +20,14 @@ on upgrade. Anything outside the sentinel pair is preserved verbatim.
 Two install modes:
 
 - **inline** (default): the full rules text is pasted between the sentinels
-  in ``~/.claude/CLAUDE.md``. Reliable but ~10K tokens loaded every Claude
-  Code session.
+  in ``~/.claude/CLAUDE.md``. Reliable, but loaded into every Claude Code
+  session in every repository (:func:`rules_token_estimate`, about 30K tokens).
 - **lazy**: a small directive is written between the sentinels pointing at
-  ``~/.claude/rules/adloop.md`` (which contains the full rules). The LLM is
+  ``~/.adloop/rules/adloop.md`` (which contains the full rules). The LLM is
   instructed to read the rules file only when AdLoop tools are in scope.
-  Cheaper baseline cost, less reliable.
+  The file deliberately lives outside ``~/.claude/``: Claude Code loads every
+  file in ``~/.claude/rules/`` into every session, which is where lazy mode
+  used to write it (#114). Cheaper baseline cost, less reliable.
 
 Slash commands are installed namespaced (``adloop-*``) so they don't collide
 with user-defined commands of the same name.
@@ -61,11 +63,18 @@ _SENTINEL_BLOCK_RE = re.compile(
 
 InstallMode = Literal["inline", "lazy"]
 
+# Where lazy mode keeps the full rules, relative to the home directory. Not
+# under ~/.claude/: Claude Code auto-loads everything in ~/.claude/rules/.
+LAZY_RULES_RELATIVE = Path(".adloop") / "rules" / "adloop.md"
+# Where lazy mode wrote them before #114. Cleaned up when it is ours.
+_LEGACY_LAZY_RULES_RELATIVE = Path(".claude") / "rules" / "adloop.md"
+_RULES_HEADING = "# AdLoop — AI Orchestration Rules"
+
 # The directive used in lazy mode. Kept short to minimise baseline token cost.
 _LAZY_DIRECTIVE = """\
 **AdLoop orchestration**: if MCP tools like `get_campaign_performance`,
 `run_gaql`, `draft_responsive_search_ad`, or other AdLoop tools are available
-in this session, read `~/.claude/rules/adloop.md` for the full safety rules,
+in this session, read `~/.adloop/rules/adloop.md` for the full safety rules,
 orchestration patterns, and GAQL reference before using them. Skip this read
 if AdLoop is not active in the current session.
 """
@@ -182,7 +191,7 @@ def _read_bundled_rules() -> str:
     """Load the bundled rules markdown shipped with the package.
 
     Returns the file as-is (with its YAML frontmatter intact) since lazy mode
-    writes it to ``~/.claude/rules/adloop.md`` where the frontmatter is
+    writes it to ``~/.adloop/rules/adloop.md`` where the frontmatter is
     meaningful. For inline mode, use :func:`_read_bundled_rules_body`.
     """
     ref = importlib.resources.files("adloop.rules").joinpath("adloop.md")
@@ -201,6 +210,38 @@ def _read_bundled_rules_body() -> str:
         return text
     end = text.index("---", 3)
     return text[end + 3:].lstrip("\n")
+
+
+def rules_token_estimate() -> int:
+    """Rough token cost of the inline rules, measured from the bundled file.
+
+    About four bytes per token, rounded to the nearest thousand, so the
+    wizard and README never quote a stale hard-coded figure again.
+    """
+    size = len(_read_bundled_rules_body().encode("utf-8"))
+    return max(1000, round(size / 4 / 1000) * 1000)
+
+
+def _home_of(rules_target: Path) -> Path:
+    """``~/.claude/CLAUDE.md`` -> ``~``."""
+    return rules_target.parent.parent
+
+
+def _remove_if_ours(path: Path) -> None:
+    """Delete a rules file AdLoop wrote; never a file the user wrote."""
+    if not path.is_file():
+        return
+    try:
+        text = path.read_text()
+    except (OSError, UnicodeDecodeError):
+        return
+    if _RULES_HEADING not in text:
+        return
+    path.unlink()
+    try:
+        path.parent.rmdir()  # only if empty
+    except OSError:
+        pass
 
 
 def _list_bundled_commands() -> list[tuple[str, str]]:
@@ -335,16 +376,10 @@ def uninstall_rules(
                     client.rules_target.write_text(cleaned)
                 result.action = "uninstalled"
 
-        # Remove the lazy-mode rules file if present
-        lazy_rules_file = (
-            client.rules_target.parent / "rules" / "adloop.md"
-        )
-        if lazy_rules_file.exists():
-            lazy_rules_file.unlink()
-            try:
-                lazy_rules_file.parent.rmdir()  # only if empty
-            except OSError:
-                pass
+        # Remove the lazy-mode rules file, at its current and its old place.
+        home = _home_of(client.rules_target)
+        _remove_if_ours(home / LAZY_RULES_RELATIVE)
+        _remove_if_ours(home / _LEGACY_LAZY_RULES_RELATIVE)
 
         # Remove namespaced slash commands
         if remove_commands and client.commands_dir and client.commands_dir.exists():
@@ -397,11 +432,18 @@ def _apply_to_clients(
         else:
             resolved_mode = "inline"
 
-        # In lazy mode, the full rules go to a sibling file.
+        # In lazy mode the full rules go to a file Claude Code does not load
+        # on its own. A file from an older lazy install under ~/.claude/rules/
+        # would be loaded into every session, so it goes either way; inline
+        # mode needs no lazy file at all.
+        home = _home_of(rules_target)
+        _remove_if_ours(home / _LEGACY_LAZY_RULES_RELATIVE)
+        lazy_rules_file = home / LAZY_RULES_RELATIVE
         if resolved_mode == "lazy":
-            lazy_rules_dir = rules_target.parent / "rules"
-            lazy_rules_dir.mkdir(parents=True, exist_ok=True)
-            (lazy_rules_dir / "adloop.md").write_text(_read_bundled_rules())
+            lazy_rules_file.parent.mkdir(parents=True, exist_ok=True)
+            lazy_rules_file.write_text(_read_bundled_rules())
+        else:
+            _remove_if_ours(lazy_rules_file)
 
         new_block = _build_managed_block(resolved_mode, rules_target)
         merged = _replace_or_append_block(existing, new_block)
@@ -431,8 +473,10 @@ def _existing_block_is_lazy(existing: str) -> bool:
     if not match:
         return False
     block = match.group(0)
-    # Lazy blocks are short and reference the rules file path.
-    return "~/.claude/rules/adloop.md" in block and len(block) < 2000
+    # Lazy blocks are short and reference the rules file path (the current one,
+    # or the ~/.claude/rules/ one older versions wrote).
+    mentions_file = "~/.adloop/rules/adloop.md" in block or "~/.claude/rules/adloop.md" in block
+    return mentions_file and len(block) < 2000
 
 
 # ---------------------------------------------------------------------------

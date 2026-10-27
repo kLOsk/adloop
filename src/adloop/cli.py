@@ -995,7 +995,7 @@ def _wizard_finish(
 
 def _maybe_offer_global_rules_install() -> None:
     """If Claude is detected, offer to install rules globally during init."""
-    from adloop.rules_install import detect_clients, install_rules
+    from adloop.rules_install import detect_clients, install_rules, rules_token_estimate
 
     clients = detect_clients()
     if not clients:
@@ -1017,16 +1017,19 @@ def _maybe_offer_global_rules_install() -> None:
         _print("  Skipping. Run `adloop install-rules` later if you change your mind.")
         return
 
+    # Lazy is the default: inline puts the full rules into every Claude Code
+    # session in every repository, AdLoop or not (#114).
+    tokens = rules_token_estimate() // 1000
     _print()
     _print("  Install mode:")
-    _print("    1. inline (default) — full rules in ~/.claude/CLAUDE.md")
-    _print("       Reliable; loaded every Claude Code session (~10K tokens).")
-    _print("    2. lazy — small directive in CLAUDE.md, full rules in")
-    _print("       ~/.claude/rules/adloop.md, loaded only when AdLoop is active.")
-    _print("       Cheaper baseline cost; slightly less reliable.")
+    _print("    1. lazy (default) — a short pointer in ~/.claude/CLAUDE.md; Claude")
+    _print("       reads the full rules (~/.adloop/rules/adloop.md) only when")
+    _print("       AdLoop tools are in use. Almost free in sessions without AdLoop.")
+    _print("    2. inline — the full rules in ~/.claude/CLAUDE.md, loaded into")
+    _print(f"       every Claude Code session (about {tokens}K tokens). Most reliable.")
     _print()
     raw = input("  Choose [1/2, default 1]: ").strip()
-    mode = "lazy" if raw == "2" else "inline"
+    mode = "inline" if raw == "2" else "lazy"
 
     _print()
     results = install_rules(mode=mode)

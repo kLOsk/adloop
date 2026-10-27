@@ -4,6 +4,26 @@ import pytest
 
 
 @pytest.fixture(autouse=True)
+def isolated_home(tmp_path_factory, monkeypatch):
+    """Give every test its own empty home directory.
+
+    Code that resolves ``~`` (Path.home, expanduser) must never reach the
+    developer's real one: the setup wizard used to install the rules into the
+    real ``~/.claude/CLAUDE.md`` (#113), and token, config and audit-log paths
+    all live under ``~/.adloop``. HOME covers POSIX, USERPROFILE Windows.
+    ``cli._ADLOOP_DIR`` is computed at import time, so it is pointed here too.
+    """
+    from adloop import cli
+
+    home = tmp_path_factory.mktemp("home")
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("USERPROFILE", str(home))
+    monkeypatch.setattr(cli, "_ADLOOP_DIR", home / ".adloop")
+    monkeypatch.setattr(cli, "_CONFIG_PATH", home / ".adloop" / "config.yaml")
+    return home
+
+
+@pytest.fixture(autouse=True)
 def offline_google_validation(monkeypatch):
     """Keep Google Ads dry runs offline.
 

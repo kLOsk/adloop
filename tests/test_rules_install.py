@@ -164,7 +164,7 @@ class TestInstallLazy:
         body = claude_md.read_text()
         # Lazy directive should be small (sentinels + ~5 lines of prose).
         assert "<!-- adloop:rules:start" in body
-        assert "~/.claude/rules/adloop.md" in body
+        assert "~/.adloop/rules/adloop.md" in body
         # Sanity: directive block should be under ~1KB; full rules are >40KB.
         block_match = re.search(
             r"<!-- adloop:rules:start.*?<!-- adloop:rules:end -->",
@@ -180,8 +180,10 @@ class TestInstallLazy:
             mode="lazy", install_commands=False, home=tmp_path
         )
 
-        rules_file = tmp_path / ".claude" / "rules" / "adloop.md"
+        rules_file = tmp_path / ".adloop" / "rules" / "adloop.md"
         assert rules_file.exists()
+        # Never under ~/.claude/rules/: Claude Code loads that into every session (#114).
+        assert not (tmp_path / ".claude" / "rules").exists()
         # Should match the bundled rules content (frontmatter intact —
         # this is a Claude rules file, not a CLAUDE.md).
         bundled = rules_install._read_bundled_rules()
@@ -206,7 +208,7 @@ class TestUpdateRules:
         rules_install.update_rules(install_commands=False, home=tmp_path)
 
         body = (tmp_path / ".claude" / "CLAUDE.md").read_text()
-        assert "~/.claude/rules/adloop.md" in body  # lazy directive marker
+        assert "~/.adloop/rules/adloop.md" in body  # lazy directive marker
         block = re.search(
             r"<!-- adloop:rules:start.*?<!-- adloop:rules:end -->",
             body,
@@ -280,7 +282,7 @@ class TestUninstall:
         rules_install.install_rules(
             mode="lazy", install_commands=False, home=tmp_path
         )
-        rules_file = tmp_path / ".claude" / "rules" / "adloop.md"
+        rules_file = tmp_path / ".adloop" / "rules" / "adloop.md"
         assert rules_file.exists()
 
         rules_install.uninstall_rules(remove_commands=False, home=tmp_path)
@@ -480,3 +482,83 @@ class TestShippedLanguageTable:
         assert "| 1005 | ja | Japanese |" in table
         assert "| 1009 | da | Danish |" in table
         assert "| 1014 | pt | Portuguese |" in table
+
+
+# ---------------------------------------------------------------------------
+# Lazy mode outside ~/.claude/rules/ (#114)
+# ---------------------------------------------------------------------------
+
+
+def _write_legacy_lazy_file(home: Path, text: str | None = None) -> Path:
+    """A lazy-mode rules file where AdLoop wrote it before #114."""
+    legacy = home / ".claude" / "rules" / "adloop.md"
+    legacy.parent.mkdir(parents=True, exist_ok=True)
+    legacy.write_text(text if text is not None else rules_install._read_bundled_rules())
+    return legacy
+
+
+class TestLazyLocation:
+    @pytest.mark.parametrize("mode", ["lazy", "inline"])
+    def test_install_removes_our_legacy_lazy_file(self, tmp_path, mode):
+        _setup_claude_code_home(tmp_path)
+        legacy = _write_legacy_lazy_file(tmp_path)
+
+        rules_install.install_rules(mode=mode, install_commands=False, home=tmp_path)
+
+        assert not legacy.exists()
+        assert not legacy.parent.exists()  # the emptied ~/.claude/rules/ goes too
+
+    def test_a_users_own_rules_file_is_never_touched(self, tmp_path):
+        _setup_claude_code_home(tmp_path)
+        own = _write_legacy_lazy_file(tmp_path, "# My own notes about AdLoop\n")
+
+        rules_install.install_rules(mode="lazy", install_commands=False, home=tmp_path)
+        rules_install.uninstall_rules(remove_commands=False, home=tmp_path)
+
+        assert own.read_text() == "# My own notes about AdLoop\n"
+
+    def test_update_moves_an_old_lazy_install(self, tmp_path):
+        """A lazy block written before #114 stays lazy and moves its file."""
+        _setup_claude_code_home(tmp_path)
+        legacy = _write_legacy_lazy_file(tmp_path)
+        old_block = (
+            "<!-- adloop:rules:start v0.35.0 -->\n\n"
+            "**AdLoop orchestration**: read `~/.claude/rules/adloop.md` before using AdLoop tools.\n\n"
+            "<!-- adloop:rules:end -->\n"
+        )
+        (tmp_path / ".claude" / "CLAUDE.md").write_text("My notes\n\n" + old_block)
+
+        rules_install.update_rules(install_commands=False, home=tmp_path)
+
+        body = (tmp_path / ".claude" / "CLAUDE.md").read_text()
+        assert body.startswith("My notes")
+        assert "~/.adloop/rules/adloop.md" in body and "~/.claude/rules/" not in body
+        assert (tmp_path / ".adloop" / "rules" / "adloop.md").exists()
+        assert not legacy.exists()
+
+    def test_switching_to_inline_drops_the_lazy_file(self, tmp_path):
+        _setup_claude_code_home(tmp_path)
+        rules_install.install_rules(mode="lazy", install_commands=False, home=tmp_path)
+
+        rules_install.update_rules(mode="inline", install_commands=False, home=tmp_path)
+
+        assert not (tmp_path / ".adloop" / "rules" / "adloop.md").exists()
+
+    def test_uninstall_removes_both_places(self, tmp_path):
+        _setup_claude_code_home(tmp_path)
+        rules_install.install_rules(mode="lazy", install_commands=False, home=tmp_path)
+        legacy = _write_legacy_lazy_file(tmp_path)
+
+        rules_install.uninstall_rules(remove_commands=False, home=tmp_path)
+
+        assert not (tmp_path / ".adloop" / "rules" / "adloop.md").exists()
+        assert not legacy.exists()
+
+
+def test_token_estimate_is_measured_from_the_bundled_rules():
+    size = len(rules_install._read_bundled_rules_body().encode("utf-8"))
+    estimate = rules_install.rules_token_estimate()
+
+    assert estimate % 1000 == 0
+    assert abs(estimate - size / 4) <= 500
+
