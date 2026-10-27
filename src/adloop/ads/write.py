@@ -2717,6 +2717,9 @@ def confirm_and_apply(
     is_reddit = plan.operation.startswith("reddit_")
     is_gtm = plan.operation.startswith("gtm_")
     is_ga4 = plan.operation in GA4_OPERATIONS
+    # Google Ads calls without a validate_only field: the dry run re-reads the
+    # target instead, like the platforms above.
+    is_ads_reread = plan.operation == "dismiss_recommendations"
     platform_label = (
         "Reddit Ads" if is_reddit
         else "Google Tag Manager" if is_gtm
@@ -2749,6 +2752,12 @@ def confirm_and_apply(
                 from adloop.ga4.write import preflight as ga4_preflight
 
                 preflight_checks = ga4_preflight(config, plan)
+            elif is_ads_reread:
+                # DismissRecommendation has no validate_only field, and the
+                # validate-only client refuses it; re-read the targets instead.
+                from adloop.ads.recommendations import preflight as rec_preflight
+
+                preflight_checks = rec_preflight(config, plan)
             else:
                 # Google Ads checks the exact mutates with validate_only=True
                 # and executes nothing.
@@ -2784,7 +2793,7 @@ def confirm_and_apply(
             )
             checked_against = (
                 f"re-checked the target against {platform_label}"
-                if is_reddit or is_gtm or is_ga4
+                if is_reddit or is_gtm or is_ga4 or is_ads_reread
                 else "sent the change to Google Ads in validate-only mode"
             )
             return {
@@ -2835,7 +2844,9 @@ def confirm_and_apply(
         if preflight_checks is not None:
             response["checks"] = preflight_checks
             response["note"] = (
-                f"{platform_label} has no validate-only mode: the dry run "
+                f"{platform_label} has no validate-only mode"
+                + (" for dismissing recommendations" if is_ads_reread else "")
+                + ": the dry run "
                 "re-read the target and re-checked the safety gates; nothing "
                 "was changed live."
                 + (
@@ -4089,6 +4100,7 @@ def _dispatch_ads_plan(client: object, cid: str, plan: object) -> dict:
     from adloop.ads.pmax import apply_asset_group_assets as _apply_asset_group_assets
     from adloop.ads.pmax import apply_asset_group_signals as _apply_asset_group_signals
     from adloop.ads.pmax import apply_pmax_product_filter as _apply_pmax_product_filter
+    from adloop.ads.recommendations import _apply_dismiss_recommendations
     # Custom conversion goals live in their own module for the same reason.
     from adloop.ads.custom_conversion_goals import (
         _apply_assign_custom_conversion_goal,
@@ -4123,6 +4135,7 @@ def _dispatch_ads_plan(client: object, cid: str, plan: object) -> dict:
         "attach_brand_list_to_campaigns": _apply_attach_brand_list_to_campaigns,
         "detach_brand_list_from_campaigns": _apply_detach_brand_list_from_campaigns,
         "update_ai_max_settings": _apply_ai_max_settings,
+        "dismiss_recommendations": _apply_dismiss_recommendations,
         "create_custom_conversion_goal": _apply_create_custom_conversion_goal,
         "update_custom_conversion_goal": _apply_update_custom_conversion_goal,
         "assign_custom_conversion_goal": _apply_assign_custom_conversion_goal,
