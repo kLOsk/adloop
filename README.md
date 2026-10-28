@@ -103,6 +103,7 @@ The best features come from real workflows. If you're using AdLoop and find your
 | `get_negative_keyword_list_keywords` | List the keywords inside a specific shared negative keyword list |
 | `get_negative_keyword_list_campaigns` | List which campaigns a shared negative keyword list is attached to |
 | `get_recommendations` | Google's auto-generated recommendations with type, estimated impact, and campaign context |
+| `get_recommendation_subscriptions` | Which recommendation types Google applies automatically (auto-apply), with status and last change; flags any that are on |
 | `get_pmax_performance` | Performance Max campaign metrics with network breakdown + asset group ad strength |
 | `get_pmax_assets` | Per-asset details for PMax — field type, serving status, content |
 | `get_asset_group_signals` | A PMax asset group's search themes and audience signal, plus the audiences available for it |
@@ -269,12 +270,12 @@ All write operations follow a **draft → preview → confirm** workflow. Nothin
 
 | Tool | What It Does |
 |------|-------------|
-| `draft_campaign` | Create a full campaign structure — budget + campaign (PAUSED) + ad group + optional keywords. Supports Search partners, display expansion, and `max_cpc` for either MANUAL_CPC initial ad-group bids or TARGET_SPEND (Maximize Clicks) CPC caps. |
+| `draft_campaign` | Create a full campaign structure — budget + campaign (PAUSED) + ad group + optional keywords. Supports Search partners, display expansion, the location option (presence vs presence or interest), campaign URL options (tracking template, final URL suffix, custom parameters), and `max_cpc` for either MANUAL_CPC initial ad-group bids or TARGET_SPEND (Maximize Clicks) CPC caps. |
 | `draft_shopping_campaign` | Create a Standard Shopping campaign for a linked Merchant Center feed — budget, campaign (PAUSED), product ad group, Shopping ad and an "All products" group in one atomic request. Manual CPC, Maximize clicks or target ROAS. |
 | `draft_asset_group_assets` | Add and remove Performance Max assets (text, images incl. uploads, YouTube videos) in one change, so replacing an asset never drops a group below Google's minimums |
 | `draft_asset_group_signals` | Add search themes or set the audience signal of a PMax asset group |
 | `draft_pmax_product_exclusions` | Exclude products from a retail PMax asset group by item id, brand or custom label |
-| `update_campaign` | Modify existing campaign settings — bidding, budget, geo/language targeting, Search partners, display expansion, and TARGET_SPEND (Maximize Clicks) `max_cpc` caps. |
+| `update_campaign` | Modify existing campaign settings — bidding, budget, geo/language targeting, the location option, campaign URL options, Search partners, display expansion, and TARGET_SPEND (Maximize Clicks) `max_cpc` caps. |
 | `draft_ad_group` | Create a paused SEARCH_STANDARD ad group inside an existing campaign, with optional MANUAL_CPC `max_cpc`. |
 | `update_ad_group` | Update an ad group name and/or MANUAL_CPC `max_cpc`. Use `pause_entity` / `enable_entity` for ad-group status changes. |
 | `draft_responsive_search_ad` | Create RSA preview (3-15 headlines ≤30 chars, 2-4 descriptions ≤90 chars). Warns if headline/description count is below best practice. |
@@ -308,6 +309,7 @@ All write operations follow a **draft → preview → confirm** workflow. Nothin
 | `draft_assign_custom_conversion_goal` | Point a campaign at a custom conversion goal (`goal_config_level = CAMPAIGN`) |
 | `draft_clear_custom_conversion_goal` | Put a campaign back on the account-level goals (rollback) |
 | `draft_dismiss_recommendations` | Dismiss Google recommendations you won't take, so they stop reappearing (Google can show them again later) |
+| `draft_recommendation_subscriptions` | Pause auto-apply for recommendation types, so Google stops changing the account without a preview. Switching auto-apply back on stays in the Google Ads UI |
 | `pause_entity` | Pause a campaign, ad group, ad, keyword or PMax asset group |
 | `enable_entity` | Re-enable a paused entity |
 | `remove_entity` | Permanently remove an entity (irreversible — prefers pause). Supports keywords, negative keywords, ads, ad groups, campaigns. |
