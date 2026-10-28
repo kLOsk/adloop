@@ -3302,6 +3302,9 @@ def draft_campaign(
     max_cpc: float = 0,
     location_option: str = "",
     negative_location_option: str = "",
+    tracking_url_template: str | None = None,
+    final_url_suffix: str | None = None,
+    url_custom_parameters: _DictListOpt = None,
 ) -> dict:
     """Draft a full campaign structure — returns a PREVIEW, does NOT create anything.
 
@@ -3364,6 +3367,15 @@ def draft_campaign(
             PRESENCE or PRESENCE_OR_INTEREST; empty leaves Google's default,
             PRESENCE_OR_INTEREST. PRESENCE excludes fewer people (only those
             physically there), so it widens reach and the preview warns.
+        tracking_url_template: Campaign tracking template, e.g.
+            "{lpurl}?utm_source=google&utm_campaign={campaignid}". Must contain
+            {lpurl} or a variant ({lpurl+2}, {unescapedlpurl},
+            {escapedlpurl+3}, ...). Omitted leaves it unset.
+        final_url_suffix: Parameters appended to the landing page URL, e.g.
+            "utm_medium=cpc". Omitted leaves it unset.
+        url_custom_parameters: List of {"key": "grp", "value": "b2c"}, used as
+            {_grp} in the template. Keys alphanumeric, max 8 characters; values
+            up to 250.
     """
     from adloop.ads.write import draft_campaign as _impl
 
@@ -3386,6 +3398,9 @@ def draft_campaign(
         max_cpc=max_cpc,
         location_option=location_option,
         negative_location_option=negative_location_option,
+        tracking_url_template=tracking_url_template,
+        final_url_suffix=final_url_suffix,
+        url_custom_parameters=url_custom_parameters,
     )
 
 
@@ -3450,6 +3465,9 @@ def update_campaign(
     max_cpc: float = 0,
     location_option: str = "",
     negative_location_option: str = "",
+    tracking_url_template: str | None = None,
+    final_url_suffix: str | None = None,
+    url_custom_parameters: _DictListOpt = None,
 ) -> dict:
     """Draft an update to an existing campaign — returns a PREVIEW, does NOT apply.
 
@@ -3502,6 +3520,17 @@ def update_campaign(
             location exclusions exclude; the preview shows the current value.
             PRESENCE excludes fewer people (only those physically there), so
             it widens reach and the preview warns. Empty leaves it unchanged.
+        tracking_url_template: Campaign tracking template; must contain {lpurl}
+            or a variant. Omitted leaves it unchanged; "" removes it.
+        final_url_suffix: Parameters appended to the landing page URL. Omitted
+            leaves it unchanged; "" removes it.
+        url_custom_parameters: List of {"key", "value"}; REPLACES the
+            campaign's custom parameters. Keys alphanumeric, max 8 characters.
+            Omitted leaves them unchanged; [] removes them. The preview shows
+            each current value (current_tracking_url_template etc.), names any
+            removal, and gives example_click: one of the campaign's final URLs
+            with the campaign's options applied. It is approximate: a template
+            on the ad group, ad or keyword overrides the campaign's.
     """
     from adloop.ads.write import update_campaign as _impl
 
@@ -3521,6 +3550,9 @@ def update_campaign(
         max_cpc=max_cpc,
         location_option=location_option,
         negative_location_option=negative_location_option,
+        tracking_url_template=tracking_url_template,
+        final_url_suffix=final_url_suffix,
+        url_custom_parameters=url_custom_parameters,
     )
 
 
