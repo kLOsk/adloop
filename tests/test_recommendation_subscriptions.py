@@ -218,6 +218,19 @@ class TestApply:
         assert service.requests[0].validate_only is True
         assert client.validated_calls == 1
 
+    def test_each_operation_updates_the_planned_resource(self):
+        service = _SubscriptionService()
+        client = _FakeClient({"RecommendationSubscriptionService": service})
+        changes = _changes("KEYWORD", "USE_BROAD_MATCH_KEYWORD")
+
+        subs._apply_pause_recommendation_subscriptions(client, CID, changes)
+
+        operations = service.requests[0].operations
+        assert [op._pb.WhichOneof("operation") for op in operations] == ["update", "update"]
+        assert [op.update.resource_name for op in operations] == [
+            sub["resource_name"] for sub in changes["subscriptions"]
+        ]
+
     def test_the_operation_is_dispatched(self):
         service = _SubscriptionService()
         plan = SimpleNamespace(
@@ -246,3 +259,35 @@ class TestTools:
         for param in ("recommendation_types", "customer_id"):
             assert draft.parameters["properties"][param].get("description"), param
         assert "status" not in draft.parameters["properties"]
+
+
+class TestDryRunRoundTrip:
+    def test_confirm_and_apply_dry_run_sends_the_pause_validate_only(self, config, account, monkeypatch):
+        """Draft -> confirm_and_apply(dry_run=True) through the real validate-only path."""
+        service = _SubscriptionService()
+        monkeypatch.setattr(
+            write, "_validate_with_google",
+            lambda cfg, plan: write._execute_plan(cfg, plan, validate_only=True),
+        )
+        monkeypatch.setattr(
+            "adloop.ads.client.get_ads_client",
+            lambda _config: _FakeClient({"RecommendationSubscriptionService": service}),
+        )
+        preview = subs.draft_recommendation_subscriptions(
+            config, customer_id=CID, recommendation_types=["KEYWORD"],
+        )
+
+        result = write.confirm_and_apply(config, plan_id=preview["plan_id"], dry_run=True)
+
+        assert result["status"] == "DRY_RUN_SUCCESS"
+        assert result["checks"] == {"validated_calls": 1, "skipped_calls": 0}
+        (request,) = service.requests
+        assert request.validate_only is True
+        (operation,) = request.operations
+        assert operation._pb.WhichOneof("operation") == "update"
+        assert operation.update.resource_name == (
+            f"customers/{CID}/recommendationSubscriptions/KEYWORD"
+        )
+        assert operation.update.status == (
+            _FakeClient({}).enums.RecommendationSubscriptionStatusEnum.PAUSED
+        )
