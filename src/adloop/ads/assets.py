@@ -1095,6 +1095,14 @@ def update_call_asset(
     return preview
 
 
+def _first_schedule_warning(campaign_name: str) -> str:
+    return (
+        f"Campaign '{campaign_name}' has no ad schedule, so it serves at all hours. "
+        "With these windows it serves only inside them: every other hour, and every "
+        "day without a window, stops serving."
+    )
+
+
 def _campaign_schedule(config: AdLoopConfig, customer_id: str, campaign_id: str) -> tuple[dict | None, list[dict]]:
     """The campaign (name, status, account time zone) and its current windows."""
     from adloop.ads.gaql import execute_query
@@ -1156,11 +1164,7 @@ def add_ad_schedule(
     warnings = [_time_zone_note(campaign["time_zone"])]
     first = not existing
     if first:
-        warnings.append(
-            f"Campaign '{campaign['name']}' has no ad schedule, so it serves at all hours. "
-            "With these windows it serves only inside them: every other hour, and every "
-            "day without a window, stops serving."
-        )
+        warnings.append(_first_schedule_warning(campaign["name"]))
     if campaign["status"] != "ENABLED":
         warnings.append(f"The campaign is {campaign['status']}; the schedule applies once it is enabled.")
     plan = ChangePlan(
