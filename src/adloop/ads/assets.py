@@ -609,7 +609,8 @@ def _create_and_link(client, cid: str, assets: list[dict], field_type, populate,
     """Create assets and link them at the plan's scope in one Mutate.
 
     Plans from before scopes existed have no ``scope`` and link to their
-    campaign, as they always did.
+    campaign, as they always did. ``field_type`` is one enum value for all
+    assets, or a function of the asset's payload.
     """
     scope = changes.get("scope") or "campaign"
     asset_service = client.get_service("AssetService")
@@ -621,9 +622,10 @@ def _create_and_link(client, cid: str, assets: list[dict], field_type, populate,
         asset.resource_name = asset_service.asset_path(cid, str(-(i + 1)))
         populate(asset, payload)
         operations.append(op)
-    for i in range(len(assets)):
+    for i, payload in enumerate(assets):
         operations.append(_link_operation(
-            client, cid, asset_service.asset_path(cid, str(-(i + 1))), field_type, scope,
+            client, cid, asset_service.asset_path(cid, str(-(i + 1))),
+            field_type(payload) if callable(field_type) else field_type, scope,
             changes.get("campaign_id", ""), changes.get("ad_group_id", ""),
         ))
     response = googleads_service.mutate(customer_id=cid, mutate_operations=operations)

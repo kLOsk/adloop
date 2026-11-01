@@ -2546,14 +2546,22 @@ def draft_image_assets(
     image_paths: list[str] | None = None,
     image_urls: list[str] | None = None,
     upload_ids: list[str] | None = None,
+    scope: str = "",
+    field_types: list[str] | None = None,
 ) -> dict:
-    """Draft campaign image assets from local files, public image URLs and/or uploads.
+    """Draft image assets from local files, public image URLs and/or uploads.
 
     URL images are fetched now (public addresses only, pinned against DNS
     rebinding, capped at Google's 5120 KB limit) and their sha256 is kept
     in the plan; apply re-fetches and refuses if the bytes changed. Uploads
     (``up_...`` ids from the upload card or link) are pinned the same way.
+
+    Google links AD_IMAGE to campaigns and BUSINESS_LOGO to campaigns or the
+    account. A campaign link defaults to AD_IMAGE. Account scope has to be
+    explicit (``scope="account"``) and takes BUSINESS_LOGO only, named in
+    ``field_types``: one entry per image, in the order uploads, paths, URLs.
     """
+    from adloop.ads.assets import _account_scope_warning, resolve_scope, scope_entity
     from adloop.runtime import deployment_mode
     from adloop.safety.guards import SafetyViolation, check_blocked_operation
     from adloop.safety.preview import ChangePlan, store_plan
@@ -2575,25 +2583,35 @@ def draft_image_assets(
     except SafetyViolation as e:
         return {"error": str(e)}
 
-    validated_images, errors = _validate_image_assets(
-        campaign_id, image_paths, image_urls, list(upload_ids or [])
+    scope, campaign_id, _, errors = resolve_scope(scope, campaign_id, "", allowed=("campaign", "account"))
+    validated_images, image_errors = _validate_image_assets(
+        image_paths, image_urls, list(upload_ids or [])
     )
+    errors.extend(image_errors)
+    if not errors:
+        errors.extend(_assign_image_field_types(validated_images, scope, field_types))
     if errors:
         return {"error": "Validation failed", "details": errors}
 
+    entity_type, entity_id = scope_entity(scope, customer_id, campaign_id, "")
     plan = ChangePlan(
         operation="create_image_assets",
-        entity_type="campaign_asset",
-        entity_id=campaign_id,
+        entity_type=entity_type,
+        entity_id=entity_id,
         customer_id=customer_id,
         changes={
+            "scope": scope,
             "campaign_id": campaign_id,
             "images": validated_images,
             "summary": [_describe_image(image) for image in validated_images],
+            "field_types": [image["field_type"] for image in validated_images],
         },
     )
     store_plan(plan)
-    return plan.to_preview()
+    preview = plan.to_preview()
+    if scope == "account":
+        preview["warnings"] = [_account_scope_warning("business logos")]
+    return preview
 
 
 def draft_sitelinks(
@@ -2602,8 +2620,12 @@ def draft_sitelinks(
     customer_id: str = "",
     campaign_id: str = "",
     sitelinks: list[dict] | None = None,
+    scope: str = "",
 ) -> dict:
-    """Draft sitelink extensions for a campaign — returns preview, does NOT execute.
+    """Draft sitelink extensions for a campaign or the account — returns preview, does NOT execute.
+
+    The scope follows campaign_id; account level has to be explicit
+    (``scope="account"``), it is never inferred from an empty campaign_id.
 
     sitelinks: list of dicts, each with:
         - link_text (str, required, max 25 chars) — the clickable text
@@ -2612,6 +2634,7 @@ def draft_sitelinks(
         - description2 (str, optional, max 35 chars) — second description line
     campaign_id: the campaign to attach sitelinks to
     """
+    from adloop.ads.assets import _account_scope_warning, resolve_scope, scope_entity
     from adloop.safety.guards import SafetyViolation, check_blocked_operation
     from adloop.safety.preview import ChangePlan, store_plan
 
@@ -2620,12 +2643,12 @@ def draft_sitelinks(
     except SafetyViolation as e:
         return {"error": str(e)}
 
-    if not campaign_id:
-        return {"error": "campaign_id is required"}
+    scope, campaign_id, _, errors = resolve_scope(scope, campaign_id, "", allowed=("campaign", "account"))
+    if errors:
+        return {"error": "Validation failed", "details": errors}
     if not sitelinks:
         return {"error": "At least one sitelink is required"}
 
-    errors = []
     warnings = []
     validated = []
 
@@ -2689,12 +2712,16 @@ def draft_sitelinks(
             f"maximum ad real estate."
         )
 
+    if scope == "account":
+        warnings.append(_account_scope_warning("sitelinks"))
+
+    entity_type, entity_id = scope_entity(scope, customer_id, campaign_id, "")
     plan = ChangePlan(
         operation="create_sitelinks",
-        entity_type="campaign_asset",
-        entity_id=campaign_id,
+        entity_type=entity_type,
+        entity_id=entity_id,
         customer_id=customer_id,
-        changes={"campaign_id": campaign_id, "sitelinks": validated},
+        changes={"scope": scope, "campaign_id": campaign_id, "sitelinks": validated},
     )
     store_plan(plan)
     preview = plan.to_preview()
@@ -3470,15 +3497,45 @@ def image_payloads(
     return validated, errors
 
 
+# Where Google links each image field type ("Asset types linked to customers,
+# campaigns, and ad groups" in the Google Ads API assets overview).
+_IMAGE_FIELD_TYPE_SCOPES = {
+    "AD_IMAGE": ("campaign",),
+    "BUSINESS_LOGO": ("campaign", "account"),
+}
+
+
+def _assign_image_field_types(
+    images: list[dict[str, object]], scope: str, field_types: list[str] | None
+) -> list[str]:
+    """Set each image's ``field_type``; returns what was wrong with the request."""
+    if field_types is None:
+        if scope == "account":
+            return ['scope="account" needs field_types: only BUSINESS_LOGO links at account level']
+        field_types = ["AD_IMAGE"] * len(images)
+    if len(field_types) != len(images):
+        return [f"field_types has {len(field_types)} entries for {len(images)} images; pass one per image"]
+    errors = []
+    for index, (image, raw) in enumerate(zip(images, field_types), start=1):
+        field_type = str(raw).strip().upper()
+        scopes = _IMAGE_FIELD_TYPE_SCOPES.get(field_type)
+        if scopes is None:
+            errors.append(
+                f"Image {index}: field type '{field_type}' is not supported; "
+                f"allowed: {sorted(_IMAGE_FIELD_TYPE_SCOPES)}"
+            )
+        elif scope not in scopes:
+            errors.append(f"Image {index}: {field_type} cannot be linked at {scope} level")
+        image["field_type"] = field_type
+    return errors
+
+
 def _validate_image_assets(
-    campaign_id: str,
     image_paths: list[str],
     image_urls: list[str] | None = None,
     upload_ids: list[str] | None = None,
 ) -> tuple[list[dict[str, object]], list[str]]:
     errors = []
-    if not campaign_id:
-        errors.append("campaign_id is required")
     if not image_paths and not image_urls and not upload_ids:
         errors.append("At least one image (image_paths, image_urls or upload_ids) is required")
     validated, image_errors = image_payloads(image_paths, image_urls, upload_ids)
@@ -5372,56 +5429,6 @@ def _apply_status_change(
     return {"resource_name": response.results[0].resource_name}
 
 
-def _apply_campaign_assets(
-    client: object,
-    cid: str,
-    campaign_id: str,
-    assets: list[dict],
-    field_type: object,
-    populate_asset: object,
-) -> dict:
-    """Create assets and link them to a campaign via CampaignAsset."""
-    asset_service = client.get_service("AssetService")
-    googleads_service = client.get_service("GoogleAdsService")
-    operations = []
-
-    for i, payload in enumerate(assets):
-        op = client.get_type("MutateOperation")
-        asset = op.asset_operation.create
-        asset.resource_name = asset_service.asset_path(cid, str(-(i + 1)))
-        populate_asset(asset, payload)
-        operations.append(op)
-
-    for i in range(len(assets)):
-        op = client.get_type("MutateOperation")
-        ca = op.campaign_asset_operation.create
-        ca.asset = asset_service.asset_path(cid, str(-(i + 1)))
-        ca.campaign = googleads_service.campaign_path(cid, campaign_id)
-        ca.field_type = field_type
-        operations.append(op)
-
-    response = googleads_service.mutate(
-        customer_id=cid, mutate_operations=operations
-    )
-
-    results = {"assets": [], "campaign_assets": []}
-    num_assets = len(assets)
-    for i, resp in enumerate(response.mutate_operation_responses):
-        resource = None
-        if resp.asset_result.resource_name:
-            resource = resp.asset_result.resource_name
-        elif resp.campaign_asset_result.resource_name:
-            resource = resp.campaign_asset_result.resource_name
-
-        if resource:
-            if i < num_assets:
-                results["assets"].append(resource)
-            else:
-                results["campaign_assets"].append(resource)
-
-    return results
-
-
 def load_image_bytes(payload: dict) -> tuple[bytes, PurePath]:
     """The approved bytes of a drafted image (URL, upload or local path) and a name source.
 
@@ -5463,27 +5470,26 @@ def populate_image_asset(client: object, asset: object, payload: dict) -> None:
 
 
 def _apply_create_image_assets(client: object, cid: str, changes: dict) -> dict:
-    """Create image assets from local files or URLs and link them to a campaign.
+    """Create image assets from local files or URLs and link them at the plan's scope.
 
     URL images are re-fetched through the same safe fetcher and must match
     the sha256 approved in the preview.
     """
+    from adloop.ads.assets import _create_and_link
 
     def populate(asset: object, payload: dict) -> None:
         populate_image_asset(client, asset, payload)
 
-    return _apply_campaign_assets(
-        client,
-        cid,
-        changes["campaign_id"],
-        changes["images"],
-        client.enums.AssetFieldTypeEnum.AD_IMAGE,
-        populate,
-    )
+    def field_type(payload: dict) -> object:
+        # Plans drafted before field_types existed link as AD_IMAGE.
+        return getattr(client.enums.AssetFieldTypeEnum, payload.get("field_type") or "AD_IMAGE")
+
+    return _create_and_link(client, cid, changes["images"], field_type, populate, changes)
 
 
 def _apply_create_sitelinks(client: object, cid: str, changes: dict) -> dict:
-    """Create sitelink assets and link them to a campaign."""
+    """Create sitelink assets and link them at the plan's scope."""
+    from adloop.ads.assets import _create_and_link
 
     def populate(asset: object, payload: dict) -> None:
         asset.sitelink_asset.link_text = payload["link_text"]
@@ -5493,13 +5499,8 @@ def _apply_create_sitelinks(client: object, cid: str, changes: dict) -> dict:
         if payload.get("description2"):
             asset.sitelink_asset.description2 = payload["description2"]
 
-    return _apply_campaign_assets(
-        client,
-        cid,
-        changes["campaign_id"],
-        changes["sitelinks"],
-        client.enums.AssetFieldTypeEnum.SITELINK,
-        populate,
+    return _create_and_link(
+        client, cid, changes["sitelinks"], client.enums.AssetFieldTypeEnum.SITELINK, populate, changes
     )
 
 

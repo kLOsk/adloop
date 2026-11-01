@@ -5008,13 +5008,15 @@ def update_structured_snippet(
 @_tool(title="Draft image assets", annotations=_WRITE, tags={"ads"})
 @_safe
 def draft_image_assets(
-    campaign_id: str,
+    campaign_id: str = "",
     image_paths: _StrList = [],  # noqa: B006
     image_urls: _StrList = [],  # noqa: B006
     customer_id: str = "",
     upload_ids: _StrList = [],  # noqa: B006
+    scope: str = "",
+    field_types: _StrListOpt = None,
 ) -> dict:
-    """Draft campaign image assets from local files, public image URLs or uploads — returns a PREVIEW.
+    """Draft image assets from local files, public image URLs or uploads — returns a PREVIEW.
 
     At least one image in total is required across image_paths, image_urls
     and upload_ids.
@@ -5025,7 +5027,8 @@ def draft_image_assets(
     applies it.
 
     Args:
-        campaign_id: Numeric ID of the campaign to attach the images to.
+        campaign_id: Numeric ID of the campaign to attach the images to. Leave
+            empty with scope="account".
         image_paths: Local PNG/JPEG/GIF file paths on the machine running
             AdLoop. Not available on a hosted server, where image_urls
             applies instead.
@@ -5036,6 +5039,12 @@ def draft_image_assets(
         upload_ids: Ids of images the user uploaded (up_..., from
             upload_images or list_uploads). The way to use an image that has
             no public URL.
+        scope: Empty follows campaign_id. "account" links the images
+            account-wide, which Google allows for BUSINESS_LOGO only and which
+            is never inferred from an empty campaign_id.
+        field_types: One per image, in the order upload_ids, image_paths,
+            image_urls: AD_IMAGE (campaign links; the default) or BUSINESS_LOGO
+            (campaign or account links). Required with scope="account".
     """
     from adloop.ads.write import draft_image_assets as _impl
 
@@ -5046,6 +5055,8 @@ def draft_image_assets(
         image_paths=image_paths,
         image_urls=image_urls,
         upload_ids=upload_ids,
+        scope=scope,
+        field_types=field_types,
     )
 
 
@@ -5159,11 +5170,12 @@ def remove_entity(
 @_tool(title="Draft sitelinks", annotations=_WRITE, tags={"ads"})
 @_safe
 def draft_sitelinks(
-    campaign_id: str,
     sitelinks: _DictList,
+    campaign_id: str = "",
     customer_id: str = "",
+    scope: str = "",
 ) -> dict:
-    """Draft sitelink extensions for a campaign — returns a PREVIEW.
+    """Draft sitelink extensions for a campaign or the account — returns a PREVIEW.
 
     Sitelinks appear as additional links below your ad, increasing click area
     and directing users to specific pages. Every final_url is fetched and an
@@ -5173,14 +5185,18 @@ def draft_sitelinks(
     it.
 
     Args:
-        campaign_id: Numeric ID of the campaign to attach sitelinks to.
         sitelinks: List of dicts (at least one), each with link_text (str,
             required, max 25 chars) — the clickable text shown; final_url (str,
             required) — destination URL for this sitelink; description1 (str,
             optional, max 35 chars) — first description line; description2
             (str, optional, max 35 chars) — second description line.
+        campaign_id: Numeric ID of the campaign to attach sitelinks to. Leave
+            empty with scope="account".
         customer_id: Google Ads customer ID (digits, dashes optional). Defaults to
             the configured account.
+        scope: Empty follows campaign_id. "account" links the sitelinks
+            account-wide; they serve on every eligible campaign without sitelinks
+            of its own. It is never inferred from an empty campaign_id.
     """
     from adloop.ads.write import draft_sitelinks as _impl
 
@@ -5189,6 +5205,7 @@ def draft_sitelinks(
         customer_id=customer_id or current_config().ads.customer_id,
         campaign_id=campaign_id,
         sitelinks=sitelinks,
+        scope=scope,
     )
 
 
