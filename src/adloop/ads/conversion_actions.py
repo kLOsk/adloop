@@ -204,8 +204,9 @@ def draft_create_conversion_action(
         False = Secondary (records but doesn't affect bidding).
     include_in_conversions_metric: True (default) = appears in the
         "Conversions" column; False = "All conversions" only. NOTE: this is
-        IMMUTABLE on create — Google derives it from the category and rejects
-        any value set in the create mutate. To change it, use
+        IMMUTABLE — Google derives it from primary_for_goal and the category's
+        goal and rejects any value set directly. To change whether an action
+        counts, use primary_for_goal or category in
         draft_update_conversion_action after the create succeeds.
     click_through_window_days / view_through_window_days: attribution
         windows. 30/1 is the typical lead-gen pair.
@@ -305,13 +306,18 @@ def draft_update_conversion_action(
     click_through_window_days: int = 0,
     view_through_window_days: int = 0,
     attribution_model: str = "",
+    category: str = "",
 ) -> dict:
     """Draft a partial UPDATE of an existing ConversionAction — returns PREVIEW.
 
     Only the parameters you pass non-empty/non-default will be sent to the
     API. Use this to rename, demote a Primary to Secondary, change value,
-    adjust the call-duration threshold, or change attribution settings.
-    include_in_conversions_metric IS mutable here (unlike on create).
+    adjust the call-duration threshold, change attribution settings, or move
+    the action to another goal (category; the preview shows the current one).
+
+    include_in_conversions_metric is refused: Google answers IMMUTABLE_FIELD
+    at apply, and validate_only does not catch it. It derives the value from
+    primary_for_goal and whether the goal of the action's category is biddable.
 
     conversion_action_id: numeric ID. Find via:
         SELECT conversion_action.id, conversion_action.name FROM conversion_action
@@ -341,8 +347,43 @@ def draft_update_conversion_action(
         view_through_window_days=view_through_window_days,
         attribution_model=attribution_model,
     )
+    if include_in_conversions_metric is not None:
+        errors.append(
+            "include_in_conversions_metric cannot be changed: Google answers "
+            "IMMUTABLE_FIELD at apply, and a dry run does not catch it. Whether an "
+            "action counts in Conversions follows primary_for_goal and whether the "
+            "goal of its category is biddable: set primary_for_goal, or move it to "
+            "a biddable goal with category."
+        )
+    category = category.strip().upper()
+    if category and category not in _VALID_CATEGORIES:
+        errors.append(
+            f"category '{category}' invalid; valid: {sorted(_VALID_CATEGORIES)}"
+        )
+    if category and not str(conversion_action_id).strip().isdigit():
+        errors.append(
+            f"conversion_action_id must be numeric, got '{conversion_action_id}'"
+        )
     if errors:
         return {"error": "Validation failed", "details": errors}
+
+    warnings: list[str] = []
+    current_category = ""
+    if category:
+        current = _current_conversion_action(config, customer_id, conversion_action_id)
+        if current is None:
+            return {"error": f"Conversion action {conversion_action_id} was not found in this account"}
+        if current["status"] == "REMOVED":
+            return {"error": f"Conversion action {conversion_action_id} is removed"}
+        if current["category"] == category:
+            return {"error": f"Conversion action {conversion_action_id} is already in category {category}"}
+        current_category = current["category"]
+        warnings.append(
+            f"Moves '{current['name']}' from the {current_category} goal to the {category} "
+            "goal. It counts in Conversions only if it is primary and the new goal is "
+            "biddable, so campaigns bidding on these goals can start or stop optimizing "
+            "toward it, which restarts Smart Bidding's learning period."
+        )
 
     # Track which fields the caller actually wants to update so we build
     # the right field_mask at apply time.
@@ -361,10 +402,9 @@ def draft_update_conversion_action(
         changes["counting_type"] = counting_type
     if phone_call_duration_seconds:
         changes["phone_call_duration_seconds"] = int(phone_call_duration_seconds)
-    if include_in_conversions_metric is not None:
-        changes["include_in_conversions_metric"] = bool(
-            include_in_conversions_metric
-        )
+    if category:
+        changes["current_category"] = current_category
+        changes["category"] = category
     if click_through_window_days:
         changes["click_through_window_days"] = int(click_through_window_days)
     if view_through_window_days:
@@ -375,7 +415,6 @@ def draft_update_conversion_action(
     if len(changes) == 1:  # only conversion_action_id
         return {"error": "No fields to update"}
 
-    warnings: list[str] = []
     # Same fallback-vs-override nuance as create: on update, a positive
     # default_value with always_use_default_value explicitly set to False is
     # legal (fallback). Warn rather than silently overriding intent.
@@ -402,6 +441,24 @@ def draft_update_conversion_action(
     if warnings:
         preview["warnings"] = warnings
     return preview
+
+
+def _current_conversion_action(
+    config: AdLoopConfig, customer_id: str, conversion_action_id: str
+) -> dict | None:
+    """Name, category and status of a conversion action, or None if not found."""
+    from adloop.ads.gaql import execute_query
+
+    rows = execute_query(config, customer_id, (
+        "SELECT conversion_action.name, conversion_action.category, conversion_action.status "
+        f"FROM conversion_action WHERE conversion_action.id = {str(conversion_action_id).strip()} LIMIT 1"))
+    if not rows:
+        return None
+    return {
+        "name": rows[0].get("conversion_action.name") or "",
+        "category": str(rows[0].get("conversion_action.category") or ""),
+        "status": str(rows[0].get("conversion_action.status") or ""),
+    }
 
 
 def draft_remove_conversion_action(
@@ -472,8 +529,8 @@ def _apply_create_conversion_action(client: object, cid: str, changes: dict) -> 
     ca.primary_for_goal = changes["primary_for_goal"]
     # NOTE: include_in_conversions_metric is IMMUTABLE on create — Google
     # derives it from the conversion category and rejects any value set in
-    # the create mutate (IMMUTABLE_FIELD). To change it, use
-    # draft_update_conversion_action after the create succeeds.
+    # the create mutate (IMMUTABLE_FIELD). draft_update_conversion_action
+    # changes what it derives from: primary_for_goal and category.
     if changes.get("phone_call_duration_seconds"):
         ca.phone_call_duration_seconds = changes["phone_call_duration_seconds"]
     if changes.get("click_through_window_days"):
@@ -505,6 +562,13 @@ def _apply_update_conversion_action(client: object, cid: str, changes: dict) -> 
         cid, changes["conversion_action_id"]
     )
 
+    if "include_in_conversions_metric" in changes:
+        # A plan drafted before the draft refused it; Google would reject it.
+        raise ValueError(
+            "include_in_conversions_metric cannot be changed; nothing was sent. "
+            "Draft again with primary_for_goal or category."
+        )
+
     paths: list[str] = []
 
     if "name" in changes:
@@ -530,9 +594,11 @@ def _apply_update_conversion_action(client: object, cid: str, changes: dict) -> 
     if "phone_call_duration_seconds" in changes:
         ca.phone_call_duration_seconds = changes["phone_call_duration_seconds"]
         paths.append("phone_call_duration_seconds")
-    if "include_in_conversions_metric" in changes:
-        ca.include_in_conversions_metric = changes["include_in_conversions_metric"]
-        paths.append("include_in_conversions_metric")
+    if "category" in changes:
+        ca.category = getattr(
+            client.enums.ConversionActionCategoryEnum, changes["category"]
+        )
+        paths.append("category")
     if "click_through_window_days" in changes:
         ca.click_through_lookback_window_days = changes["click_through_window_days"]
         paths.append("click_through_lookback_window_days")
