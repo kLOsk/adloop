@@ -7060,7 +7060,9 @@ def draft_upload_enhanced_conversions_for_leads(
 
     PII is normalized and SHA-256-hashed AT PREVIEW TIME — only the hashes are
     stored in the plan. Raw email/phone/name never land in the plan or the
-    audit log. The target conversion action must be UPLOAD_CLICKS-type.
+    audit log. A cell that already is a SHA-256 hex digest (a CRM export that
+    hashes before writing) is used as it is. The target conversion action must
+    be UPLOAD_CLICKS-type.
 
     An Order ID column makes re-uploads dedup instead of double-counting.
 
