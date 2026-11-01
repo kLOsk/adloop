@@ -2085,11 +2085,14 @@ def draft_campaign(
     tracking_url_template: str | None = None,
     final_url_suffix: str | None = None,
     url_custom_parameters: list[dict] | None = None,
+    geo_exclude_ids: list[str] | None = None,
+    ad_schedule: list[dict] | None = None,
 ) -> dict:
     """Draft a full campaign structure — returns preview, does NOT execute.
 
     Creates: CampaignBudget + Campaign (PAUSED) + AdGroup + optional Keywords
-    + geo targeting + language targeting.
+    + geo targeting + language targeting + optional geo exclusions and ad
+    schedule, all in one atomic mutate.
     Ads are NOT included — use draft_responsive_search_ad separately.
 
     geo_target_ids: list of geo target constant IDs (e.g. ["2276"] for Germany,
@@ -2100,7 +2103,17 @@ def draft_campaign(
         Empty leaves Google's default (PRESENCE_OR_INTEREST for both).
     tracking_url_template / final_url_suffix / url_custom_parameters: campaign
         URL options. Omitted or empty leaves them unset.
+    geo_exclude_ids: geo target constant IDs to exclude; may not overlap
+        geo_target_ids.
+    ad_schedule: serving windows, validated like add_ad_schedule. They are the
+        campaign's first schedule, so the plan needs a double confirmation.
     """
+    from adloop.ads.assets import (
+        _account_settings,
+        _first_schedule_warning,
+        _time_zone_note,
+        _validate_schedule,
+    )
     from adloop.safety.guards import (
         SafetyViolation,
         check_blocked_operation,
@@ -2151,6 +2164,10 @@ def draft_campaign(
         display_network_enabled=normalized_display_network_enabled,
         max_cpc=max_cpc,
     )
+    geo_exclude_ids, exclude_errors = _normalize_geo_exclude_ids(geo_exclude_ids, geo_target_ids)
+    errors.extend(exclude_errors)
+    schedule, schedule_errors = _validate_schedule(ad_schedule or [])
+    errors.extend(schedule_errors)
     if errors:
         return {"error": "Validation failed", "details": errors}
 
@@ -2160,6 +2177,15 @@ def draft_campaign(
         return {"error": str(e)}
 
     warnings.extend(_location_option_warnings(location_option, negative_location_option))
+    target_changes: dict = {}
+    if geo_exclude_ids:
+        target_changes["geo_exclude_ids"] = geo_exclude_ids
+    if schedule:
+        time_zone = _account_settings(config, customer_id)["time_zone"]
+        target_changes["ad_schedule"] = schedule
+        target_changes["account_time_zone"] = time_zone
+        warnings.append(_time_zone_note(time_zone))
+        warnings.append(_first_schedule_warning(campaign_name))
     location_changes = {}
     if location_option:
         location_changes["location_option"] = location_option
@@ -2186,7 +2212,10 @@ def draft_campaign(
             "max_cpc": max_cpc if max_cpc else None,
             **location_changes,
             **url_options,
+            **target_changes,
         },
+        # A campaign's first windows switch off every hour outside them.
+        requires_double_confirm=bool(schedule),
     )
     store_plan(plan)
     preview = plan.to_preview()
@@ -2275,6 +2304,8 @@ def update_campaign(
     tracking_url_template: str | None = None,
     final_url_suffix: str | None = None,
     url_custom_parameters: list[dict] | None = None,
+    geo_exclude_ids: list[str] | None = None,
+    ad_schedule: list[dict] | None = None,
 ) -> dict:
     """Draft an update to an existing campaign — returns preview, does NOT execute.
 
@@ -2283,6 +2314,9 @@ def update_campaign(
     A location option change shows the current value next to the new one.
     URL options: None leaves one unchanged, an empty string or list clears it;
     the preview shows the current values and an example click URL.
+    geo_exclude_ids and ad_schedule REPLACE the campaign's exclusions and
+    windows: None leaves them unchanged, [] clears them. The preview shows the
+    current values, and apply refuses if those changed after the preview.
     """
     from adloop.safety.guards import (
         SafetyViolation,
@@ -2347,6 +2381,14 @@ def update_campaign(
         errors.append("geo_target_ids cannot be empty — provide at least one geo target")
     if language_ids is not None and len(language_ids) == 0:
         errors.append("language_ids cannot be empty — provide at least one language")
+    if geo_exclude_ids is not None:
+        geo_exclude_ids, exclude_errors = _normalize_geo_exclude_ids(geo_exclude_ids, geo_target_ids)
+        errors.extend(exclude_errors)
+    if ad_schedule is not None:
+        from adloop.ads.assets import _validate_schedule
+
+        ad_schedule, schedule_errors = _validate_schedule(ad_schedule)
+        errors.extend(schedule_errors)
     if max_cpc:
         strategy_for_cap = bs or _campaign_bidding_strategy(config, customer_id, campaign_id)
         if strategy_for_cap is None:
@@ -2373,6 +2415,8 @@ def update_campaign(
         location_option,
         negative_location_option,
         url_options,
+        geo_exclude_ids is not None,
+        ad_schedule is not None,
     ])
     if not has_any_change:
         errors.append("No changes specified — provide at least one parameter to update")
@@ -2402,7 +2446,7 @@ def update_campaign(
     # this preview note makes the preserved-set explicit so the change is
     # auditable rather than implicit.
     preserved_negative_geos: list[str] = []
-    if geo_target_ids is not None and campaign_id:
+    if geo_target_ids is not None and geo_exclude_ids is None and campaign_id:
         preserved_negative_geos = _existing_negative_geo_exclusions(
             config, customer_id, campaign_id
         )
@@ -2446,12 +2490,32 @@ def update_campaign(
             }
             url_example = _example_click_urls(current_urls["final_url"], effective)
 
+    target_changes: dict = {}
+    targets_need_double_confirm = False
+    if geo_exclude_ids is not None or ad_schedule is not None:
+        from adloop.ads.assets import _campaign_schedule
+
+        campaign, current_windows = _campaign_schedule(config, customer_id, campaign_id)
+        if campaign is None:
+            return {"error": f"Campaign {campaign_id} was not found in this account"}
+        if campaign["status"] == "REMOVED":
+            return {"error": f"Campaign {campaign_id} is removed"}
+        replacements = []
+        if geo_exclude_ids is not None:
+            replacements.append(_geo_exclude_replacement(config, customer_id, campaign_id, geo_exclude_ids))
+        if ad_schedule is not None:
+            replacements.append(_ad_schedule_replacement(campaign, current_windows, ad_schedule))
+        for replacement_changes, replacement_warnings, double_confirm in replacements:
+            target_changes.update(replacement_changes)
+            warnings.extend(replacement_warnings)
+            targets_need_double_confirm = targets_need_double_confirm or double_confirm
+
     # A budget can be shared by several campaigns, and a portfolio bid
     # strategy too: say who else a budget change reaches, and that a bidding
     # change takes the campaign out of its portfolio. Both need a double
     # confirmation, and apply re-checks the state the preview showed.
     shared: dict = {}
-    requires_double_confirm = False
+    requires_double_confirm = targets_need_double_confirm
     if daily_budget or bs or max_cpc:
         shared = _budget_and_bidding_context(
             config, customer_id, campaign_id,
@@ -2516,6 +2580,9 @@ def update_campaign(
         if field in url_options:
             changes[f"current_{field}"] = current_urls[field]
             changes[field] = url_options[field]
+    changes.update(target_changes)
+    if set(changes) == {"campaign_id"}:
+        return {"error": f"Campaign {campaign_id} already has these values; nothing to change"}
 
     plan = ChangePlan(
         operation="update_campaign",
@@ -3333,8 +3400,91 @@ def _check_budget_and_bidding_unchanged(service, cid: str, changes: dict) -> Non
         )
 
 
+def _normalize_geo_exclude_ids(
+    geo_exclude_ids: list[str] | None, geo_target_ids: list[str] | None
+) -> tuple[list[str], list[str]]:
+    """``(ids, errors)``: stripped and deduplicated; a blank entry is an error.
+
+    On update an empty list clears the exclusions, so a list of blanks must not
+    quietly become one.
+    """
+    ids = [str(geo_id).strip() for geo_id in geo_exclude_ids or []]
+    errors = []
+    if any(not geo_id.isdigit() for geo_id in ids):
+        errors.append("geo_exclude_ids must be numeric Google geo target constant IDs")
+    overlap = sorted(set(ids) & {str(geo_id).strip() for geo_id in geo_target_ids or []})
+    if overlap:
+        errors.append(f"geo_exclude_ids overlap geo_target_ids: {overlap}")
+    return list(dict.fromkeys(ids)), errors
+
+
+def _geo_exclude_replacement(
+    config: AdLoopConfig, customer_id: str, campaign_id: str, geo_exclude_ids: list[str]
+) -> tuple[dict, list[str], bool]:
+    """``(changes, warnings, double_confirm)`` for replacing a campaign's exclusions."""
+    current = _existing_negative_geo_exclusions(config, customer_id, campaign_id, strict=True)
+    if set(current) == set(geo_exclude_ids):
+        return {}, [f"Geo exclusions are already {sorted(current)}; left as they are."], False
+    dropped = sorted(set(current) - set(geo_exclude_ids))
+    warnings = []
+    if dropped:
+        warnings.append(
+            f"Removes the geo exclusions {dropped}: the campaign can serve in those "
+            "locations again if a geo target covers them."
+        )
+    return (
+        {"current_geo_exclude_ids": sorted(current), "geo_exclude_ids": geo_exclude_ids},
+        warnings,
+        bool(dropped),
+    )
+
+
+def _ad_schedule_replacement(
+    campaign: dict, existing: list[dict], windows: list[dict]
+) -> tuple[dict, list[str], bool]:
+    """``(changes, warnings, double_confirm)`` for replacing a campaign's schedule.
+
+    Follows add_ad_schedule: a first schedule switches off every hour outside
+    its windows, so it needs a double confirmation. Clearing one switches every
+    hour back on, which gets the same.
+    """
+    from adloop.ads.assets import _first_schedule_warning, _time_zone_note
+
+    if {_window_key(window) for window in existing} == {_window_key(window) for window in windows}:
+        return {}, ["The ad schedule already has these windows; left as it is."], False
+
+    warnings = [_time_zone_note(campaign["time_zone"])]
+    double_confirm = False
+    if not existing:
+        warnings.append(_first_schedule_warning(campaign["name"]))
+        double_confirm = True
+    elif not windows:
+        warnings.append(
+            f"Removes all {len(existing)} ad schedule windows of campaign '{campaign['name']}': "
+            "it serves at all hours and on every day again, including the ones the "
+            "schedule kept it out of."
+        )
+        double_confirm = True
+    else:
+        warnings.append(
+            f"Replaces the {len(existing)} current ad schedule windows of campaign "
+            f"'{campaign['name']}': it serves only inside the new ones."
+        )
+    if campaign["status"] != "ENABLED":
+        warnings.append(f"The campaign is {campaign['status']}; the schedule applies once it is enabled.")
+    return (
+        {"account_time_zone": campaign["time_zone"], "current_ad_schedule": existing, "ad_schedule": windows},
+        warnings,
+        double_confirm,
+    )
+
+
+def _window_key(window: dict) -> tuple:
+    return tuple(window[key] for key in ("day_of_week", "start_hour", "start_minute", "end_hour", "end_minute"))
+
+
 def _existing_negative_geo_exclusions(
-    config: AdLoopConfig, customer_id: str, campaign_id: str
+    config: AdLoopConfig, customer_id: str, campaign_id: str, *, strict: bool = False
 ) -> list[str]:
     """Return geo_target_constant IDs that are currently negative-excluded.
 
@@ -3343,7 +3493,8 @@ def _existing_negative_geo_exclusions(
     Negative location criteria survive a positive-geo replacement (issue
     #32) — this helper makes that explicit in the preview so users can
     see what's staying. Returns an empty list on any query failure;
-    surfacing exclusions is informational, not safety-critical.
+    surfacing exclusions is informational, not safety-critical. ``strict``
+    raises instead, for when the result decides what gets replaced.
     """
     from adloop.ads.gaql import execute_query
 
@@ -3353,10 +3504,13 @@ def _existing_negative_geo_exclusions(
         WHERE campaign.id = {campaign_id}
           AND campaign_criterion.type = 'LOCATION'
           AND campaign_criterion.negative = TRUE
+          AND campaign_criterion.status != 'REMOVED'
     """
     try:
         rows = execute_query(config, customer_id, query)
     except Exception:
+        if strict:
+            raise
         return []
 
     ids: list[str] = []
@@ -4609,11 +4763,20 @@ def _apply_create_campaign(client: object, cid: str, changes: dict) -> dict:
         )
         operations.append(lang_op)
 
+    # 7. Geo exclusions and ad schedule, in the same atomic mutate
+    campaign_path = campaign_service.campaign_path(cid, "-2")
+    for geo_id in changes.get("geo_exclude_ids") or []:
+        operations.append(_geo_exclude_create(client, campaign_path, geo_id))
+    for window in changes.get("ad_schedule") or []:
+        operations.append(_ad_schedule_create(client, campaign_path, window))
+
     response = service.mutate(customer_id=cid, mutate_operations=operations)
 
     results = {}
     num_keywords = len(kw_list)
     num_geo = len(changes.get("geo_target_ids") or [])
+    num_lang = len(changes.get("language_ids") or [])
+    num_exclude = len(changes.get("geo_exclude_ids") or [])
     for i, resp in enumerate(response.mutate_operation_responses):
         rn = _extract_resource_name(resp)
         if rn:
@@ -4627,10 +4790,90 @@ def _apply_create_campaign(client: object, cid: str, changes: dict) -> dict:
                 results.setdefault("keywords", []).append(rn)
             elif i < 3 + num_keywords + num_geo:
                 results.setdefault("geo_targets", []).append(rn)
-            else:
+            elif i < 3 + num_keywords + num_geo + num_lang:
                 results.setdefault("language_targets", []).append(rn)
+            elif i < 3 + num_keywords + num_geo + num_lang + num_exclude:
+                results.setdefault("geo_excludes", []).append(rn)
+            else:
+                results.setdefault("ad_schedule", []).append(rn)
 
     return results
+
+
+def _geo_exclude_create(client: object, campaign_path: str, geo_id: str) -> object:
+    op = client.get_type("MutateOperation")
+    criterion = op.campaign_criterion_operation.create
+    criterion.campaign = campaign_path
+    criterion.negative = True
+    criterion.location.geo_target_constant = f"geoTargetConstants/{geo_id}"
+    return op
+
+
+def _ad_schedule_create(client: object, campaign_path: str, window: dict) -> object:
+    from adloop.ads.assets import _populate_schedule
+
+    op = client.get_type("MutateOperation")
+    criterion = op.campaign_criterion_operation.create
+    criterion.campaign = campaign_path
+    _populate_schedule(client, criterion.ad_schedule, window)
+    return op
+
+
+def _criterion_remove(client: object, resource_name: str) -> object:
+    op = client.get_type("MutateOperation")
+    op.campaign_criterion_operation.remove = resource_name
+    return op
+
+
+def _geo_exclude_replacement_ops(
+    client: object, service: object, cid: str, changes: dict, campaign_path: str
+) -> tuple[list, list]:
+    """``(removes, creates)`` of what differs; refuse if the exclusions moved after the preview."""
+    campaign_id = changes["campaign_id"]
+    rows = service.search(customer_id=cid, query=(
+        "SELECT campaign_criterion.resource_name, campaign_criterion.location.geo_target_constant "
+        f"FROM campaign_criterion WHERE campaign.id = {campaign_id} "
+        "AND campaign_criterion.type = 'LOCATION' AND campaign_criterion.negative = TRUE "
+        "AND campaign_criterion.status != 'REMOVED'"))
+    current = {
+        row.campaign_criterion.location.geo_target_constant.rsplit("/", 1)[-1]: row.campaign_criterion.resource_name
+        for row in rows
+    }
+    if sorted(current) != sorted(changes.get("current_geo_exclude_ids") or []):
+        raise RuntimeError(
+            f"The geo exclusions of campaign {campaign_id} changed after this preview "
+            f"(now {sorted(current)}); nothing was sent. Draft the change again."
+        )
+    wanted = changes["geo_exclude_ids"]
+    return (
+        [_criterion_remove(client, resource) for geo_id, resource in current.items() if geo_id not in wanted],
+        [_geo_exclude_create(client, campaign_path, geo_id) for geo_id in wanted if geo_id not in current],
+    )
+
+
+def _ad_schedule_replacement_ops(client: object, service: object, cid: str, changes: dict, campaign_path: str) -> list:
+    """Remove and add only what differs; refuse if the windows moved after the preview."""
+    campaign_id = changes["campaign_id"]
+    rows = service.search(customer_id=cid, query=(
+        "SELECT campaign_criterion.resource_name, campaign_criterion.criterion_id "
+        f"FROM campaign_criterion WHERE campaign.id = {campaign_id} "
+        "AND campaign_criterion.type = 'AD_SCHEDULE' AND campaign_criterion.status != 'REMOVED'"))
+    current = {str(row.campaign_criterion.criterion_id): row.campaign_criterion.resource_name for row in rows}
+    pinned = changes.get("current_ad_schedule") or []
+    if sorted(current) != sorted(window["remove_id"].split("~")[-1] for window in pinned):
+        raise RuntimeError(
+            f"The ad schedule of campaign {campaign_id} changed after this preview; "
+            "nothing was sent. Draft the change again."
+        )
+    wanted = changes["ad_schedule"]
+    wanted_keys = {_window_key(window) for window in wanted}
+    pinned_keys = {_window_key(window) for window in pinned}
+    return [
+        *(_criterion_remove(client, current[window["remove_id"].split("~")[-1]])
+          for window in pinned if _window_key(window) not in wanted_keys),
+        *(_ad_schedule_create(client, campaign_path, window)
+          for window in wanted if _window_key(window) not in pinned_keys),
+    ]
 
 
 def _apply_create_ad_group(client: object, cid: str, changes: dict) -> dict:
@@ -4807,6 +5050,16 @@ def _apply_update_campaign(client: object, cid: str, changes: dict) -> dict:
         )
         operations.append(budget_op)
 
+    # Geo exclusions replace what the preview showed. Removals go ahead of the
+    # positive geo operations and creations after them, so a location can move
+    # from one list to the other in the same request.
+    exclude_removes, exclude_creates = [], []
+    if "geo_exclude_ids" in changes:
+        exclude_removes, exclude_creates = _geo_exclude_replacement_ops(
+            client, service, cid, changes, resource_name
+        )
+    operations.extend(exclude_removes)
+
     # Geo targeting — replace POSITIVE location criteria, preserve NEGATIVE
     # location exclusions. The previous implementation filtered on
     # campaign_criterion.type = 'LOCATION' alone, which swept up negative
@@ -4865,6 +5118,10 @@ def _apply_update_campaign(client: object, cid: str, changes: dict) -> dict:
                 f"languageConstants/{lang_id}"
             )
             operations.append(add_op)
+
+    operations.extend(exclude_creates)
+    if "ad_schedule" in changes:
+        operations.extend(_ad_schedule_replacement_ops(client, service, cid, changes, resource_name))
 
     if not operations:
         return {"message": "No changes to apply"}
