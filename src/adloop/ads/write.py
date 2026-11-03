@@ -1507,6 +1507,7 @@ def confirm_and_apply(
 _VALID_MATCH_TYPES = {"EXACT", "PHRASE", "BROAD"}
 _VALID_ENTITY_TYPES = {"campaign", "ad_group", "ad", "keyword"}
 _REMOVABLE_ENTITY_TYPES = _VALID_ENTITY_TYPES | {
+    "ad_group_ad",
     "negative_keyword", "campaign_asset", "asset", "customer_asset",
     "shared_criterion",
 }
@@ -2155,6 +2156,8 @@ def _execute_plan(config: AdLoopConfig, plan: object) -> dict:
         "create_structured_snippets": _apply_create_structured_snippets,
         "create_image_assets": _apply_create_image_assets,
         "create_sitelinks": _apply_create_sitelinks,
+        "create_pmax_campaign": _apply_create_pmax_campaign,
+        "create_pmax_asset_group": _apply_create_pmax_asset_group,
     }
 
     handler = dispatch.get(plan.operation)
@@ -2174,6 +2177,48 @@ def _execute_plan(config: AdLoopConfig, plan: object) -> dict:
         return handler(client, cid, plan.entity_type, plan.entity_id)
 
     return handler(client, cid, plan.changes)
+
+
+def _apply_create_pmax_campaign(client: object, cid: str, changes: dict) -> dict:
+    from adloop.ads.pmax_write import apply_create_pmax_campaign
+
+    return apply_create_pmax_campaign(client, cid, changes)
+
+
+def _apply_create_pmax_asset_group(client: object, cid: str, changes: dict) -> dict:
+    from adloop.ads.pmax_write import apply_create_pmax_asset_group
+
+    return apply_create_pmax_asset_group(client, cid, changes)
+
+
+def validate_plan_only(config: AdLoopConfig, *, plan_id: str) -> dict:
+    """Send a PMax plan to Google with validate_only=True. Nothing is created.
+
+    Works even when safety.require_dry_run is on, because the API itself
+    guarantees no mutation. The plan stays pending.
+    """
+    from adloop.ads.client import get_ads_client, normalize_customer_id
+    from adloop.ads.pmax_write import (
+        apply_create_pmax_asset_group,
+        apply_create_pmax_campaign,
+    )
+    from adloop.safety.preview import get_plan
+
+    plan = get_plan(plan_id)
+    if plan is None:
+        return {"error": f"No pending plan found with id '{plan_id}'."}
+    fn = {
+        "create_pmax_campaign": apply_create_pmax_campaign,
+        "create_pmax_asset_group": apply_create_pmax_asset_group,
+    }.get(plan.operation)
+    if fn is None:
+        return {"error": f"validate_only is supported for PMax plans only, not '{plan.operation}'."}
+    client = get_ads_client(config)
+    try:
+        result = fn(client, normalize_customer_id(plan.customer_id), plan.changes, validate_only=True)
+    except Exception as e:
+        return {"status": "VALIDATION_FAILED", "plan_id": plan_id, "error": _extract_error_message(e)}
+    return {"status": "VALIDATE_ONLY_OK", "plan_id": plan_id, "operation": plan.operation, "result": result}
 
 
 def _apply_update_ad_group(client: object, cid: str, changes: dict) -> dict:
@@ -2696,7 +2741,7 @@ def _apply_remove(
             customer_id=cid, operations=[operation]
         )
 
-    elif entity_type == "ad":
+    elif entity_type in ("ad", "ad_group_ad"):
         resolved_id = _resolve_ad_entity_id(client, cid, entity_id)
         service = client.get_service("AdGroupAdService")
         operation = client.get_type("AdGroupAdOperation")

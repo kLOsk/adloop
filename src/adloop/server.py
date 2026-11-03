@@ -132,6 +132,8 @@ _config = load_config()
 
 _WRITE_TOOL_NAMES = {
     "draft_campaign",
+    "draft_pmax_campaign",
+    "draft_pmax_asset_group",
     "draft_ad_group",
     "update_campaign",
     "draft_responsive_search_ad",
@@ -1050,6 +1052,97 @@ def draft_campaign(
 
 @mcp.tool(annotations=_WRITE)
 @_safe
+def draft_pmax_campaign(
+    campaign_name: str,
+    daily_budget: float,
+    geo_target_ids: _StrList,
+    language_ids: _StrList,
+    customer_id: str = "",
+    brand_exclusions: _StrListOpt = None,
+) -> dict:
+    """Draft a Performance Max campaign. Returns a PREVIEW, creates nothing.
+
+    Always built PAUSED (there is no status argument and it can never be
+    ENABLED here). Creates a non-shared CampaignBudget, a PERFORMANCE_MAX
+    campaign with Maximize Conversions (no target), Final URL expansion and
+    auto-generated assets OFF, geo targeting set to PRESENCE only, location
+    and language criteria, and an optional brand exclusion list resolved from
+    brand_exclusions names.
+
+    geo_target_ids: geo target constant IDs. language_ids: e.g. ["1000"].
+    Add the asset group with draft_pmax_asset_group. Run confirm_and_apply
+    with validate_only=true first, then with dry_run=false to apply.
+    """
+    from adloop.ads.pmax_write import draft_pmax_campaign as _impl
+
+    return _impl(
+        _config,
+        customer_id=customer_id or _config.ads.customer_id,
+        campaign_name=campaign_name,
+        daily_budget=daily_budget,
+        geo_target_ids=geo_target_ids,
+        language_ids=language_ids,
+        brand_exclusions=brand_exclusions,
+    )
+
+
+@mcp.tool(annotations=_WRITE)
+@_safe
+def draft_pmax_asset_group(
+    campaign_id: str,
+    asset_group_name: str,
+    final_url: str,
+    headlines: _StrList,
+    long_headlines: _StrList,
+    descriptions: _StrList,
+    business_name: str,
+    images: dict | None = None,
+    customer_id: str = "",
+    call_to_action: str = "",
+    search_themes: _StrListOpt = None,
+    audience_id: str = "",
+    path1: str = "",
+    path2: str = "",
+) -> dict:
+    """Draft a PMax asset group on an existing campaign. Returns a PREVIEW.
+
+    Validates everything, including local image files (type, pixels, aspect
+    ratio, size), BEFORE any upload, and returns the full list of unmet
+    Google minimums if any.
+
+    headlines: 3-15, max 30 chars. long_headlines: 1-5, max 90.
+    descriptions: 2-5, max 90, at least one <= 60. business_name: max 25.
+    images: {"landscape": [paths 1.91:1 min 600x314], "square": [paths 1:1
+      min 300x300], "logo": [paths 1:1 min 128x128],
+      "landscape_logo": [optional paths 4:1 min 512x128]}. Landscape,
+      square and logo need at least 1 each.
+    call_to_action: e.g. CONTACT_US. search_themes: audience-signal themes.
+    audience_id: optional existing Audience resource ID used as the signal.
+    The asset group is created PAUSED.
+    """
+    from adloop.ads.pmax_write import draft_pmax_asset_group as _impl
+
+    return _impl(
+        _config,
+        customer_id=customer_id or _config.ads.customer_id,
+        campaign_id=campaign_id,
+        asset_group_name=asset_group_name,
+        final_url=final_url,
+        headlines=headlines,
+        long_headlines=long_headlines,
+        descriptions=descriptions,
+        business_name=business_name,
+        images=images,
+        call_to_action=call_to_action,
+        search_themes=search_themes,
+        audience_id=audience_id,
+        path1=path1,
+        path2=path2,
+    )
+
+
+@mcp.tool(annotations=_WRITE)
+@_safe
 def draft_ad_group(
     campaign_id: str,
     ad_group_name: str,
@@ -1490,7 +1583,7 @@ def remove_entity(
 ) -> dict:
     """Draft REMOVING an entity — returns a PREVIEW. This is IRREVERSIBLE.
 
-    entity_type: "campaign", "ad_group", "ad", "keyword", "negative_keyword",
+    entity_type: "campaign", "ad_group", "ad", "ad_group_ad", "keyword", "negative_keyword",
                  "shared_criterion", "campaign_asset", "asset", or "customer_asset"
     entity_id: The resource ID.
                For keywords: "adGroupId~criterionId"
@@ -1555,8 +1648,12 @@ def draft_sitelinks(
 def confirm_and_apply(
     plan_id: str,
     dry_run: bool = True,
+    validate_only: bool = False,
 ) -> dict:
     """Execute a previously previewed change.
+
+    validate_only=true (PMax plans only) asks Google to validate the full
+    mutation without creating anything; the plan stays pending.
 
     IMPORTANT: Defaults to dry_run=True. You MUST explicitly pass dry_run=false
     to make real changes to the Google Ads account.
@@ -1572,6 +1669,11 @@ def confirm_and_apply(
 
     The plan_id comes from a prior draft_* or pause/enable tool call.
     """
+    if validate_only:
+        from adloop.ads.write import validate_plan_only
+
+        return validate_plan_only(_config, plan_id=plan_id)
+
     from adloop.ads.write import confirm_and_apply as _impl
 
     return _impl(_config, plan_id=plan_id, dry_run=dry_run)
