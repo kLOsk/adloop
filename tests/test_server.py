@@ -6,8 +6,125 @@ from adloop.ads.gaql import _parse_gaql_error
 from adloop.server import (
     _build_orchestration_instructions,
     _coerce_json_string_to_list,
+    _enforce_ga4_property,
+    _enforce_write_customer,
     _structured_error,
 )
+
+
+def _fake_ga4_tool(property_id: str = "", limit: int = 10):
+    return property_id
+
+
+def _fake_ads_tool(customer_id: str = ""):
+    return customer_id
+
+
+class TestGA4PropertyGuard:
+    def test_fills_omitted_property(self, monkeypatch):
+        monkeypatch.setenv("ADLOOP_ALLOWED_GA4_PROPERTY_ID", "413528788")
+        kwargs = {}
+        _enforce_ga4_property(_fake_ga4_tool, kwargs)
+        assert kwargs["property_id"] == "properties/413528788"
+
+    def test_accepts_prefixed_allowed_property(self, monkeypatch):
+        monkeypatch.setenv("ADLOOP_ALLOWED_GA4_PROPERTY_ID", "413528788")
+        kwargs = {"property_id": "properties/413528788"}
+        _enforce_ga4_property(_fake_ga4_tool, kwargs)
+        assert kwargs["property_id"] == "properties/413528788"
+
+    def test_rejects_other_property(self, monkeypatch):
+        monkeypatch.setenv("ADLOOP_ALLOWED_GA4_PROPERTY_ID", "413528788")
+        with pytest.raises(RuntimeError, match="restricted to property 413528788"):
+            _enforce_ga4_property(_fake_ga4_tool, {"property_id": "356448527"})
+
+    def test_ignores_tools_without_property(self, monkeypatch):
+        monkeypatch.setenv("ADLOOP_ALLOWED_GA4_PROPERTY_ID", "413528788")
+        kwargs = {}
+        _enforce_ga4_property(_fake_ads_tool, kwargs)
+        assert kwargs == {}
+
+    def test_noop_when_unset(self, monkeypatch):
+        monkeypatch.delenv("ADLOOP_ALLOWED_GA4_PROPERTY_ID", raising=False)
+        kwargs = {"property_id": "356448527"}
+        _enforce_ga4_property(_fake_ga4_tool, kwargs)
+        assert kwargs["property_id"] == "356448527"
+
+
+class _FakeKeyEvent:
+    def __init__(self, name, event_name):
+        self.name = name
+        self.event_name = event_name
+
+        class _CM:
+            name = "ONCE_PER_EVENT"
+
+        self.counting_method = _CM()
+        self.create_time = "t"
+
+
+class _FakeAdminClient:
+    def __init__(self, existing=()):
+        self.existing = list(existing)
+        self.calls = []
+
+    def list_key_events(self, parent):
+        self.calls.append(("list", parent))
+        return self.existing
+
+    def create_key_event(self, parent, key_event):
+        self.calls.append(("create", parent, key_event.event_name))
+        return _FakeKeyEvent(f"{parent}/keyEvents/1", key_event.event_name)
+
+
+class TestCreateKeyEventGuard:
+    @pytest.fixture
+    def fake(self, monkeypatch):
+        import adloop.ga4.client as gc
+
+        client = _FakeAdminClient()
+        monkeypatch.setattr(gc, "get_admin_client", lambda cfg: client)
+        monkeypatch.setenv("ADLOOP_ALLOWED_GA4_PROPERTY_ID", "properties/413528788")
+        monkeypatch.setenv("ADLOOP_ALLOWED_KEY_EVENT_NAMES", "free_consultation_form")
+        return client
+
+    def _tool(self):
+        from adloop.server import create_ga4_key_event
+
+        return create_ga4_key_event
+
+    def test_refuses_without_property_lock(self, fake, monkeypatch):
+        monkeypatch.delenv("ADLOOP_ALLOWED_GA4_PROPERTY_ID")
+        out = self._tool()(event_name="free_consultation_form")
+        assert "requires ADLOOP_ALLOWED_GA4_PROPERTY_ID" in out["error"]
+        assert fake.calls == []
+
+    def test_refuses_other_property(self, fake):
+        out = self._tool()(event_name="free_consultation_form", property_id="356448527")
+        assert "restricted to property 413528788" in out["error"]
+        assert fake.calls == []
+
+    def test_refuses_unlisted_event(self, fake):
+        out = self._tool()(event_name="purchase")
+        assert "not allowed" in out["error"]
+        assert fake.calls == []
+
+    def test_refuses_when_names_unset(self, fake, monkeypatch):
+        monkeypatch.delenv("ADLOOP_ALLOWED_KEY_EVENT_NAMES")
+        out = self._tool()(event_name="free_consultation_form")
+        assert "not allowed" in out["error"]
+        assert fake.calls == []
+
+    def test_creates_on_locked_property(self, fake):
+        out = self._tool()(event_name="free_consultation_form")
+        assert out["created"] is True
+        assert fake.calls[-1] == ("create", "properties/413528788", "free_consultation_form")
+
+    def test_idempotent_when_exists(self, fake):
+        fake.existing = [_FakeKeyEvent("properties/413528788/keyEvents/9", "free_consultation_form")]
+        out = self._tool()(event_name="free_consultation_form")
+        assert out["created"] is False and out["already_exists"] is True
+        assert all(c[0] != "create" for c in fake.calls)
 
 
 def test_structured_error_detects_invalid_developer_token():
@@ -71,6 +188,32 @@ def test_parse_gaql_error_detects_test_only_developer_token():
 
     assert result.startswith("DEVELOPER_TOKEN_NOT_APPROVED:")
     assert "test accounts" in result
+
+
+class TestWriteCustomerGuard:
+    def test_defaults_a_write_to_the_allowed_customer(self, monkeypatch):
+        monkeypatch.setenv("ADLOOP_ALLOWED_CUSTOMER_ID", "3865591631")
+        kwargs = {}
+
+        _enforce_write_customer("draft_campaign", kwargs)
+
+        assert kwargs["customer_id"] == "3865591631"
+
+    def test_rejects_a_different_write_customer(self, monkeypatch):
+        monkeypatch.setenv("ADLOOP_ALLOWED_CUSTOMER_ID", "3865591631")
+
+        with pytest.raises(RuntimeError, match="restricted to customer_id 3865591631"):
+            _enforce_write_customer(
+                "draft_campaign", {"customer_id": "3683647410"}
+            )
+
+    def test_accepts_the_allowed_customer_with_dashes(self, monkeypatch):
+        monkeypatch.setenv("ADLOOP_ALLOWED_CUSTOMER_ID", "3865591631")
+        kwargs = {"customer_id": "386-559-1631"}
+
+        _enforce_write_customer("draft_campaign", kwargs)
+
+        assert kwargs["customer_id"] == "3865591631"
 
 
 # ---------------------------------------------------------------------------

@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import functools
+import inspect
 import json
+import os
 from typing import Annotated, Callable
 
 from fastmcp import FastMCP
@@ -128,6 +130,81 @@ mcp = FastMCP(
 _config = load_config()
 
 
+_WRITE_TOOL_NAMES = {
+    "draft_campaign",
+    "draft_ad_group",
+    "update_campaign",
+    "draft_responsive_search_ad",
+    "draft_keywords",
+    "add_negative_keywords",
+    "propose_negative_keyword_list",
+    "add_to_negative_keyword_list",
+    "attach_shared_set_to_campaigns",
+    "detach_shared_set_from_campaigns",
+    "update_ad_group",
+    "draft_callouts",
+    "draft_structured_snippets",
+    "draft_image_assets",
+    "pause_entity",
+    "enable_entity",
+    "remove_entity",
+    "draft_sitelinks",
+}
+
+
+def _normalize_customer_id(customer_id: str) -> str:
+    """Compare customer IDs independent of punctuation."""
+    return str(customer_id).replace("-", "").replace(" ", "")
+
+
+def _enforce_write_customer(fn_name: str, kwargs: dict) -> None:
+    """Default and lock draft tools to a profile-configured customer, if set."""
+    if fn_name not in _WRITE_TOOL_NAMES:
+        return
+
+    allowed_customer_id = os.environ.get("ADLOOP_ALLOWED_CUSTOMER_ID", "")
+    if not allowed_customer_id:
+        return
+
+    requested_customer_id = kwargs.get("customer_id", "")
+    if requested_customer_id and (
+        _normalize_customer_id(requested_customer_id)
+        != _normalize_customer_id(allowed_customer_id)
+    ):
+        raise RuntimeError(
+            f"{fn_name} is restricted to customer_id "
+            f"{_normalize_customer_id(allowed_customer_id)} for this AdLoop seat."
+        )
+
+    kwargs["customer_id"] = allowed_customer_id
+
+
+def _normalize_property_id(property_id: str) -> str:
+    """Compare GA4 property IDs independent of a ``properties/`` prefix."""
+    return str(property_id).strip().removeprefix("properties/")
+
+
+def _enforce_ga4_property(fn: Callable, kwargs: dict) -> None:
+    """Default and lock every GA4 call to a profile-configured property, if set.
+
+    Applies to any tool whose signature takes ``property_id``. With
+    ADLOOP_ALLOWED_GA4_PROPERTY_ID set, an empty or omitted property_id is
+    filled with the allowed one and any other property is rejected before
+    an API call is made.
+    """
+    allowed = os.environ.get("ADLOOP_ALLOWED_GA4_PROPERTY_ID", "")
+    if not allowed or "property_id" not in inspect.signature(fn).parameters:
+        return
+    requested = kwargs.get("property_id", "")
+    if requested and _normalize_property_id(requested) != _normalize_property_id(allowed):
+        raise RuntimeError(
+            f"GA4 access is restricted to property {_normalize_property_id(allowed)} "
+            f"for this AdLoop seat."
+        )
+    # The GA4 Data API requires the resource form ``properties/<id>``.
+    kwargs["property_id"] = f"properties/{_normalize_property_id(allowed)}"
+
+
 def _structured_error(fn_name: str, exc: Exception) -> dict:
     """Translate common auth failures into actionable structured errors."""
     err = str(exc)
@@ -194,6 +271,8 @@ def _safe(fn: Callable) -> Callable:
     @functools.wraps(fn)
     def wrapper(*args, **kwargs):
         try:
+            _enforce_write_customer(fn.__name__, kwargs)
+            _enforce_ga4_property(fn, kwargs)
             return fn(*args, **kwargs)
         except RuntimeError as e:
             return {"error": str(e)}
@@ -381,6 +460,68 @@ def get_tracking_events(
         date_range_start=date_range_start,
         date_range_end=date_range_end,
     )
+
+
+def _allowed_key_event_names() -> set[str]:
+    raw = os.environ.get("ADLOOP_ALLOWED_KEY_EVENT_NAMES", "")
+    return {n.strip() for n in raw.split(",") if n.strip()}
+
+
+@mcp.tool(annotations=_WRITE)
+@_safe
+def create_ga4_key_event(
+    event_name: str,
+    property_id: str = "",
+    counting_method: str = "ONCE_PER_EVENT",
+) -> dict:
+    """Mark one GA4 event as a key event (Admin API keyEvents.create).
+
+    Seat-locked: refuses unless ADLOOP_ALLOWED_GA4_PROPERTY_ID is set (the
+    property guard pins the property) and event_name is listed in
+    ADLOOP_ALLOWED_KEY_EVENT_NAMES. Idempotent: if the key event already
+    exists it is returned and nothing is created.
+    """
+    if not os.environ.get("ADLOOP_ALLOWED_GA4_PROPERTY_ID", ""):
+        raise RuntimeError(
+            "create_ga4_key_event requires ADLOOP_ALLOWED_GA4_PROPERTY_ID on this seat."
+        )
+    allowed_names = _allowed_key_event_names()
+    if event_name not in allowed_names:
+        raise RuntimeError(
+            f"Key event '{event_name}' is not allowed for this AdLoop seat "
+            f"(ADLOOP_ALLOWED_KEY_EVENT_NAMES={sorted(allowed_names)})."
+        )
+    if counting_method not in ("ONCE_PER_EVENT", "ONCE_PER_SESSION"):
+        raise RuntimeError("counting_method must be ONCE_PER_EVENT or ONCE_PER_SESSION.")
+
+    from google.analytics.admin_v1beta import KeyEvent
+
+    from adloop.ga4.client import get_admin_client
+
+    client = get_admin_client(_config)
+    for existing in client.list_key_events(parent=property_id):
+        if existing.event_name == event_name:
+            return {
+                "created": False,
+                "already_exists": True,
+                "name": existing.name,
+                "event_name": existing.event_name,
+                "counting_method": existing.counting_method.name,
+            }
+    created = client.create_key_event(
+        parent=property_id,
+        key_event=KeyEvent(
+            event_name=event_name,
+            counting_method=KeyEvent.CountingMethod[counting_method],
+        ),
+    )
+    return {
+        "created": True,
+        "name": created.name,
+        "event_name": created.event_name,
+        "counting_method": created.counting_method.name,
+        "create_time": str(created.create_time),
+    }
 
 
 # ---------------------------------------------------------------------------
