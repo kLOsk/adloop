@@ -515,6 +515,140 @@ def add_to_negative_keyword_list(
     return plan.to_preview()
 
 
+def _normalize_shared_set_attachment_args(
+    shared_set_id: str,
+    campaign_ids: list[str] | None,
+) -> tuple[list[str], list[str]]:
+    """Validate inputs for attach/detach. Returns (errors, deduped_campaign_ids)."""
+    errors: list[str] = []
+    if not shared_set_id:
+        errors.append("shared_set_id is required")
+    elif not str(shared_set_id).isdigit():
+        errors.append(
+            "shared_set_id must be a numeric ID (from get_negative_keyword_lists)"
+        )
+
+    campaign_ids = campaign_ids or []
+    if not campaign_ids:
+        errors.append("At least one campaign_id is required")
+
+    seen: set[str] = set()
+    deduped: list[str] = []
+    for cid in campaign_ids:
+        cid_str = str(cid).strip()
+        if not cid_str:
+            continue
+        if not cid_str.isdigit():
+            errors.append(f"campaign_id '{cid_str}' must be numeric")
+            continue
+        if cid_str in seen:
+            continue
+        seen.add(cid_str)
+        deduped.append(cid_str)
+
+    return errors, deduped
+
+
+def attach_shared_set_to_campaigns(
+    config: AdLoopConfig,
+    *,
+    customer_id: str = "",
+    shared_set_id: str = "",
+    campaign_ids: list[str] | None = None,
+) -> dict:
+    """Draft attaching an existing shared set to one or more campaigns — returns PREVIEW.
+
+    Creates ``CampaignSharedSet`` linkages so the campaigns inherit the shared
+    set's criteria (e.g. negative keywords). Most commonly used to attach a
+    shared negative keyword list to newly-built campaigns. Use
+    ``get_negative_keyword_lists`` to find the ``shared_set_id`` and
+    ``get_negative_keyword_list_campaigns`` to see existing attachments.
+
+    shared_set_id: numeric ID of the shared set to attach.
+    campaign_ids: list of numeric campaign IDs to attach the set to. Duplicates
+        in the input list are collapsed.
+
+    Call ``confirm_and_apply`` with the returned plan_id to execute.
+    """
+    from adloop.safety.guards import SafetyViolation, check_blocked_operation
+    from adloop.safety.preview import ChangePlan, store_plan
+
+    try:
+        check_blocked_operation("attach_shared_set_to_campaigns", config.safety)
+    except SafetyViolation as e:
+        return {"error": str(e)}
+
+    errors, deduped = _normalize_shared_set_attachment_args(
+        shared_set_id, campaign_ids
+    )
+    if errors:
+        return {"error": "Validation failed", "details": errors}
+
+    plan = ChangePlan(
+        operation="attach_shared_set_to_campaigns",
+        entity_type="campaign_shared_set",
+        entity_id=str(shared_set_id),
+        customer_id=customer_id,
+        changes={
+            "shared_set_id": str(shared_set_id),
+            "campaign_ids": deduped,
+        },
+    )
+    store_plan(plan)
+    return plan.to_preview()
+
+
+def detach_shared_set_from_campaigns(
+    config: AdLoopConfig,
+    *,
+    customer_id: str = "",
+    shared_set_id: str = "",
+    campaign_ids: list[str] | None = None,
+) -> dict:
+    """Draft detaching a shared set from one or more campaigns — returns PREVIEW.
+
+    Removes ``CampaignSharedSet`` linkages so the campaigns no longer inherit
+    the shared set's criteria. The shared set itself is unchanged; only the
+    per-campaign attachment record is removed. Use
+    ``get_negative_keyword_list_campaigns`` to inspect existing attachments
+    before detaching.
+
+    shared_set_id: numeric ID of the shared set.
+    campaign_ids: list of numeric campaign IDs to detach the set from.
+        Detaching a set that isn't currently attached to a campaign is a no-op
+        at the API level (the request will fail for that specific operation
+        but does not affect the others; surfaced in the apply response).
+
+    Call ``confirm_and_apply`` with the returned plan_id to execute.
+    """
+    from adloop.safety.guards import SafetyViolation, check_blocked_operation
+    from adloop.safety.preview import ChangePlan, store_plan
+
+    try:
+        check_blocked_operation("detach_shared_set_from_campaigns", config.safety)
+    except SafetyViolation as e:
+        return {"error": str(e)}
+
+    errors, deduped = _normalize_shared_set_attachment_args(
+        shared_set_id, campaign_ids
+    )
+    if errors:
+        return {"error": "Validation failed", "details": errors}
+
+    plan = ChangePlan(
+        operation="detach_shared_set_from_campaigns",
+        entity_type="campaign_shared_set",
+        entity_id=str(shared_set_id),
+        customer_id=customer_id,
+        changes={
+            "shared_set_id": str(shared_set_id),
+            "campaign_ids": deduped,
+        },
+    )
+    store_plan(plan)
+    return plan.to_preview()
+
+
 def update_ad_group(
     config: AdLoopConfig,
     *,
@@ -538,13 +672,36 @@ def update_ad_group(
     if max_cpc < 0:
         errors.append("max_cpc cannot be negative")
     if max_cpc:
-        uses_manual_cpc = _ad_group_uses_manual_cpc(config, customer_id, ad_group_id)
-        if uses_manual_cpc is False:
-            errors.append("max_cpc requires an ad group in a MANUAL_CPC campaign")
-        elif uses_manual_cpc is None:
+        strategy = _ad_group_campaign_bidding_strategy(
+            config, customer_id, ad_group_id
+        )
+        if strategy is None:
             errors.append(
                 f"Unable to verify bidding strategy for ad_group_id '{ad_group_id}'"
             )
+        elif strategy != "MANUAL_CPC":
+            # Per Google Ads docs, ad-group CPC bids are ignored under every
+            # automated bidding strategy — effective_cpc_bid_micros is always 0
+            # and the campaign-level constraint (cpc_bid_ceiling for
+            # TARGET_SPEND, target CPA/ROAS otherwise) is the only thing that
+            # affects spend. Telling the user "requires MANUAL_CPC" makes it
+            # sound like a tool limitation; the real story is that the bid
+            # would be a no-op. Point at the right next step for the strategy.
+            # https://support.google.com/google-ads/answer/6336101
+            if strategy == "TARGET_SPEND":
+                errors.append(
+                    "Maximize Clicks (TARGET_SPEND) ignores ad-group CPC bids. "
+                    "The campaign cpc_bid_ceiling is the active constraint — "
+                    "set it via update_campaign(max_cpc=...) instead. "
+                    "No change made."
+                )
+            else:
+                errors.append(
+                    f"{strategy} ignores ad-group CPC bids "
+                    f"(effective_cpc_bid_micros = 0). The campaign-level "
+                    f"target governs spend under automated bidding. "
+                    f"No change made."
+                )
 
     has_any_change = bool(ad_group_name.strip() or max_cpc)
     if not has_any_change:
@@ -927,6 +1084,27 @@ def update_campaign(
             f"{format_currency(target_cpa, currency_code)}. Google recommends at least 5x."
         )
 
+    # Surface negative geo exclusions that will survive a positive-geo
+    # replacement. Issue #32: the previous implementation silently dropped
+    # negative location criteria along with positive ones during a geo
+    # replace — users only noticed when excluded-region traffic appeared in
+    # reports. Negatives are now preserved (see ``_apply_update_campaign``);
+    # this preview note makes the preserved-set explicit so the change is
+    # auditable rather than implicit.
+    preserved_negative_geos: list[str] = []
+    if geo_target_ids is not None and campaign_id:
+        preserved_negative_geos = _existing_negative_geo_exclusions(
+            config, customer_id, campaign_id
+        )
+        if preserved_negative_geos:
+            warnings.append(
+                "Negative geo exclusions on this campaign will be PRESERVED "
+                f"(geo_target_constant IDs: {sorted(preserved_negative_geos)}). "
+                "Only positive geo targets are being replaced. To remove a "
+                "negative exclusion, use remove_entity with "
+                'entity_type="campaign_criterion".'
+            )
+
     changes: dict = {"campaign_id": campaign_id}
     if bs:
         changes["bidding_strategy"] = bs
@@ -958,6 +1136,10 @@ def update_campaign(
     preview = plan.to_preview()
     if warnings:
         preview["warnings"] = warnings
+    if preserved_negative_geos:
+        preview["preserved_negative_geo_target_ids"] = sorted(
+            preserved_negative_geos
+        )
     return preview
 
 
@@ -1325,6 +1507,7 @@ def confirm_and_apply(
 _VALID_MATCH_TYPES = {"EXACT", "PHRASE", "BROAD"}
 _VALID_ENTITY_TYPES = {"campaign", "ad_group", "ad", "keyword"}
 _REMOVABLE_ENTITY_TYPES = _VALID_ENTITY_TYPES | {
+    "ad_group_ad",
     "negative_keyword", "campaign_asset", "asset", "customer_asset",
     "shared_criterion",
 }
@@ -1365,10 +1548,52 @@ def _campaign_bidding_strategy(
     return rows[0].get("campaign.bidding_strategy_type")
 
 
-def _ad_group_uses_manual_cpc(
+def _existing_negative_geo_exclusions(
+    config: AdLoopConfig, customer_id: str, campaign_id: str
+) -> list[str]:
+    """Return geo_target_constant IDs that are currently negative-excluded.
+
+    Used by ``update_campaign`` to surface preserved negative-location
+    criteria in the preview when ``geo_target_ids`` is being changed.
+    Negative location criteria survive a positive-geo replacement (issue
+    #32) — this helper makes that explicit in the preview so users can
+    see what's staying. Returns an empty list on any query failure;
+    surfacing exclusions is informational, not safety-critical.
+    """
+    from adloop.ads.gaql import execute_query
+
+    query = f"""
+        SELECT campaign_criterion.location.geo_target_constant
+        FROM campaign_criterion
+        WHERE campaign.id = {campaign_id}
+          AND campaign_criterion.type = 'LOCATION'
+          AND campaign_criterion.negative = TRUE
+    """
+    try:
+        rows = execute_query(config, customer_id, query)
+    except Exception:
+        return []
+
+    ids: list[str] = []
+    for row in rows:
+        gtc = row.get("campaign_criterion.location.geo_target_constant") or ""
+        # gtc looks like "geoTargetConstants/2840" — strip prefix to numeric ID.
+        if "/" in gtc:
+            ids.append(gtc.rsplit("/", 1)[-1])
+        elif gtc:
+            ids.append(gtc)
+    return ids
+
+
+def _ad_group_campaign_bidding_strategy(
     config: AdLoopConfig, customer_id: str, ad_group_id: str
-) -> bool | None:
-    """Return True when the ad group exists in a MANUAL_CPC campaign."""
+) -> str | None:
+    """Return the bidding strategy type of the campaign owning this ad group.
+
+    Returns the enum name (``MANUAL_CPC``, ``TARGET_SPEND``,
+    ``MAXIMIZE_CONVERSIONS``, ``TARGET_CPA``, ``TARGET_ROAS``, etc.) or
+    ``None`` when the ad group can't be resolved.
+    """
     from adloop.ads.gaql import execute_query
 
     query = f"""
@@ -1380,7 +1605,7 @@ def _ad_group_uses_manual_cpc(
     rows = execute_query(config, customer_id, query)
     if not rows:
         return None
-    return rows[0].get("campaign.bidding_strategy_type") == "MANUAL_CPC"
+    return rows[0].get("campaign.bidding_strategy_type")
 
 
 def _validate_callouts(
@@ -1922,6 +2147,8 @@ def _execute_plan(config: AdLoopConfig, plan: object) -> dict:
         "add_negative_keywords": _apply_add_negative_keywords,
         "create_negative_keyword_list": _apply_create_negative_keyword_list,
         "add_to_negative_keyword_list": _apply_add_to_negative_keyword_list,
+        "attach_shared_set_to_campaigns": _apply_attach_shared_set_to_campaigns,
+        "detach_shared_set_from_campaigns": _apply_detach_shared_set_from_campaigns,
         "pause_entity": _apply_status_change,
         "enable_entity": _apply_status_change,
         "remove_entity": _apply_remove,
@@ -1929,6 +2156,8 @@ def _execute_plan(config: AdLoopConfig, plan: object) -> dict:
         "create_structured_snippets": _apply_create_structured_snippets,
         "create_image_assets": _apply_create_image_assets,
         "create_sitelinks": _apply_create_sitelinks,
+        "create_pmax_campaign": _apply_create_pmax_campaign,
+        "create_pmax_asset_group": _apply_create_pmax_asset_group,
     }
 
     handler = dispatch.get(plan.operation)
@@ -1948,6 +2177,48 @@ def _execute_plan(config: AdLoopConfig, plan: object) -> dict:
         return handler(client, cid, plan.entity_type, plan.entity_id)
 
     return handler(client, cid, plan.changes)
+
+
+def _apply_create_pmax_campaign(client: object, cid: str, changes: dict) -> dict:
+    from adloop.ads.pmax_write import apply_create_pmax_campaign
+
+    return apply_create_pmax_campaign(client, cid, changes)
+
+
+def _apply_create_pmax_asset_group(client: object, cid: str, changes: dict) -> dict:
+    from adloop.ads.pmax_write import apply_create_pmax_asset_group
+
+    return apply_create_pmax_asset_group(client, cid, changes)
+
+
+def validate_plan_only(config: AdLoopConfig, *, plan_id: str) -> dict:
+    """Send a PMax plan to Google with validate_only=True. Nothing is created.
+
+    Works even when safety.require_dry_run is on, because the API itself
+    guarantees no mutation. The plan stays pending.
+    """
+    from adloop.ads.client import get_ads_client, normalize_customer_id
+    from adloop.ads.pmax_write import (
+        apply_create_pmax_asset_group,
+        apply_create_pmax_campaign,
+    )
+    from adloop.safety.preview import get_plan
+
+    plan = get_plan(plan_id)
+    if plan is None:
+        return {"error": f"No pending plan found with id '{plan_id}'."}
+    fn = {
+        "create_pmax_campaign": apply_create_pmax_campaign,
+        "create_pmax_asset_group": apply_create_pmax_asset_group,
+    }.get(plan.operation)
+    if fn is None:
+        return {"error": f"validate_only is supported for PMax plans only, not '{plan.operation}'."}
+    client = get_ads_client(config)
+    try:
+        result = fn(client, normalize_customer_id(plan.customer_id), plan.changes, validate_only=True)
+    except Exception as e:
+        return {"status": "VALIDATION_FAILED", "plan_id": plan_id, "error": _extract_error_message(e)}
+    return {"status": "VALIDATE_ONLY_OK", "plan_id": plan_id, "operation": plan.operation, "result": result}
 
 
 def _apply_update_ad_group(client: object, cid: str, changes: dict) -> dict:
@@ -2259,16 +2530,25 @@ def _apply_update_campaign(client: object, cid: str, changes: dict) -> dict:
         )
         operations.append(budget_op)
 
-    # Geo targeting — remove existing, add new
+    # Geo targeting — replace POSITIVE location criteria, preserve NEGATIVE
+    # location exclusions. The previous implementation filtered on
+    # campaign_criterion.type = 'LOCATION' alone, which swept up negative
+    # exclusions (e.g. excluding the USA from a worldwide campaign) and
+    # silently removed them when the user added or swapped a positive geo.
+    # That's a data-safety bug — users wouldn't notice the exclusion was
+    # gone until traffic from the excluded region started showing up in
+    # reports (issue #32). Restrict the removal scope with
+    # ``campaign_criterion.negative = FALSE`` so negatives survive.
     geo_ids = changes.get("geo_target_ids")
     if geo_ids is not None:
-        existing_geo = f"""
+        existing_positive_geo = f"""
             SELECT campaign_criterion.resource_name
             FROM campaign_criterion
             WHERE campaign.id = {campaign_id}
               AND campaign_criterion.type = 'LOCATION'
+              AND campaign_criterion.negative = FALSE
         """
-        for row in service.search(customer_id=cid, query=existing_geo):
+        for row in service.search(customer_id=cid, query=existing_positive_geo):
             rm_op = client.get_type("MutateOperation")
             rm_op.campaign_criterion_operation.remove = (
                 row.campaign_criterion.resource_name
@@ -2461,7 +2741,7 @@ def _apply_remove(
             customer_id=cid, operations=[operation]
         )
 
-    elif entity_type == "ad":
+    elif entity_type in ("ad", "ad_group_ad"):
         resolved_id = _resolve_ad_entity_id(client, cid, entity_id)
         service = client.get_service("AdGroupAdService")
         operation = client.get_type("AdGroupAdOperation")
@@ -2847,3 +3127,177 @@ def _apply_add_to_negative_keyword_list(
         "resource_names": [r.resource_name for r in response.results],
         "keyword_count": len(response.results),
     }
+
+
+def _parse_partial_failure_per_op(
+    client: object, partial_failure_error: object
+) -> dict:
+    """Parse a Google Ads partial_failure_error proto into {op_index: message}.
+
+    Returns an empty dict when there are no failures, when ``details`` is
+    missing, or when proto deserialization fails for any reason — callers
+    can still detect failed operations via empty ``result.resource_name``
+    entries and surface ``partial_failure_error.message`` as a fallback.
+    """
+    if partial_failure_error is None:
+        return {}
+    if not getattr(partial_failure_error, "code", 0):
+        return {}
+
+    details = getattr(partial_failure_error, "details", None) or []
+    out: dict = {}
+    try:
+        failure_msg = client.get_type("GoogleAdsFailure")
+        failure_pb_cls = type(failure_msg).pb(failure_msg).__class__
+        for detail in details:
+            value = getattr(detail, "value", None)
+            if value is None:
+                continue
+            failure = failure_pb_cls.FromString(value)
+            for err in failure.errors:
+                fpe = getattr(err.location, "field_path_elements", None)
+                if fpe:
+                    out[fpe[0].index] = err.message
+    except Exception:
+        pass
+    return out
+
+
+def _apply_attach_shared_set_to_campaigns(
+    client: object, cid: str, changes: dict
+) -> dict:
+    """Create CampaignSharedSet linkages for one shared set across campaigns.
+
+    Uses ``partial_failure=True`` so per-operation errors (e.g. attempting
+    to attach a list to a campaign that already has it) don't fail the
+    whole batch. Successful linkages are returned in ``resource_names``;
+    failed linkages are surfaced under ``failed_campaigns`` with the
+    originating campaign_id and per-op error message when parseable.
+    """
+    css_service = client.get_service("CampaignSharedSetService")
+    campaign_service = client.get_service("CampaignService")
+    shared_set_service = client.get_service("SharedSetService")
+
+    shared_set_resource = shared_set_service.shared_set_path(
+        cid, changes["shared_set_id"]
+    )
+
+    campaign_ids = list(changes["campaign_ids"])
+    operations = []
+    for campaign_id in campaign_ids:
+        op = client.get_type("CampaignSharedSetOperation")
+        css = op.create
+        css.campaign = campaign_service.campaign_path(cid, campaign_id)
+        css.shared_set = shared_set_resource
+        operations.append(op)
+
+    # partial_failure is not a flattened kwarg on the generated client's
+    # mutate method (only customer_id/operations are); it must be set on an
+    # explicit MutateCampaignSharedSetsRequest.
+    request = client.get_type("MutateCampaignSharedSetsRequest")
+    request.customer_id = cid
+    request.operations = operations
+    request.partial_failure = True
+    response = css_service.mutate_campaign_shared_sets(request=request)
+
+    pf_error = getattr(response, "partial_failure_error", None)
+    per_op_errors = _parse_partial_failure_per_op(client, pf_error)
+
+    succeeded: list = []
+    failed: list = []
+    for idx, result in enumerate(response.results):
+        if result.resource_name:
+            succeeded.append(result.resource_name)
+        else:
+            failed.append(
+                {
+                    "campaign_id": str(campaign_ids[idx]),
+                    "operation_index": idx,
+                    "error": per_op_errors.get(
+                        idx, "Unknown error (see partial_failure_message)"
+                    ),
+                }
+            )
+
+    out = {
+        "shared_set_resource": shared_set_resource,
+        "resource_names": succeeded,
+        "campaign_count": len(succeeded),
+    }
+    if failed:
+        out["partial_failure"] = True
+        out["failed_campaigns"] = failed
+        if pf_error is not None:
+            msg = getattr(pf_error, "message", "")
+            if msg:
+                out["partial_failure_message"] = msg
+    return out
+
+
+def _apply_detach_shared_set_from_campaigns(
+    client: object, cid: str, changes: dict
+) -> dict:
+    """Remove CampaignSharedSet linkages for one shared set across campaigns.
+
+    The CampaignSharedSet resource name has a composite ID of the form
+    ``{campaign_id}~{shared_set_id}`` so we can construct the resource path
+    directly without needing to look up the linkage first.
+
+    Uses ``partial_failure=True`` so per-operation errors (e.g. detaching
+    a non-existent linkage) don't fail the whole batch. Successful removals
+    are returned in ``removed_resource_names``; failed operations are
+    surfaced under ``failed_campaigns`` with the originating campaign_id
+    and per-op error message when parseable.
+    """
+    css_service = client.get_service("CampaignSharedSetService")
+
+    shared_set_id = changes["shared_set_id"]
+    campaign_ids = list(changes["campaign_ids"])
+    operations = []
+    for campaign_id in campaign_ids:
+        op = client.get_type("CampaignSharedSetOperation")
+        op.remove = (
+            f"customers/{cid}/campaignSharedSets/{campaign_id}~{shared_set_id}"
+        )
+        operations.append(op)
+
+    # See _apply_attach_shared_set_to_campaigns: partial_failure must be set
+    # on an explicit request object, not passed as a kwarg.
+    request = client.get_type("MutateCampaignSharedSetsRequest")
+    request.customer_id = cid
+    request.operations = operations
+    request.partial_failure = True
+    response = css_service.mutate_campaign_shared_sets(request=request)
+
+    pf_error = getattr(response, "partial_failure_error", None)
+    per_op_errors = _parse_partial_failure_per_op(client, pf_error)
+
+    succeeded: list = []
+    failed: list = []
+    for idx, result in enumerate(response.results):
+        if result.resource_name:
+            succeeded.append(result.resource_name)
+        else:
+            failed.append(
+                {
+                    "campaign_id": str(campaign_ids[idx]),
+                    "operation_index": idx,
+                    "error": per_op_errors.get(
+                        idx, "Unknown error (see partial_failure_message)"
+                    ),
+                }
+            )
+
+    out = {
+        "shared_set_id": shared_set_id,
+        "removed_resource_names": succeeded,
+        "campaign_count": len(succeeded),
+    }
+    if failed:
+        out["partial_failure"] = True
+        out["failed_campaigns"] = failed
+        if pf_error is not None:
+            msg = getattr(pf_error, "message", "")
+            if msg:
+                out["partial_failure_message"] = msg
+    return out

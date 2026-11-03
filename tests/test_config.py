@@ -47,3 +47,12 @@ class TestLoadConfig:
         monkeypatch.setenv("ADLOOP_CONFIG", str(tmp_path / "from-env.yaml"))
         config = load_config()
         assert config.source_path == str(tmp_path / "from-env.yaml")
+
+    def test_default_customer_can_be_pinned_by_environment(self, tmp_path, monkeypatch):
+        config_file = tmp_path / "config.yaml"
+        config_file.write_text("ads:\n  customer_id: '3683647410'\n")
+        monkeypatch.setenv("ADLOOP_DEFAULT_CUSTOMER_ID", "3865591631")
+
+        config = load_config(str(config_file))
+
+        assert config.ads.customer_id == "3865591631"

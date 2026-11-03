@@ -1,7 +1,7 @@
 [project]
 name = "adloop"
-version = "0.7.0"
-description = "Stop switching between Google Ads, GA4, and your code editor to figure out why conversions dropped."
+version = "0.9.0"
+description = "The AI command center for Google Ads, GA4, and tracking code."
 readme = "README.md"
 authors = [
     { name = "Daniel Klose", email = "info@daniel-klose.com" }

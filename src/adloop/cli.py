@@ -160,7 +160,12 @@ def _generate_config_yaml(
     if project_id:
         lines.append(f'  project_id: "{project_id}"')
     if credentials_path:
-        lines.append(f'  credentials_path: "{credentials_path}"')
+        # YAML treats `\` inside double-quoted strings as escape sequences (e.g.
+        # `\U` begins a Unicode escape, breaking Windows paths like `c:\Users\...`).
+        # Single-quoted strings are literal — backslashes are safe. Embedded
+        # single quotes (rare in paths) are escaped per YAML spec by doubling them.
+        escaped = credentials_path.replace("'", "''")
+        lines.append(f"  credentials_path: '{escaped}'")
     else:
         lines.append("  # Using built-in credentials (no credentials_path needed)")
     lines.append('  token_path: "~/.adloop/token.json"')
@@ -314,12 +319,33 @@ def run_init_wizard() -> None:
         return fallback
 
     # Step 1: Credentials mode
+    #
+    # We used to default to AdLoop's bundled OAuth credentials (zero-GCP
+    # setup, "Use built-in credentials? (recommended)" Y/N with Y as default).
+    # That stopped being safe once Google's 100-user cap on unverified OAuth
+    # apps was reached — new users picking the bundled option now hit a
+    # "This app is blocked" error at the consent screen, leaving them
+    # stranded mid-wizard with no path forward.
+    #
+    # Until Google completes verification, the wizard defaults to the
+    # "bring your own Google Cloud project" path (which has no cap and
+    # works immediately) and only offers the bundled path as an opt-in
+    # for existing users whose tokens predate the cap. We surface the
+    # status explicitly so people understand WHY the default flipped
+    # rather than wondering whether the wizard is broken.
     _step_header(1, "Google Credentials")
-    _print("  AdLoop includes built-in Google OAuth credentials so you")
-    _print("  don't need to create your own Google Cloud project.")
+    _print("  ⚠  AdLoop's built-in Google OAuth is currently blocked at")
+    _print("     Google's 100-user cap (pending OAuth verification).")
+    _print("     New sign-ins will fail with \"This app is blocked\".")
+    _print("     Status: https://github.com/kLOsk/adloop/discussions/13")
+    _print()
+    _print("  The wizard will set you up with your own Google Cloud")
+    _print("  project instead — takes ~5 minutes, no cap, works today.")
     _print()
     use_bundled = _prompt_bool(
-        "Use built-in credentials? (recommended)", default=True
+        "Use built-in credentials anyway? (only works if you already "
+        "authorized AdLoop before the cap)",
+        default=False,
     )
 
     credentials_path = ""

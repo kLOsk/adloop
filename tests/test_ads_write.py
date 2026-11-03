@@ -120,6 +120,77 @@ def test_update_ad_group_requires_a_change(config):
     assert "No changes specified" in result["details"][0]
 
 
+def test_update_ad_group_max_cpc_target_spend_message(config, monkeypatch):
+    """TARGET_SPEND (Maximize Clicks) refusal must point at update_campaign.
+
+    Regression for issue #31: the old message said "max_cpc requires an ad
+    group in a MANUAL_CPC campaign" which sounded like a tool limitation.
+    Maximize Clicks just ignores ad-group bids — the real next step is to
+    set the campaign-level CPC ceiling via update_campaign.
+    """
+    monkeypatch.setattr(
+        write,
+        "_ad_group_campaign_bidding_strategy",
+        lambda *_args: "TARGET_SPEND",
+    )
+
+    result = write.update_ad_group(
+        config,
+        customer_id="123-456-7890",
+        ad_group_id="2002",
+        max_cpc=1.50,
+    )
+
+    assert result["error"] == "Validation failed"
+    detail = result["details"][0]
+    assert "Maximize Clicks" in detail
+    assert "TARGET_SPEND" in detail
+    assert "update_campaign" in detail
+    assert "No change made" in detail
+
+
+def test_update_ad_group_max_cpc_automated_strategy_message(config, monkeypatch):
+    """Automated bidding strategies should name the strategy in the error."""
+    monkeypatch.setattr(
+        write,
+        "_ad_group_campaign_bidding_strategy",
+        lambda *_args: "MAXIMIZE_CONVERSIONS",
+    )
+
+    result = write.update_ad_group(
+        config,
+        customer_id="123-456-7890",
+        ad_group_id="2002",
+        max_cpc=1.50,
+    )
+
+    assert result["error"] == "Validation failed"
+    detail = result["details"][0]
+    assert "MAXIMIZE_CONVERSIONS" in detail
+    assert "no-op" in detail.lower() or "effective_cpc_bid_micros" in detail
+    assert "No change made" in detail
+
+
+def test_update_ad_group_max_cpc_allowed_for_manual_cpc(config, monkeypatch):
+    """Manual CPC keeps the existing happy path — bid passes validation."""
+    monkeypatch.setattr(
+        write,
+        "_ad_group_campaign_bidding_strategy",
+        lambda *_args: "MANUAL_CPC",
+    )
+
+    result = write.update_ad_group(
+        config,
+        customer_id="123-456-7890",
+        ad_group_id="2002",
+        max_cpc=1.50,
+    )
+
+    assert result.get("error") is None, result
+    assert result["operation"] == "update_ad_group"
+    assert result["changes"]["max_cpc"] == 1.50
+
+
 def test_draft_campaign_normalizes_display_expansion_alias(config):
     result = write.draft_campaign(
         config,
@@ -430,6 +501,133 @@ def test_apply_update_campaign_sets_network_field_masks():
     }
     assert operation.update.network_settings.target_search_network is True
     assert operation.update.network_settings.target_content_network is False
+
+
+def test_apply_update_campaign_geo_replace_excludes_negative_criteria():
+    """Regression for issue #32: positive-geo replacement must not touch
+    negative location criteria. The GAQL query used to find criteria to
+    remove must filter on ``campaign_criterion.negative = FALSE``, otherwise
+    negative geo exclusions get swept up and silently deleted.
+
+    Previously, adding a new country to ``geo_target_ids`` would remove an
+    unrelated USA exclusion (criterion 2840, negative=True); users only
+    noticed when US traffic started showing up in reports.
+    """
+    captured_queries: list[str] = []
+    positive_geo_resource = (
+        "customers/1234567890/campaignCriteria/1001~aaa"
+    )
+
+    class _FakeSearchableService(_FakeGoogleAdsService):
+        def search(self, customer_id: str, query: str):
+            captured_queries.append(query)
+            return [
+                SimpleNamespace(
+                    campaign_criterion=SimpleNamespace(
+                        resource_name=positive_geo_resource
+                    )
+                )
+            ]
+
+    google_ads_service = _FakeSearchableService(
+        [
+            _FakeMutateOperationResponse(
+                "campaign_criterion_result",
+                "customers/1234567890/campaignCriteria/x",
+            )
+        ]
+    )
+    client = _FakeClient(
+        {
+            "GoogleAdsService": google_ads_service,
+            "CampaignService": _FakePathService("campaigns"),
+        }
+    )
+
+    write._apply_update_campaign(
+        client,
+        "1234567890",
+        {"campaign_id": "1001", "geo_target_ids": ["2276"]},
+    )
+
+    # The remove-existing query MUST scope on negative=FALSE so existing
+    # negative exclusions survive. If this assertion ever flips, issue #32
+    # has regressed and users will lose their geo exclusions silently.
+    assert len(captured_queries) == 1
+    query = captured_queries[0]
+    assert "campaign_criterion.negative = FALSE" in query
+    assert "campaign_criterion.type = 'LOCATION'" in query
+
+    # One remove op for the existing positive, one create op for the new
+    # geo — and crucially, no remove op for any negative criterion. We
+    # check the underlying protobuf oneof selector via `_pb.WhichOneof`
+    # because proto-plus wrappers don't expose `WhichOneof` directly.
+    ops = google_ads_service.operations
+    remove_ops = [
+        op for op in ops
+        if op.campaign_criterion_operation._pb.WhichOneof("operation") == "remove"
+    ]
+    create_ops = [
+        op for op in ops
+        if op.campaign_criterion_operation._pb.WhichOneof("operation") == "create"
+    ]
+    assert len(remove_ops) == 1
+    assert remove_ops[0].campaign_criterion_operation.remove == positive_geo_resource
+    assert len(create_ops) == 1
+    assert (
+        create_ops[0].campaign_criterion_operation.create.location.geo_target_constant
+        == "geoTargetConstants/2276"
+    )
+
+
+def test_update_campaign_preview_surfaces_preserved_negative_geo_exclusions(
+    config, monkeypatch
+):
+    """Preview must surface preserved negative geo exclusions when
+    geo_target_ids is being changed (issue #32).
+
+    Lists the IDs that will survive the replacement so the change is
+    explicit in the preview rather than silently happening behind the
+    scenes.
+    """
+    monkeypatch.setattr(
+        write,
+        "_existing_negative_geo_exclusions",
+        lambda *_args: ["2840", "2826"],
+    )
+
+    result = write.update_campaign(
+        config,
+        customer_id="123-456-7890",
+        campaign_id="1001",
+        geo_target_ids=["2276"],
+    )
+
+    assert "warnings" in result
+    assert any("PRESERVED" in w for w in result["warnings"])
+    # Surface the preserved set programmatically too, sorted for stability.
+    assert result.get("preserved_negative_geo_target_ids") == ["2826", "2840"]
+
+
+def test_update_campaign_preview_no_preservation_key_when_no_negatives(
+    config, monkeypatch
+):
+    """The preserved-set key only appears when there's something to preserve."""
+    monkeypatch.setattr(
+        write, "_existing_negative_geo_exclusions", lambda *_args: []
+    )
+
+    result = write.update_campaign(
+        config,
+        customer_id="123-456-7890",
+        campaign_id="1001",
+        geo_target_ids=["2276"],
+    )
+
+    assert "preserved_negative_geo_target_ids" not in result
+    assert not any(
+        "PRESERVED" in w for w in result.get("warnings", [])
+    )
 
 
 def test_apply_update_campaign_sets_target_spend_cpc_cap():
@@ -1415,3 +1613,271 @@ class TestValidateRsaPinning:
             "https://example.com/",
         )
         assert any("exceeds 90 chars" in e for e in errs)
+
+
+# ---------------------------------------------------------------------------
+# attach_shared_set_to_campaigns / detach_shared_set_from_campaigns
+# ---------------------------------------------------------------------------
+
+
+class TestAttachSharedSetValidation:
+    def test_rejects_missing_shared_set_id(self, config):
+        result = write.attach_shared_set_to_campaigns(
+            config, customer_id="123-456-7890", campaign_ids=["1001"]
+        )
+        assert result["error"] == "Validation failed"
+        assert "shared_set_id is required" in result["details"]
+
+    def test_rejects_non_numeric_shared_set_id(self, config):
+        result = write.attach_shared_set_to_campaigns(
+            config,
+            customer_id="123-456-7890",
+            shared_set_id="abc",
+            campaign_ids=["1001"],
+        )
+        assert result["error"] == "Validation failed"
+        assert any("shared_set_id" in d and "numeric" in d for d in result["details"])
+
+    def test_rejects_empty_campaign_ids(self, config):
+        result = write.attach_shared_set_to_campaigns(
+            config,
+            customer_id="123-456-7890",
+            shared_set_id="9001",
+            campaign_ids=[],
+        )
+        assert result["error"] == "Validation failed"
+        assert "At least one campaign_id is required" in result["details"]
+
+    def test_rejects_non_numeric_campaign_id(self, config):
+        result = write.attach_shared_set_to_campaigns(
+            config,
+            customer_id="123-456-7890",
+            shared_set_id="9001",
+            campaign_ids=["1001", "abc"],
+        )
+        assert result["error"] == "Validation failed"
+        assert any("'abc'" in d and "numeric" in d for d in result["details"])
+
+    def test_dedups_campaign_ids(self, config):
+        result = write.attach_shared_set_to_campaigns(
+            config,
+            customer_id="123-456-7890",
+            shared_set_id="9001",
+            campaign_ids=["1001", "1002", "1001", " 1003 "],
+        )
+        assert result["operation"] == "attach_shared_set_to_campaigns"
+        assert result["changes"]["campaign_ids"] == ["1001", "1002", "1003"]
+
+    def test_returns_preview_with_plan_id(self, config):
+        result = write.attach_shared_set_to_campaigns(
+            config,
+            customer_id="123-456-7890",
+            shared_set_id="9001",
+            campaign_ids=["1001"],
+        )
+        assert "plan_id" in result
+        assert result["entity_type"] == "campaign_shared_set"
+        assert result["entity_id"] == "9001"
+        assert result["changes"]["shared_set_id"] == "9001"
+
+
+class TestDetachSharedSetValidation:
+    def test_rejects_missing_shared_set_id(self, config):
+        result = write.detach_shared_set_from_campaigns(
+            config, customer_id="123-456-7890", campaign_ids=["1001"]
+        )
+        assert result["error"] == "Validation failed"
+        assert "shared_set_id is required" in result["details"]
+
+    def test_returns_preview_with_plan_id(self, config):
+        result = write.detach_shared_set_from_campaigns(
+            config,
+            customer_id="123-456-7890",
+            shared_set_id="9001",
+            campaign_ids=["1001", "1002"],
+        )
+        assert "plan_id" in result
+        assert result["operation"] == "detach_shared_set_from_campaigns"
+        assert result["entity_type"] == "campaign_shared_set"
+        assert result["changes"]["campaign_ids"] == ["1001", "1002"]
+
+
+def test_apply_attach_shared_set_to_campaigns_creates_one_op_per_campaign():
+    captured: dict = {}
+
+    def _mutate(request):
+        captured["customer_id"] = request.customer_id
+        captured["operations"] = list(request.operations)
+        captured["partial_failure"] = request.partial_failure
+        return SimpleNamespace(
+            results=[
+                SimpleNamespace(
+                    resource_name=f"customers/{request.customer_id}/campaignSharedSets/{i}~9001"
+                )
+                for i, _ in enumerate(request.operations, start=1001)
+            ],
+            partial_failure_error=SimpleNamespace(code=0, message="", details=[]),
+        )
+
+    css_service = SimpleNamespace(mutate_campaign_shared_sets=_mutate)
+    campaign_service = _FakePathService("campaigns")
+    shared_set_service = SimpleNamespace(
+        shared_set_path=lambda cid, ssid: f"customers/{cid}/sharedSets/{ssid}"
+    )
+
+    client = _FakeClient(
+        {
+            "CampaignSharedSetService": css_service,
+            "CampaignService": campaign_service,
+            "SharedSetService": shared_set_service,
+        }
+    )
+
+    result = write._apply_attach_shared_set_to_campaigns(
+        client,
+        "1234567890",
+        {"shared_set_id": "9001", "campaign_ids": ["1001", "1002", "1003"]},
+    )
+
+    assert captured["customer_id"] == "1234567890"
+    assert captured["partial_failure"] is True
+    assert len(captured["operations"]) == 3
+    op0 = captured["operations"][0]
+    assert op0.create.campaign == "customers/1234567890/campaigns/1001"
+    assert op0.create.shared_set == "customers/1234567890/sharedSets/9001"
+    assert result["campaign_count"] == 3
+    assert len(result["resource_names"]) == 3
+    assert "partial_failure" not in result
+    assert "failed_campaigns" not in result
+
+
+def test_apply_attach_shared_set_to_campaigns_surfaces_partial_failure():
+    """When a subset of attach ops fail, succeeded ones return resource_names
+    and failed ones surface in failed_campaigns with their campaign_id."""
+
+    def _mutate(request):
+        # Op #1 (index 1, campaign_id "1002") fails — empty resource_name.
+        return SimpleNamespace(
+            results=[
+                SimpleNamespace(
+                    resource_name=f"customers/{request.customer_id}/campaignSharedSets/1001~9001"
+                ),
+                SimpleNamespace(resource_name=""),
+                SimpleNamespace(
+                    resource_name=f"customers/{request.customer_id}/campaignSharedSets/1003~9001"
+                ),
+            ],
+            partial_failure_error=SimpleNamespace(
+                code=3,
+                message="Some operations failed",
+                details=[],
+            ),
+        )
+
+    css_service = SimpleNamespace(mutate_campaign_shared_sets=_mutate)
+    campaign_service = _FakePathService("campaigns")
+    shared_set_service = SimpleNamespace(
+        shared_set_path=lambda cid, ssid: f"customers/{cid}/sharedSets/{ssid}"
+    )
+
+    client = _FakeClient(
+        {
+            "CampaignSharedSetService": css_service,
+            "CampaignService": campaign_service,
+            "SharedSetService": shared_set_service,
+        }
+    )
+
+    result = write._apply_attach_shared_set_to_campaigns(
+        client,
+        "1234567890",
+        {"shared_set_id": "9001", "campaign_ids": ["1001", "1002", "1003"]},
+    )
+
+    assert result["campaign_count"] == 2
+    assert result["resource_names"] == [
+        "customers/1234567890/campaignSharedSets/1001~9001",
+        "customers/1234567890/campaignSharedSets/1003~9001",
+    ]
+    assert result["partial_failure"] is True
+    assert result["partial_failure_message"] == "Some operations failed"
+    assert len(result["failed_campaigns"]) == 1
+    failed = result["failed_campaigns"][0]
+    assert failed["campaign_id"] == "1002"
+    assert failed["operation_index"] == 1
+    assert "error" in failed
+
+
+def test_apply_detach_shared_set_from_campaigns_uses_composite_resource_name():
+    captured: dict = {}
+
+    def _mutate(request):
+        captured["customer_id"] = request.customer_id
+        captured["operations"] = list(request.operations)
+        captured["partial_failure"] = request.partial_failure
+        return SimpleNamespace(
+            results=[
+                SimpleNamespace(resource_name=op.remove)
+                for op in request.operations
+            ],
+            partial_failure_error=SimpleNamespace(code=0, message="", details=[]),
+        )
+
+    css_service = SimpleNamespace(mutate_campaign_shared_sets=_mutate)
+    client = _FakeClient({"CampaignSharedSetService": css_service})
+
+    result = write._apply_detach_shared_set_from_campaigns(
+        client,
+        "1234567890",
+        {"shared_set_id": "9001", "campaign_ids": ["1001", "1002"]},
+    )
+
+    assert captured["customer_id"] == "1234567890"
+    assert captured["partial_failure"] is True
+    ops = captured["operations"]
+    assert len(ops) == 2
+    assert ops[0].remove == "customers/1234567890/campaignSharedSets/1001~9001"
+    assert ops[1].remove == "customers/1234567890/campaignSharedSets/1002~9001"
+    assert result["shared_set_id"] == "9001"
+    assert result["campaign_count"] == 2
+    assert "partial_failure" not in result
+    assert "failed_campaigns" not in result
+
+
+def test_apply_detach_shared_set_from_campaigns_surfaces_partial_failure():
+    """When a detach op targets a non-existent linkage, that op fails but
+    the others succeed and the result surfaces both."""
+
+    def _mutate(request):
+        # Op #0 (campaign_id "1001") fails — empty resource_name.
+        return SimpleNamespace(
+            results=[
+                SimpleNamespace(resource_name=""),
+                SimpleNamespace(resource_name=request.operations[1].remove),
+            ],
+            partial_failure_error=SimpleNamespace(
+                code=3,
+                message="Some operations failed",
+                details=[],
+            ),
+        )
+
+    css_service = SimpleNamespace(mutate_campaign_shared_sets=_mutate)
+    client = _FakeClient({"CampaignSharedSetService": css_service})
+
+    result = write._apply_detach_shared_set_from_campaigns(
+        client,
+        "1234567890",
+        {"shared_set_id": "9001", "campaign_ids": ["1001", "1002"]},
+    )
+
+    assert result["campaign_count"] == 1
+    assert result["removed_resource_names"] == [
+        "customers/1234567890/campaignSharedSets/1002~9001",
+    ]
+    assert result["partial_failure"] is True
+    assert result["partial_failure_message"] == "Some operations failed"
+    assert len(result["failed_campaigns"]) == 1
+    failed = result["failed_campaigns"][0]
+    assert failed["campaign_id"] == "1001"
+    assert failed["operation_index"] == 0

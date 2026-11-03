@@ -83,6 +83,15 @@ def load_config(config_path: str | None = None) -> AdLoopConfig:
     ads_raw = raw.get("ads", {})
     safety_raw = raw.get("safety", {})
 
+    # A profile-local launcher can pin the safe operating customer without
+    # copying OAuth material or the Google Ads developer token out of the
+    # shared AdLoop config. The server separately rejects cross-customer write
+    # requests when ADLOOP_ALLOWED_CUSTOMER_ID is set.
+    customer_id = str(
+        os.environ.get("ADLOOP_DEFAULT_CUSTOMER_ID", ads_raw.get("customer_id", ""))
+        or ""
+    )
+
     return AdLoopConfig(
         google=GoogleConfig(
             project_id=google_raw.get("project_id", ""),
@@ -94,7 +103,7 @@ def load_config(config_path: str | None = None) -> AdLoopConfig:
         ),
         ads=AdsConfig(
             developer_token=ads_raw.get("developer_token", ""),
-            customer_id=ads_raw.get("customer_id", ""),
+            customer_id=customer_id,
             login_customer_id=ads_raw.get("login_customer_id", ""),
         ),
         safety=SafetyConfig(

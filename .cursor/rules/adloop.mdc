@@ -103,6 +103,8 @@ These tools call both APIs internally and return unified results with computed `
 | `add_negative_keywords` | Propose negative keywords directly on a campaign (does NOT add) | `campaign_id`, keyword list, `match_type` |
 | `propose_negative_keyword_list` | Draft a shared negative keyword list and attach it to a campaign (does NOT create) | `campaign_id`, `list_name`, keyword list, `match_type` |
 | `add_to_negative_keyword_list` | Append keywords to an EXISTING shared negative keyword list (does NOT add) | `shared_set_id` (from `get_negative_keyword_lists`), keyword list, `match_type` |
+| `attach_shared_set_to_campaigns` | Attach an EXISTING shared set (e.g. shared negative keyword list) to one or more campaigns. Use after creating a campaign to inherit pre-built negatives. | `shared_set_id` (from `get_negative_keyword_lists`), `campaign_ids` list |
+| `detach_shared_set_from_campaigns` | Detach a shared set from one or more campaigns. Removes only the linkage; the shared set and its keywords stay intact. | `shared_set_id`, `campaign_ids` list |
 | `pause_entity` | Propose pausing campaign/ad group/ad/keyword | `entity_type`, `entity_id` |
 | `enable_entity` | Propose enabling paused entity | `entity_type`, `entity_id` |
 | `remove_entity` | Propose REMOVING an entity (irreversible) | `entity_type` (incl. "negative_keyword", "shared_criterion", "campaign_asset", "asset", "customer_asset"), `entity_id` |
@@ -121,7 +123,7 @@ These tools call both APIs internally and return unified results with computed `
 - `display_network_enabled` is the canonical Search display-expansion flag. `display_expansion_enabled` is only a compatibility alias and should be normalized away before presenting the plan to the user.
 - `update_ad_group` is the right tool for later MANUAL_CPC bid changes. Use `update_campaign` for TARGET_SPEND (Maximize Clicks) `max_cpc` changes.
 - Ad-group pause/enable is already handled by `pause_entity` / `enable_entity` with `entity_type="ad_group"`; do not invent a separate pause tool.
-- `update_campaign` replaces geo/language targets entirely (not append). Pass the full desired list.
+- `update_campaign` replaces POSITIVE geo/language targets entirely (not append). Pass the full desired list. NEGATIVE geo exclusions (criteria with `negative=TRUE`) are **preserved** across a positive-geo replacement — they survive the swap. The preview surfaces preserved negative geo IDs in `preserved_negative_geo_target_ids` so the change is auditable. To remove a negative geo exclusion explicitly, use `remove_entity` with `entity_type="campaign_criterion"`.
 - `remove_entity` is IRREVERSIBLE — always prefer `pause_entity` unless the user explicitly wants permanent removal. Removal triggers double confirmation in the safety layer.
 - `remove_entity` supports `entity_type` values: "campaign", "ad_group", "ad", "keyword", "negative_keyword", "shared_criterion", "campaign_asset", "asset", "customer_asset". Use "negative_keyword" to remove campaign-level negative keywords. Use "shared_criterion" to remove a keyword from a shared negative keyword list — the `entity_id` format is "sharedSetId~criterionId" (use the `resource_id` field from `get_negative_keyword_list_keywords`). Use "campaign_asset" to remove sitelinks and other asset links from a campaign. Use "asset" to remove a standalone asset. Use "customer_asset" to remove a customer-level asset link.
 - `require_dry_run: true` in config overrides `dry_run=false` — the user must change the config to allow real mutations.
@@ -240,6 +242,7 @@ Most websites (especially in the EU) use a GDPR cookie consent banner. This has 
    - Add ads via `draft_responsive_search_ad` (with display paths set)
    - Add sitelinks via `draft_sitelinks` (at least 4 recommended)
    - If the user needs multiple ad groups (e.g., different keyword themes), use `draft_ad_group` to add additional ad groups after the initial campaign is created and confirmed
+   - **If a shared negative keyword list already exists** for the account (check via `get_negative_keyword_lists`), call `attach_shared_set_to_campaigns` so the new campaign inherits historical waste-blockers. New campaigns don't auto-inherit shared lists — this step is easy to forget.
    - Enable the campaign via `enable_entity` only after ads and sitelinks are in place
 8. Wait for explicit user approval before calling `confirm_and_apply`
 
@@ -299,6 +302,7 @@ Most websites (especially in the EU) use a GDPR cookie consent banner. This has 
    - **Create a new shared list** (`propose_negative_keyword_list`): creates a named, reusable list and attaches it to a campaign. Only use this when no suitable list exists yet.
 6. **Before calling `propose_negative_keyword_list`**, always call `get_negative_keyword_lists` first to check whether a suitable list already exists. If a matching list is found, inspect its keywords via `get_negative_keyword_list_keywords` and check which campaigns it is already on via `get_negative_keyword_list_campaigns`. If the list exists and just needs more keywords, call `add_to_negative_keyword_list` instead of creating a duplicate. Creating duplicate lists wastes account resources and makes management harder.
 7. **Before calling `add_to_negative_keyword_list`**, call `get_negative_keyword_list_keywords` to see what's already in the list — avoid re-adding existing terms. Duplicate keyword additions will fail at apply time with a Google Ads error.
+8. **Attaching an existing shared list to new campaigns**: use `attach_shared_set_to_campaigns` with `shared_set_id` from `get_negative_keyword_lists` and the list of `campaign_ids` you want covered. Most common right after `draft_campaign` — newly-built campaigns don't auto-inherit shared lists. Use `get_negative_keyword_list_campaigns` first to skip campaigns that already have the linkage. Use `detach_shared_set_from_campaigns` to undo. Both go through the standard draft → preview → `confirm_and_apply` flow.
 8. **To remove a keyword from a shared list**, use `remove_entity` with `entity_type="shared_criterion"` and pass the `resource_id` returned by `get_negative_keyword_list_keywords` as `entity_id`. This is irreversible — always confirm with the user first.
 9. Present preview and wait for confirmation
 

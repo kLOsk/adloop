@@ -3,10 +3,14 @@
 from __future__ import annotations
 
 import functools
-from typing import Callable
+import inspect
+import json
+import os
+from typing import Annotated, Callable
 
 from fastmcp import FastMCP
 from mcp.types import ToolAnnotations
+from pydantic import BeforeValidator
 
 from adloop import _mcp_patches, diagnostics
 from adloop.config import load_config
@@ -18,16 +22,189 @@ _READONLY = ToolAnnotations(readOnlyHint=True, destructiveHint=False)
 _WRITE = ToolAnnotations(readOnlyHint=False, destructiveHint=False)
 _DESTRUCTIVE = ToolAnnotations(readOnlyHint=False, destructiveHint=True)
 
+
+def _coerce_json_string_to_list(value):
+    """Decode a JSON-array-shaped string into a native list.
+
+    Some MCP clients (Cowork at the time of writing — see issue #28)
+    serialize list-typed tool arguments as JSON-encoded strings rather
+    than native arrays. Pydantic v2 rejects those calls with
+    ``Input should be a valid list`` because string→list isn't a default
+    coercion. This validator detects the pattern (``"[...]"``) and decodes
+    it to an actual list so the standard list validator can proceed.
+
+    Anything that isn't a JSON-encoded list passes through untouched —
+    so legitimate native arrays and ``None`` are unaffected. The fix is
+    invisible to the JSON schema (``Annotated`` metadata isn't included
+    in schema generation), so well-behaved clients keep sending arrays.
+    """
+    if isinstance(value, str):
+        try:
+            decoded = json.loads(value)
+        except (json.JSONDecodeError, ValueError):
+            return value
+        if isinstance(decoded, list):
+            return decoded
+    return value
+
+
+# JSON-string-tolerant list aliases. Applied to every tool parameter that
+# accepts a list so the server works equally well against clients that
+# send native arrays and clients that pre-serialize them as JSON strings.
+_StrList = Annotated[list[str], BeforeValidator(_coerce_json_string_to_list)]
+_StrListOpt = Annotated[
+    list[str] | None, BeforeValidator(_coerce_json_string_to_list)
+]
+_DictList = Annotated[list[dict], BeforeValidator(_coerce_json_string_to_list)]
+_DictListOpt = Annotated[
+    list[dict] | None, BeforeValidator(_coerce_json_string_to_list)
+]
+
+def _build_orchestration_instructions() -> str:
+    """Compact orchestration hint sent via MCP ``InitializeResult.instructions``.
+
+    Per the MCP spec, ``instructions`` is described as "a hint to the model" —
+    not a place to dump a 50KB manual. So we send a curated, ~500-token subset
+    covering the rules that matter most when used **without** the full
+    orchestration rules loaded (e.g. in MCP clients that don't pick up project
+    rules). The full ruleset stays canonical at:
+
+      - ``.cursor/rules/adloop.mdc`` (Cursor — auto-loaded as a workspace rule)
+      - ``.claude/rules/adloop.md`` (Claude Code in this repo)
+      - ``~/.claude/CLAUDE.md`` (after the user runs ``adloop install-rules``)
+
+    Clients that honor ``instructions`` (Claude Code, VSCode Copilot, Goose,
+    Cursor v1.6+) will inject this hint into the LLM's system prompt
+    automatically — so even users running AdLoop without any per-project
+    rules file get the absolute must-knows around safety, dry-run defaults,
+    and the most common cost-burning mistakes.
+    """
+    return (
+        "AdLoop connects Google Ads + Google Analytics (GA4) + your codebase. "
+        "These are the *minimum* orchestration rules — the full ruleset lives "
+        "in `.cursor/rules/adloop.mdc` or `~/.claude/CLAUDE.md` (run "
+        "`adloop install-rules` to install globally). Read these before using "
+        "any write tool.\n\n"
+        "SAFETY (always):\n"
+        "- Every write tool returns a PREVIEW with a `plan_id`. Show the "
+        "preview to the user and wait for explicit approval before calling "
+        "`confirm_and_apply`.\n"
+        "- Default to `dry_run=true` on `confirm_and_apply`. Only set "
+        "`dry_run=false` after the user explicitly approves the preview. "
+        "`require_dry_run` in config can override this.\n"
+        "- Respect the config's `max_daily_budget` cap.\n"
+        "- New campaigns and RSAs are created PAUSED. The user must enable "
+        "them after review.\n"
+        "- One change at a time — don't batch unrelated writes.\n\n"
+        "PRE-WRITE CHECKS (before any `draft_*`):\n"
+        "- BROAD match keywords require Smart Bidding (MAXIMIZE_CONVERSIONS, "
+        "tCPA, tROAS). Refuse BROAD on MANUAL_CPC. This is the #1 cause of "
+        "wasted ad spend.\n"
+        "- Verify `final_url` exists before creating ads or sitelinks. URLs "
+        "to 404 pages destroy quality score.\n"
+        "- If a campaign has zero conversions and high spend, fix tracking "
+        "before adding more ads/keywords. Don't just throw budget at it.\n"
+        "- If keyword quality scores are <5, fix ad relevance and landing "
+        "pages before adding more keywords.\n\n"
+        "DATA LITERACY:\n"
+        "- Ads clicks > GA4 sessions is normal in EU markets due to GDPR "
+        "consent rejection (typically 30-70% of users opt out). It's not a "
+        "tracking bug. Use `analyze_campaign_conversions` and "
+        "`attribution_check` — they factor this in.\n"
+        "- `cost_micros / 1,000,000` = actual currency. Read tools "
+        "auto-compute `metrics.cost`; only `run_gaql` returns raw micros.\n"
+        "- New campaigns MUST have `geo_target_ids` and `language_ids` set. "
+        "Untargeted campaigns waste budget.\n\n"
+        "For full orchestration patterns (when to call which tools, GAQL "
+        "reference, language-specific copy guidance, PMax handling, "
+        "shared-set lifecycle, RSA pinning trade-offs), see the canonical "
+        "rules file."
+    )
+
+
 mcp = FastMCP(
     "AdLoop",
-    instructions=(
-        "AdLoop connects Google Ads and Google Analytics (GA4) data to your "
-        "codebase. Use the read tools to analyze performance, and the write "
-        "tools (with safety confirmation) to manage campaigns."
-    ),
+    instructions=_build_orchestration_instructions(),
 )
 
 _config = load_config()
+
+
+_WRITE_TOOL_NAMES = {
+    "draft_campaign",
+    "draft_pmax_campaign",
+    "draft_pmax_asset_group",
+    "draft_ad_group",
+    "update_campaign",
+    "draft_responsive_search_ad",
+    "draft_keywords",
+    "add_negative_keywords",
+    "propose_negative_keyword_list",
+    "add_to_negative_keyword_list",
+    "attach_shared_set_to_campaigns",
+    "detach_shared_set_from_campaigns",
+    "update_ad_group",
+    "draft_callouts",
+    "draft_structured_snippets",
+    "draft_image_assets",
+    "pause_entity",
+    "enable_entity",
+    "remove_entity",
+    "draft_sitelinks",
+}
+
+
+def _normalize_customer_id(customer_id: str) -> str:
+    """Compare customer IDs independent of punctuation."""
+    return str(customer_id).replace("-", "").replace(" ", "")
+
+
+def _enforce_write_customer(fn_name: str, kwargs: dict) -> None:
+    """Default and lock draft tools to a profile-configured customer, if set."""
+    if fn_name not in _WRITE_TOOL_NAMES:
+        return
+
+    allowed_customer_id = os.environ.get("ADLOOP_ALLOWED_CUSTOMER_ID", "")
+    if not allowed_customer_id:
+        return
+
+    requested_customer_id = kwargs.get("customer_id", "")
+    if requested_customer_id and (
+        _normalize_customer_id(requested_customer_id)
+        != _normalize_customer_id(allowed_customer_id)
+    ):
+        raise RuntimeError(
+            f"{fn_name} is restricted to customer_id "
+            f"{_normalize_customer_id(allowed_customer_id)} for this AdLoop seat."
+        )
+
+    kwargs["customer_id"] = allowed_customer_id
+
+
+def _normalize_property_id(property_id: str) -> str:
+    """Compare GA4 property IDs independent of a ``properties/`` prefix."""
+    return str(property_id).strip().removeprefix("properties/")
+
+
+def _enforce_ga4_property(fn: Callable, kwargs: dict) -> None:
+    """Default and lock every GA4 call to a profile-configured property, if set.
+
+    Applies to any tool whose signature takes ``property_id``. With
+    ADLOOP_ALLOWED_GA4_PROPERTY_ID set, an empty or omitted property_id is
+    filled with the allowed one and any other property is rejected before
+    an API call is made.
+    """
+    allowed = os.environ.get("ADLOOP_ALLOWED_GA4_PROPERTY_ID", "")
+    if not allowed or "property_id" not in inspect.signature(fn).parameters:
+        return
+    requested = kwargs.get("property_id", "")
+    if requested and _normalize_property_id(requested) != _normalize_property_id(allowed):
+        raise RuntimeError(
+            f"GA4 access is restricted to property {_normalize_property_id(allowed)} "
+            f"for this AdLoop seat."
+        )
+    # The GA4 Data API requires the resource form ``properties/<id>``.
+    kwargs["property_id"] = f"properties/{_normalize_property_id(allowed)}"
 
 
 def _structured_error(fn_name: str, exc: Exception) -> dict:
@@ -96,6 +273,8 @@ def _safe(fn: Callable) -> Callable:
     @functools.wraps(fn)
     def wrapper(*args, **kwargs):
         try:
+            _enforce_write_customer(fn.__name__, kwargs)
+            _enforce_ga4_property(fn, kwargs)
             return fn(*args, **kwargs)
         except RuntimeError as e:
             return {"error": str(e)}
@@ -212,8 +391,8 @@ def get_account_summaries() -> dict:
 @mcp.tool(annotations=_READONLY)
 @_safe
 def run_ga4_report(
-    dimensions: list[str] | None = None,
-    metrics: list[str] | None = None,
+    dimensions: _StrListOpt = None,
+    metrics: _StrListOpt = None,
     date_range_start: str = "7daysAgo",
     date_range_end: str = "today",
     property_id: str = "",
@@ -243,8 +422,8 @@ def run_ga4_report(
 @mcp.tool(annotations=_READONLY)
 @_safe
 def run_realtime_report(
-    dimensions: list[str] | None = None,
-    metrics: list[str] | None = None,
+    dimensions: _StrListOpt = None,
+    metrics: _StrListOpt = None,
     property_id: str = "",
 ) -> dict:
     """Run a GA4 realtime report showing current active users and events.
@@ -283,6 +462,68 @@ def get_tracking_events(
         date_range_start=date_range_start,
         date_range_end=date_range_end,
     )
+
+
+def _allowed_key_event_names() -> set[str]:
+    raw = os.environ.get("ADLOOP_ALLOWED_KEY_EVENT_NAMES", "")
+    return {n.strip() for n in raw.split(",") if n.strip()}
+
+
+@mcp.tool(annotations=_WRITE)
+@_safe
+def create_ga4_key_event(
+    event_name: str,
+    property_id: str = "",
+    counting_method: str = "ONCE_PER_EVENT",
+) -> dict:
+    """Mark one GA4 event as a key event (Admin API keyEvents.create).
+
+    Seat-locked: refuses unless ADLOOP_ALLOWED_GA4_PROPERTY_ID is set (the
+    property guard pins the property) and event_name is listed in
+    ADLOOP_ALLOWED_KEY_EVENT_NAMES. Idempotent: if the key event already
+    exists it is returned and nothing is created.
+    """
+    if not os.environ.get("ADLOOP_ALLOWED_GA4_PROPERTY_ID", ""):
+        raise RuntimeError(
+            "create_ga4_key_event requires ADLOOP_ALLOWED_GA4_PROPERTY_ID on this seat."
+        )
+    allowed_names = _allowed_key_event_names()
+    if event_name not in allowed_names:
+        raise RuntimeError(
+            f"Key event '{event_name}' is not allowed for this AdLoop seat "
+            f"(ADLOOP_ALLOWED_KEY_EVENT_NAMES={sorted(allowed_names)})."
+        )
+    if counting_method not in ("ONCE_PER_EVENT", "ONCE_PER_SESSION"):
+        raise RuntimeError("counting_method must be ONCE_PER_EVENT or ONCE_PER_SESSION.")
+
+    from google.analytics.admin_v1beta import KeyEvent
+
+    from adloop.ga4.client import get_admin_client
+
+    client = get_admin_client(_config)
+    for existing in client.list_key_events(parent=property_id):
+        if existing.event_name == event_name:
+            return {
+                "created": False,
+                "already_exists": True,
+                "name": existing.name,
+                "event_name": existing.event_name,
+                "counting_method": existing.counting_method.name,
+            }
+    created = client.create_key_event(
+        parent=property_id,
+        key_event=KeyEvent(
+            event_name=event_name,
+            counting_method=KeyEvent.CountingMethod[counting_method],
+        ),
+    )
+    return {
+        "created": True,
+        "name": created.name,
+        "event_name": created.event_name,
+        "counting_method": created.counting_method.name,
+        "create_time": str(created.create_time),
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -482,7 +723,7 @@ def get_negative_keyword_list_campaigns(
 @_safe
 def get_recommendations(
     customer_id: str = "",
-    recommendation_types: list[str] | None = None,
+    recommendation_types: _StrListOpt = None,
     campaign_id: str = "",
 ) -> dict:
     """Retrieve Google's auto-generated recommendations with estimated impact.
@@ -689,7 +930,7 @@ def attribution_check(
     date_range_end: str = "",
     customer_id: str = "",
     property_id: str = "",
-    conversion_events: list[str] | None = None,
+    conversion_events: _StrListOpt = None,
 ) -> dict:
     """Compare Ads-reported conversions vs GA4 — find tracking discrepancies.
 
@@ -748,14 +989,14 @@ def draft_campaign(
     campaign_name: str,
     daily_budget: float,
     bidding_strategy: str,
-    geo_target_ids: list[str],
-    language_ids: list[str],
+    geo_target_ids: _StrList,
+    language_ids: _StrList,
     customer_id: str = "",
     target_cpa: float = 0,
     target_roas: float = 0,
     channel_type: str = "SEARCH",
     ad_group_name: str = "",
-    keywords: list[dict] | None = None,
+    keywords: _DictListOpt = None,
     search_partners_enabled: bool = False,
     display_network_enabled: bool | None = None,
     display_expansion_enabled: bool | None = None,
@@ -811,10 +1052,101 @@ def draft_campaign(
 
 @mcp.tool(annotations=_WRITE)
 @_safe
+def draft_pmax_campaign(
+    campaign_name: str,
+    daily_budget: float,
+    geo_target_ids: _StrList,
+    language_ids: _StrList,
+    customer_id: str = "",
+    brand_exclusions: _StrListOpt = None,
+) -> dict:
+    """Draft a Performance Max campaign. Returns a PREVIEW, creates nothing.
+
+    Always built PAUSED (there is no status argument and it can never be
+    ENABLED here). Creates a non-shared CampaignBudget, a PERFORMANCE_MAX
+    campaign with Maximize Conversions (no target), Final URL expansion and
+    auto-generated assets OFF, geo targeting set to PRESENCE only, location
+    and language criteria, and an optional brand exclusion list resolved from
+    brand_exclusions names.
+
+    geo_target_ids: geo target constant IDs. language_ids: e.g. ["1000"].
+    Add the asset group with draft_pmax_asset_group. Run confirm_and_apply
+    with validate_only=true first, then with dry_run=false to apply.
+    """
+    from adloop.ads.pmax_write import draft_pmax_campaign as _impl
+
+    return _impl(
+        _config,
+        customer_id=customer_id or _config.ads.customer_id,
+        campaign_name=campaign_name,
+        daily_budget=daily_budget,
+        geo_target_ids=geo_target_ids,
+        language_ids=language_ids,
+        brand_exclusions=brand_exclusions,
+    )
+
+
+@mcp.tool(annotations=_WRITE)
+@_safe
+def draft_pmax_asset_group(
+    campaign_id: str,
+    asset_group_name: str,
+    final_url: str,
+    headlines: _StrList,
+    long_headlines: _StrList,
+    descriptions: _StrList,
+    business_name: str,
+    images: dict | None = None,
+    customer_id: str = "",
+    call_to_action: str = "",
+    search_themes: _StrListOpt = None,
+    audience_id: str = "",
+    path1: str = "",
+    path2: str = "",
+) -> dict:
+    """Draft a PMax asset group on an existing campaign. Returns a PREVIEW.
+
+    Validates everything, including local image files (type, pixels, aspect
+    ratio, size), BEFORE any upload, and returns the full list of unmet
+    Google minimums if any.
+
+    headlines: 3-15, max 30 chars. long_headlines: 1-5, max 90.
+    descriptions: 2-5, max 90, at least one <= 60. business_name: max 25.
+    images: {"landscape": [paths 1.91:1 min 600x314], "square": [paths 1:1
+      min 300x300], "logo": [paths 1:1 min 128x128],
+      "landscape_logo": [optional paths 4:1 min 512x128]}. Landscape,
+      square and logo need at least 1 each.
+    call_to_action: e.g. CONTACT_US. search_themes: audience-signal themes.
+    audience_id: optional existing Audience resource ID used as the signal.
+    The asset group is created PAUSED.
+    """
+    from adloop.ads.pmax_write import draft_pmax_asset_group as _impl
+
+    return _impl(
+        _config,
+        customer_id=customer_id or _config.ads.customer_id,
+        campaign_id=campaign_id,
+        asset_group_name=asset_group_name,
+        final_url=final_url,
+        headlines=headlines,
+        long_headlines=long_headlines,
+        descriptions=descriptions,
+        business_name=business_name,
+        images=images,
+        call_to_action=call_to_action,
+        search_themes=search_themes,
+        audience_id=audience_id,
+        path1=path1,
+        path2=path2,
+    )
+
+
+@mcp.tool(annotations=_WRITE)
+@_safe
 def draft_ad_group(
     campaign_id: str,
     ad_group_name: str,
-    keywords: list[dict] | None = None,
+    keywords: _DictListOpt = None,
     customer_id: str = "",
     cpc_bid_micros: int = 0,
 ) -> dict:
@@ -851,8 +1183,8 @@ def update_campaign(
     target_cpa: float = 0,
     target_roas: float = 0,
     daily_budget: float = 0,
-    geo_target_ids: list[str] | None = None,
-    language_ids: list[str] | None = None,
+    geo_target_ids: _StrListOpt = None,
+    language_ids: _StrListOpt = None,
     search_partners_enabled: bool | None = None,
     display_network_enabled: bool | None = None,
     display_expansion_enabled: bool | None = None,
@@ -946,7 +1278,7 @@ def draft_responsive_search_ad(
 @_safe
 def draft_keywords(
     ad_group_id: str,
-    keywords: list[dict],
+    keywords: _DictList,
     customer_id: str = "",
 ) -> dict:
     """Draft keyword additions — returns a PREVIEW, does NOT add keywords.
@@ -968,7 +1300,7 @@ def draft_keywords(
 @_safe
 def add_negative_keywords(
     campaign_id: str,
-    keywords: list[str],
+    keywords: _StrList,
     customer_id: str = "",
     match_type: str = "EXACT",
 ) -> dict:
@@ -994,7 +1326,7 @@ def add_negative_keywords(
 def propose_negative_keyword_list(
     campaign_id: str,
     list_name: str,
-    keywords: list[str],
+    keywords: _StrList,
     customer_id: str = "",
     match_type: str = "EXACT",
 ) -> dict:
@@ -1021,7 +1353,7 @@ def propose_negative_keyword_list(
 @_safe
 def add_to_negative_keyword_list(
     shared_set_id: str,
-    keywords: list[str],
+    keywords: _StrList,
     customer_id: str = "",
     match_type: str = "EXACT",
 ) -> dict:
@@ -1052,6 +1384,68 @@ def add_to_negative_keyword_list(
 
 @mcp.tool(annotations=_WRITE)
 @_safe
+def attach_shared_set_to_campaigns(
+    shared_set_id: str,
+    campaign_ids: _StrList,
+    customer_id: str = "",
+) -> dict:
+    """Attach an existing shared set to one or more campaigns — returns a PREVIEW.
+
+    Creates CampaignSharedSet linkages so the campaigns inherit the shared
+    set's criteria (e.g. negative keywords). Most commonly used to attach a
+    shared negative keyword list to newly-built campaigns.
+
+    Use ``get_negative_keyword_lists`` to find the shared_set_id, and
+    ``get_negative_keyword_list_campaigns`` to inspect existing attachments.
+
+    shared_set_id: numeric ID from get_negative_keyword_lists.
+    campaign_ids: list of numeric campaign IDs to attach the set to.
+
+    Call confirm_and_apply with the returned plan_id to execute.
+    """
+    from adloop.ads.write import attach_shared_set_to_campaigns as _impl
+
+    return _impl(
+        _config,
+        customer_id=customer_id or _config.ads.customer_id,
+        shared_set_id=shared_set_id,
+        campaign_ids=campaign_ids,
+    )
+
+
+@mcp.tool(annotations=_WRITE)
+@_safe
+def detach_shared_set_from_campaigns(
+    shared_set_id: str,
+    campaign_ids: _StrList,
+    customer_id: str = "",
+) -> dict:
+    """Detach a shared set from one or more campaigns — returns a PREVIEW.
+
+    Removes CampaignSharedSet linkages so the campaigns no longer inherit the
+    shared set's criteria. The shared set itself is unchanged; only the
+    per-campaign attachment is removed.
+
+    Use ``get_negative_keyword_list_campaigns`` to inspect existing attachments
+    before detaching.
+
+    shared_set_id: numeric ID from get_negative_keyword_lists.
+    campaign_ids: list of numeric campaign IDs to detach the set from.
+
+    Call confirm_and_apply with the returned plan_id to execute.
+    """
+    from adloop.ads.write import detach_shared_set_from_campaigns as _impl
+
+    return _impl(
+        _config,
+        customer_id=customer_id or _config.ads.customer_id,
+        shared_set_id=shared_set_id,
+        campaign_ids=campaign_ids,
+    )
+
+
+@mcp.tool(annotations=_WRITE)
+@_safe
 def update_ad_group(
     ad_group_id: str,
     customer_id: str = "",
@@ -1074,7 +1468,7 @@ def update_ad_group(
 @_safe
 def draft_callouts(
     campaign_id: str,
-    callouts: list[str],
+    callouts: _StrList,
     customer_id: str = "",
 ) -> dict:
     """Draft campaign callout assets — returns a PREVIEW."""
@@ -1092,7 +1486,7 @@ def draft_callouts(
 @_safe
 def draft_structured_snippets(
     campaign_id: str,
-    snippets: list[dict],
+    snippets: _DictList,
     customer_id: str = "",
 ) -> dict:
     """Draft campaign structured snippet assets — returns a PREVIEW."""
@@ -1110,7 +1504,7 @@ def draft_structured_snippets(
 @_safe
 def draft_image_assets(
     campaign_id: str,
-    image_paths: list[str],
+    image_paths: _StrList,
     customer_id: str = "",
 ) -> dict:
     """Draft campaign image assets from local PNG, JPEG, or GIF files."""
@@ -1189,7 +1583,7 @@ def remove_entity(
 ) -> dict:
     """Draft REMOVING an entity — returns a PREVIEW. This is IRREVERSIBLE.
 
-    entity_type: "campaign", "ad_group", "ad", "keyword", "negative_keyword",
+    entity_type: "campaign", "ad_group", "ad", "ad_group_ad", "keyword", "negative_keyword",
                  "shared_criterion", "campaign_asset", "asset", or "customer_asset"
     entity_id: The resource ID.
                For keywords: "adGroupId~criterionId"
@@ -1220,7 +1614,7 @@ def remove_entity(
 @_safe
 def draft_sitelinks(
     campaign_id: str,
-    sitelinks: list[dict],
+    sitelinks: _DictList,
     customer_id: str = "",
 ) -> dict:
     """Draft sitelink extensions for a campaign — returns a PREVIEW.
@@ -1254,8 +1648,12 @@ def draft_sitelinks(
 def confirm_and_apply(
     plan_id: str,
     dry_run: bool = True,
+    validate_only: bool = False,
 ) -> dict:
     """Execute a previously previewed change.
+
+    validate_only=true (PMax plans only) asks Google to validate the full
+    mutation without creating anything; the plan stays pending.
 
     IMPORTANT: Defaults to dry_run=True. You MUST explicitly pass dry_run=false
     to make real changes to the Google Ads account.
@@ -1271,6 +1669,11 @@ def confirm_and_apply(
 
     The plan_id comes from a prior draft_* or pause/enable tool call.
     """
+    if validate_only:
+        from adloop.ads.write import validate_plan_only
+
+        return validate_plan_only(_config, plan_id=plan_id)
+
     from adloop.ads.write import confirm_and_apply as _impl
 
     return _impl(_config, plan_id=plan_id, dry_run=dry_run)
@@ -1284,7 +1687,7 @@ def confirm_and_apply(
 @mcp.tool(annotations=_READONLY)
 @_safe
 def validate_tracking(
-    expected_events: list[str],
+    expected_events: _StrList,
     property_id: str = "",
     date_range_start: str = "28daysAgo",
     date_range_end: str = "today",
@@ -1347,7 +1750,7 @@ def generate_tracking_code(
 @mcp.tool(annotations=_READONLY)
 @_safe
 def estimate_budget(
-    keywords: list[dict],
+    keywords: _DictList,
     daily_budget: float = 0,
     geo_target_id: str = "2276",
     language_id: str = "1000",
@@ -1382,7 +1785,7 @@ def estimate_budget(
 @mcp.tool(annotations=_READONLY)
 @_safe
 def discover_keywords(
-    seed_keywords: list[str] = [],  # noqa: B006 — mutable default required for MCP JSON schema
+    seed_keywords: _StrList = [],  # noqa: B006 — mutable default required for MCP JSON schema
     url: str = "",
     geo_target_id: str = "2276",
     language_id: str = "1000",
