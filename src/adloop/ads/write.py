@@ -2275,6 +2275,7 @@ def update_campaign(
     tracking_url_template: str | None = None,
     final_url_suffix: str | None = None,
     url_custom_parameters: list[dict] | None = None,
+    keyword_match_type: str = "",
 ) -> dict:
     """Draft an update to an existing campaign — returns preview, does NOT execute.
 
@@ -2283,6 +2284,8 @@ def update_campaign(
     A location option change shows the current value next to the new one.
     URL options: None leaves one unchanged, an empty string or list clears it;
     the preview shows the current values and an example click URL.
+    keyword_match_type BROAD (campaign-level broad match on) needs Smart
+    Bidding and a double confirmation; UNSPECIFIED turns it off.
     """
     from adloop.safety.guards import (
         SafetyViolation,
@@ -2314,6 +2317,13 @@ def update_campaign(
         tracking_url_template, final_url_suffix, url_custom_parameters
     )
     errors.extend(url_errors)
+
+    keyword_match_type = (keyword_match_type or "").strip().upper()
+    if keyword_match_type and keyword_match_type not in _CAMPAIGN_KEYWORD_MATCH_TYPES:
+        errors.append(
+            "keyword_match_type must be BROAD (campaign-level broad match on) or "
+            f"UNSPECIFIED (off), got '{keyword_match_type}'"
+        )
 
     campaign_id = str(campaign_id or "").strip()
     if not campaign_id:
@@ -2373,6 +2383,7 @@ def update_campaign(
         location_option,
         negative_location_option,
         url_options,
+        keyword_match_type,
     ])
     if not has_any_change:
         errors.append("No changes specified — provide at least one parameter to update")
@@ -2446,6 +2457,33 @@ def update_campaign(
             }
             url_example = _example_click_urls(current_urls["final_url"], effective)
 
+    current_match: dict = {}
+    broad_on = False
+    leaves_smart = bool(bs) and bs not in _SMART_BIDDING_STRATEGIES
+    if keyword_match_type or leaves_smart:
+        current_match = _current_keyword_match_type(config, customer_id, campaign_id)
+        if current_match is None:
+            return {"error": f"Campaign {campaign_id} was not found in this account"}
+        is_broad = current_match["keyword_match_type"] == "BROAD"
+        broad_on = keyword_match_type == "BROAD" and not is_broad
+        # Same rule as BROAD keywords: no broad match without Smart Bidding. A
+        # bidding change in the same plan counts, since both apply in one mutate.
+        broad_error = _broad_match_bidding_error(
+            keyword_match_type, bs, current_match["bidding_strategy"], is_broad
+        )
+        if broad_error:
+            return {"error": "Validation failed", "details": [broad_error]}
+        if broad_on:
+            warnings.append(_BROAD_ON_WARNING)
+        if keyword_match_type == "UNSPECIFIED" and is_broad:
+            warnings.append(_BROAD_OFF_WARNING)
+            if leaves_smart:
+                warnings.append(
+                    f"Under {bs} the keywords already converted to broad match "
+                    "keep matching broadly without Smart Bidding. Replace them with "
+                    "phrase or exact match keywords."
+                )
+
     # A budget can be shared by several campaigns, and a portfolio bid
     # strategy too: say who else a budget change reaches, and that a bidding
     # change takes the campaign out of its portfolio. Both need a double
@@ -2516,6 +2554,12 @@ def update_campaign(
         if field in url_options:
             changes[f"current_{field}"] = current_urls[field]
             changes[field] = url_options[field]
+
+    if keyword_match_type:
+        changes["current_keyword_match_type"] = current_match["keyword_match_type"]
+        changes["keyword_match_type"] = keyword_match_type
+    if broad_on:
+        requires_double_confirm = True
 
     plan = ChangePlan(
         operation="update_campaign",
@@ -3811,6 +3855,97 @@ def _example_click_urls(final_url: str, options: dict) -> dict:
     return example
 
 
+# campaign.keyword_match_type: BROAD makes every keyword in the campaign match
+# as broad; UNSPECIFIED (the default) leaves each keyword's own match type.
+_CAMPAIGN_KEYWORD_MATCH_TYPES = {"BROAD", "UNSPECIFIED"}
+
+_BROAD_ON_WARNING = (
+    "Turning campaign-level broad match on CONVERTS every existing phrase and exact "
+    "match keyword in this campaign into broad match; Google shows the originals as "
+    "Removed, and turning the setting off later does not restore them. Since "
+    "September 2026 Google also upgrades campaigns with this setting to AI Max. "
+    "Ads can show on searches the keyword list never named: check search terms "
+    "daily after this goes live."
+)
+_BROAD_OFF_WARNING = (
+    "Turning campaign-level broad match off stops further keywords being converted, "
+    "but keywords already converted stay broad match and the original phrase and "
+    "exact keywords are not restored; re-add them by hand. If Google upgraded the "
+    "campaign to AI Max, check get_campaign_settings: this does not turn it off."
+)
+
+
+def _current_keyword_match_type(
+    config: AdLoopConfig, customer_id: str, campaign_id: str
+) -> dict | None:
+    """The campaign's keyword match type and bidding strategy; None when it does not exist."""
+    from adloop.ads.gaql import execute_query
+
+    rows = execute_query(config, customer_id, (
+        "SELECT campaign.keyword_match_type, campaign.bidding_strategy_type "
+        f"FROM campaign WHERE campaign.id = {campaign_id}"))
+    if not rows:
+        return None
+    return {
+        "keyword_match_type": rows[0].get("campaign.keyword_match_type") or "UNSPECIFIED",
+        "bidding_strategy": rows[0].get("campaign.bidding_strategy_type") or "",
+    }
+
+
+def _broad_match_bidding_error(
+    keyword_match_type: str, new_strategy: str, current_strategy: str, is_broad: bool
+) -> str:
+    """Why this combination would leave broad match without Smart Bidding, or ""."""
+    strategy = new_strategy or current_strategy
+    if keyword_match_type == "BROAD" and strategy not in _SMART_BIDDING_STRATEGIES:
+        return (
+            "Campaign-level broad match requires Smart Bidding "
+            f"(tCPA/tROAS/Maximize Conversions); this campaign uses {strategy}. "
+            "Broad match without Smart Bidding leads to irrelevant matches and "
+            "wasted budget. Switch the campaign to Smart Bidding first."
+        )
+    if (
+        new_strategy and new_strategy not in _SMART_BIDDING_STRATEGIES
+        and is_broad and keyword_match_type != "UNSPECIFIED"
+    ):
+        return (
+            "This campaign has campaign-level broad match on, which needs Smart "
+            f"Bidding. To move it to {new_strategy}, turn broad match off in the same "
+            'call (keyword_match_type="UNSPECIFIED") so both change in one mutate.'
+        )
+    return ""
+
+
+def _check_broad_match_bidding(service, cid: str, changes: dict) -> None:
+    """Re-check the broad match / Smart Bidding rule against the account at apply.
+
+    The draft checked it, but two plans applied in reverse order, or a bidding
+    change in the UI, could otherwise leave broad match on a non-Smart strategy.
+    Runs in the dry run too: the validate-only client passes reads through.
+    """
+    match_type = changes.get("keyword_match_type") or ""
+    new_strategy = changes.get("bidding_strategy") or ""
+    leaves_smart = bool(new_strategy) and new_strategy not in _SMART_BIDDING_STRATEGIES
+    if match_type != "BROAD" and not (leaves_smart and match_type != "UNSPECIFIED"):
+        return
+    campaign_id = changes["campaign_id"]
+    rows = list(service.search(customer_id=cid, query=(
+        "SELECT campaign.bidding_strategy_type, campaign.keyword_match_type "
+        f"FROM campaign WHERE campaign.id = {campaign_id}")))
+    if not rows:
+        raise ValueError(f"Campaign {campaign_id} not found")
+    campaign = rows[0].campaign
+    current_strategy = getattr(campaign.bidding_strategy_type, "name", campaign.bidding_strategy_type)
+    current_match = getattr(campaign.keyword_match_type, "name", campaign.keyword_match_type)
+    error = _broad_match_bidding_error(
+        match_type, new_strategy, str(current_strategy), str(current_match) == "BROAD"
+    )
+    if error:
+        raise RuntimeError(
+            f"Campaign {campaign_id} changed after this preview; nothing was sent. {error}"
+        )
+
+
 def _validate_campaign(
     config: AdLoopConfig,
     *,
@@ -4698,6 +4833,7 @@ def _apply_update_campaign(client: object, cid: str, changes: dict) -> dict:
     campaign_id = changes["campaign_id"]
     resource_name = campaign_service.campaign_path(cid, campaign_id)
     _check_budget_and_bidding_unchanged(service, cid, changes)
+    _check_broad_match_bidding(service, cid, changes)
 
     # Bid strategy and campaign-level setting changes
     bs = changes.get("bidding_strategy")
@@ -4706,6 +4842,7 @@ def _apply_update_campaign(client: object, cid: str, changes: dict) -> dict:
     location_option = changes.get("location_option")
     negative_location_option = changes.get("negative_location_option")
     url_fields = [field for field in _URL_OPTION_FIELDS if field in changes]
+    keyword_match_type = changes.get("keyword_match_type")
     if (
         bs
         or search_partners_enabled is not None
@@ -4714,6 +4851,7 @@ def _apply_update_campaign(client: object, cid: str, changes: dict) -> dict:
         or location_option
         or negative_location_option
         or url_fields
+        or keyword_match_type
     ):
         campaign_op = client.get_type("MutateOperation")
         campaign = campaign_op.campaign_operation.update
@@ -4778,6 +4916,12 @@ def _apply_update_campaign(client: object, cid: str, changes: dict) -> dict:
         for param in changes.get("url_custom_parameters") or []:
             campaign.url_custom_parameters.append(_custom_parameter(client, param))
         field_paths.extend(url_fields)
+        if keyword_match_type:
+            # UNSPECIFIED under the mask clears the setting.
+            campaign.keyword_match_type = getattr(
+                client.enums.CampaignKeywordMatchTypeEnum, keyword_match_type
+            )
+            field_paths.append("keyword_match_type")
 
         if field_paths:
             campaign_op.campaign_operation.update_mask.CopyFrom(
