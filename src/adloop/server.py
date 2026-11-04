@@ -134,6 +134,7 @@ _WRITE_TOOL_NAMES = {
     "draft_campaign",
     "draft_pmax_campaign",
     "draft_pmax_asset_group",
+    "draft_pmax_url_expansion",
     "draft_ad_group",
     "update_campaign",
     "draft_responsive_search_ad",

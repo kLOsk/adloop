@@ -366,7 +366,7 @@ class TestServerGuards:
     def test_new_tools_are_customer_locked(self, monkeypatch):
         from adloop import server
 
-        for name in ("draft_pmax_campaign", "draft_pmax_asset_group"):
+        for name in ("draft_pmax_campaign", "draft_pmax_asset_group", "draft_pmax_url_expansion"):
             assert name in server._WRITE_TOOL_NAMES
             monkeypatch.setenv("ADLOOP_ALLOWED_CUSTOMER_ID", "3865591631")
             with pytest.raises(RuntimeError, match="restricted to customer_id"):
