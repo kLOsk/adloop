@@ -374,3 +374,104 @@ class TestServerGuards:
             kw = {}
             server._enforce_write_customer(name, kw)
             assert kw["customer_id"] == "3865591631"
+
+
+class TestRemoveAssetGroup:
+    def test_draft_accepts_asset_group(self, config):
+        r = remove_entity(config, customer_id="3865591631", entity_type="asset_group", entity_id="6768635345")
+        assert r["entity_type"] == "asset_group"
+        assert r["changes"] == {"action": "REMOVE"}
+        remove_plan(r["plan_id"])
+
+    def test_apply_builds_asset_group_remove_op(self, real_client):
+        svc = MagicMock()
+        real_client.get_service = MagicMock(return_value=svc)
+        out = _apply_remove(real_client, "3865591631", "asset_group", "6768635345")
+        req = svc.mutate.call_args.kwargs["request"]
+        assert req.validate_only is False
+        assert req.mutate_operations[0].asset_group_operation.remove == "customers/3865591631/assetGroups/6768635345"
+        assert out["status"] == "removed"
+
+    def test_validate_only_routes_asset_group_removal(self, config, real_client):
+        svc = MagicMock()
+        real_client.get_service = MagicMock(return_value=svc)
+        r = remove_entity(config, customer_id="386-559-1631", entity_type="asset_group", entity_id="6768635345")
+        with patch("adloop.ads.client.get_ads_client", return_value=real_client):
+            out = validate_plan_only(config, plan_id=r["plan_id"])
+        assert out["status"] == "VALIDATE_ONLY_OK"
+        assert svc.mutate.call_args.kwargs["request"].validate_only is True
+        assert out["result"]["status"] == "validated"
+        assert get_plan(r["plan_id"]) is not None
+        remove_plan(r["plan_id"])
+
+    def test_validate_only_still_rejects_other_removals(self, config):
+        r = remove_entity(config, customer_id="1", entity_type="campaign", entity_id="5")
+        assert "error" in validate_plan_only(config, plan_id=r["plan_id"])
+        remove_plan(r["plan_id"])
+
+
+class TestUrlExpansion:
+    def test_read_reports_state(self, config):
+        from adloop.ads import pmax
+
+        rows = [{
+            "campaign.id": 24427159679, "campaign.name": "x", "campaign.status": "PAUSED",
+            "campaign.asset_automation_settings": [
+                {"asset_automation_type": "FINAL_URL_EXPANSION_TEXT_ASSET_AUTOMATION",
+                 "asset_automation_status": "OPTED_OUT"},
+                {"asset_automation_type": "TEXT_ASSET_AUTOMATION", "asset_automation_status": "OPTED_IN"},
+            ],
+        }]
+        with patch("adloop.ads.gaql.execute_query", return_value=rows) as q:
+            out = pmax.get_pmax_url_expansion(config, customer_id="1", campaign_id="24427159679")
+        assert "campaign.id = 24427159679" in q.call_args.args[2]
+        assert "url_expansion_opt_out" not in q.call_args.args[2]
+        assert out["campaigns"][0]["final_url_expansion"] == "OPTED_OUT"
+
+    def test_read_not_set_and_bad_id(self, config):
+        from adloop.ads import pmax
+
+        with patch("adloop.ads.gaql.execute_query", return_value=[{"campaign.id": 1}]):
+            assert pmax.get_pmax_url_expansion(config, customer_id="1")["campaigns"][0]["final_url_expansion"] == "NOT_SET"
+        assert "error" in pmax.get_pmax_url_expansion(config, customer_id="1", campaign_id="1 OR 1=1")
+
+    def test_draft(self, config):
+        r = pmax_write.draft_pmax_url_expansion(config, customer_id="1", campaign_id="9")
+        assert r["changes"]["status"] == "OPTED_OUT"
+        remove_plan(r["plan_id"])
+        assert "error" in pmax_write.draft_pmax_url_expansion(config, customer_id="1", campaign_id="x")
+
+    def test_apply_preserves_other_settings_and_sets_mask(self, real_client):
+        svc = MagicMock()
+        paths = MagicMock(campaign_path=lambda c, i: f"customers/{c}/campaigns/{i}")
+        real_client.get_service = MagicMock(side_effect=lambda n: svc if n == "GoogleAdsService" else paths)
+        other = real_client.get_type("Campaign").AssetAutomationSetting()
+        other.asset_automation_type = real_client.enums.AssetAutomationTypeEnum.TEXT_ASSET_AUTOMATION
+        other.asset_automation_status = real_client.enums.AssetAutomationStatusEnum.OPTED_IN
+        row = MagicMock(); row.campaign.asset_automation_settings = [other]
+        svc.search_stream.return_value = [MagicMock(results=[row])]
+        out = pmax_write.apply_update_pmax_url_expansion(
+            real_client, "1", {"campaign_id": "9", "status": "OPTED_OUT"}, validate_only=True
+        )
+        req = svc.mutate.call_args.kwargs["request"]
+        assert req.validate_only is True
+        u = req.mutate_operations[0].campaign_operation
+        got = {s.asset_automation_type.name: s.asset_automation_status.name for s in u.update.asset_automation_settings}
+        assert got == {"TEXT_ASSET_AUTOMATION": "OPTED_IN", "FINAL_URL_EXPANSION_TEXT_ASSET_AUTOMATION": "OPTED_OUT"}
+        assert list(u.update_mask.paths) == ["asset_automation_settings"]
+        assert out["status"] == "OPTED_OUT"
+
+    def test_read_parses_text_proto_strings_as_returned_by_execute_query(self, config):
+        from adloop.ads import pmax
+
+        rows = [{
+            "campaign.id": 1, "campaign.name": "n", "campaign.status": "PAUSED",
+            "campaign.asset_automation_settings": [
+                "asset_automation_type: FINAL_URL_EXPANSION_TEXT_ASSET_AUTOMATION\nasset_automation_status: OPTED_OUT\n",
+                "asset_automation_type: TEXT_ASSET_AUTOMATION\nasset_automation_status: OPTED_IN\n",
+            ],
+        }]
+        with patch("adloop.ads.gaql.execute_query", return_value=rows):
+            c = pmax.get_pmax_url_expansion(config, customer_id="1")["campaigns"][0]
+        assert c["final_url_expansion"] == "OPTED_OUT"
+        assert c["asset_automation_settings"]["TEXT_ASSET_AUTOMATION"] == "OPTED_IN"

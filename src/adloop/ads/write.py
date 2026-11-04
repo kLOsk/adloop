@@ -776,6 +776,7 @@ def remove_entity(
     - ``campaign_asset``: ``campaignId~assetId~fieldType``
     - ``customer_asset``: ``assetId~fieldType``
     - ``asset``: bare asset ID
+    - ``asset_group``: bare PMax asset group ID
 
     This is a DESTRUCTIVE operation — removed entities cannot be re-enabled.
     Prefer ``pause_entity`` unless the user explicitly wants permanent removal.
@@ -1507,7 +1508,7 @@ def confirm_and_apply(
 _VALID_MATCH_TYPES = {"EXACT", "PHRASE", "BROAD"}
 _VALID_ENTITY_TYPES = {"campaign", "ad_group", "ad", "keyword"}
 _REMOVABLE_ENTITY_TYPES = _VALID_ENTITY_TYPES | {
-    "ad_group_ad",
+    "ad_group_ad", "asset_group",
     "negative_keyword", "campaign_asset", "asset", "customer_asset",
     "shared_criterion",
 }
@@ -2158,6 +2159,7 @@ def _execute_plan(config: AdLoopConfig, plan: object) -> dict:
         "create_sitelinks": _apply_create_sitelinks,
         "create_pmax_campaign": _apply_create_pmax_campaign,
         "create_pmax_asset_group": _apply_create_pmax_asset_group,
+        "update_pmax_url_expansion": _apply_update_pmax_url_expansion,
     }
 
     handler = dispatch.get(plan.operation)
@@ -2177,6 +2179,12 @@ def _execute_plan(config: AdLoopConfig, plan: object) -> dict:
         return handler(client, cid, plan.entity_type, plan.entity_id)
 
     return handler(client, cid, plan.changes)
+
+
+def _apply_update_pmax_url_expansion(client: object, cid: str, changes: dict) -> dict:
+    from adloop.ads.pmax_write import apply_update_pmax_url_expansion
+
+    return apply_update_pmax_url_expansion(client, cid, changes)
 
 
 def _apply_create_pmax_campaign(client: object, cid: str, changes: dict) -> dict:
@@ -2207,12 +2215,21 @@ def validate_plan_only(config: AdLoopConfig, *, plan_id: str) -> dict:
     plan = get_plan(plan_id)
     if plan is None:
         return {"error": f"No pending plan found with id '{plan_id}'."}
+    from adloop.ads.pmax_write import apply_update_pmax_url_expansion
+
     fn = {
         "create_pmax_campaign": apply_create_pmax_campaign,
         "create_pmax_asset_group": apply_create_pmax_asset_group,
+        "update_pmax_url_expansion": apply_update_pmax_url_expansion,
     }.get(plan.operation)
+    if plan.operation == "remove_entity" and plan.entity_type == "asset_group":
+        eid = plan.entity_id
+
+        def fn(client, cid, changes, validate_only=False):
+            return _apply_remove(client, cid, "asset_group", eid, validate_only=validate_only)
+
     if fn is None:
-        return {"error": f"validate_only is supported for PMax plans only, not '{plan.operation}'."}
+        return {"error": f"validate_only is supported for PMax plans and asset_group removal only, not '{plan.operation}'."}
     client = get_ads_client(config)
     try:
         result = fn(client, normalize_customer_id(plan.customer_id), plan.changes, validate_only=True)
@@ -2723,8 +2740,25 @@ def _apply_remove(
     cid: str,
     entity_type: str,
     entity_id: str,
+    validate_only: bool = False,
 ) -> dict:
     """Remove an entity via the REMOVE mutate operation (irreversible)."""
+    if entity_type == "asset_group":
+        ga_service = client.get_service("GoogleAdsService")
+        op = client.get_type("MutateOperation")
+        resource_name = f"customers/{cid}/assetGroups/{entity_id}"
+        op.asset_group_operation.remove = resource_name
+        request = client.get_type("MutateGoogleAdsRequest")
+        request.customer_id = cid
+        request.mutate_operations.append(op)
+        request.validate_only = bool(validate_only)
+        ga_service.mutate(request=request)
+        return {
+            "resource_name": resource_name,
+            "status": "validated" if validate_only else "removed",
+            "validate_only": bool(validate_only),
+        }
+
     if entity_type == "campaign":
         service = client.get_service("CampaignService")
         operation = client.get_type("CampaignOperation")

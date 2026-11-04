@@ -255,3 +255,68 @@ def get_detailed_asset_performance(
         "total_combinations": len(combinations),
         "insights": insights,
     }
+
+
+def get_pmax_url_expansion(
+    config: AdLoopConfig, *, customer_id: str = "", campaign_id: str = ""
+) -> dict:
+    """Return Final URL expansion state per PMax campaign.
+
+    Reads ``campaign.asset_automation_settings``; the deprecated
+    ``campaign.url_expansion_opt_out`` is not queryable on current API versions.
+    """
+    from adloop.ads.gaql import execute_query
+
+    where = (
+        "campaign.advertising_channel_type = 'PERFORMANCE_MAX' "
+        "AND campaign.status != 'REMOVED'"
+    )
+    if campaign_id:
+        if not str(campaign_id).isdigit():
+            return {"error": "campaign_id must be numeric"}
+        where += f" AND campaign.id = {campaign_id}"
+    rows = execute_query(
+        config,
+        customer_id,
+        "SELECT campaign.id, campaign.name, campaign.status, "
+        f"campaign.asset_automation_settings FROM campaign WHERE {where}",
+    )
+    campaigns = []
+    for r in rows:
+        settings = _normalize_automation(r.get("campaign.asset_automation_settings"))
+        campaigns.append(
+            {
+                "campaign_id": r.get("campaign.id"),
+                "name": r.get("campaign.name"),
+                "status": r.get("campaign.status"),
+                "final_url_expansion": settings.get(
+                    "FINAL_URL_EXPANSION_TEXT_ASSET_AUTOMATION", "NOT_SET"
+                ),
+                "asset_automation_settings": settings,
+            }
+        )
+    return {"campaigns": campaigns, "total": len(campaigns)}
+
+
+def _normalize_automation(raw: object) -> dict:
+    """Flatten repeated AssetAutomationSetting into {type: status}."""
+    out: dict = {}
+    for item in raw or []:
+        if isinstance(item, str):
+            # execute_query stringifies messages: "asset_automation_type: X\nasset_automation_status: Y"
+            kv = dict(
+                (p.split(":", 1)[0].strip(), p.split(":", 1)[1].strip())
+                for p in item.splitlines()
+                if ":" in p
+            )
+            t = kv.get("asset_automation_type")
+            st = kv.get("asset_automation_status")
+        elif isinstance(item, dict):
+            t = item.get("asset_automation_type")
+            st = item.get("asset_automation_status")
+        else:
+            t = getattr(item, "asset_automation_type", None)
+            st = getattr(item, "asset_automation_status", None)
+        if t is not None:
+            out[str(getattr(t, "name", t))] = str(getattr(st, "name", st))
+    return out

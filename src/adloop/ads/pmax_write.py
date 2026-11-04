@@ -599,3 +599,71 @@ def apply_create_pmax_asset_group(
     if not validate_only:
         result.update(_collect(resp, labels))
     return result
+
+
+URL_EXPANSION_TYPE = "FINAL_URL_EXPANSION_TEXT_ASSET_AUTOMATION"
+
+
+def draft_pmax_url_expansion(
+    config: "AdLoopConfig",
+    *,
+    customer_id: str = "",
+    campaign_id: str = "",
+    opted_in: bool = False,
+) -> dict:
+    """Draft setting Final URL expansion on a PMax campaign (OPTED_IN / OPTED_OUT)."""
+    from adloop.safety.guards import SafetyViolation, check_blocked_operation
+    from adloop.safety.preview import ChangePlan, store_plan
+
+    try:
+        check_blocked_operation("update_pmax_url_expansion", config.safety)
+    except SafetyViolation as e:
+        return {"error": str(e)}
+    if not str(campaign_id or "").strip().isdigit():
+        return {"error": "Validation failed", "details": ["campaign_id must be numeric"]}
+    status = "OPTED_IN" if opted_in else "OPTED_OUT"
+    plan = ChangePlan(
+        operation="update_pmax_url_expansion",
+        entity_type="campaign",
+        entity_id=str(campaign_id).strip(),
+        customer_id=customer_id,
+        changes={"campaign_id": str(campaign_id).strip(), "status": status},
+    )
+    store_plan(plan)
+    return plan.to_preview()
+
+
+def apply_update_pmax_url_expansion(
+    client, cid: str, changes: dict, validate_only: bool = False
+) -> dict:
+    """Set campaign.asset_automation_settings for the final URL expansion type.
+
+    The repeated field is replaced wholesale, so the other settings are re-read
+    from the live campaign and re-sent to avoid dropping them.
+    """
+    ga = client.get_service("GoogleAdsService")
+    rn = client.get_service("CampaignService").campaign_path(cid, changes["campaign_id"])
+    existing: dict = {}
+    q = (
+        "SELECT campaign.asset_automation_settings FROM campaign "
+        f"WHERE campaign.id = {int(changes['campaign_id'])}"
+    )
+    for batch in ga.search_stream(customer_id=cid, query=q):
+        for row in batch.results:
+            for s in row.campaign.asset_automation_settings:
+                existing[s.asset_automation_type.name] = s.asset_automation_status.name
+    existing[URL_EXPANSION_TYPE] = changes["status"]
+
+    op = client.get_type("MutateOperation")
+    c = op.campaign_operation.update
+    c.resource_name = rn
+    for t, st in existing.items():
+        if t in ("UNSPECIFIED", "UNKNOWN"):
+            continue
+        s = client.get_type("Campaign").AssetAutomationSetting()
+        s.asset_automation_type = getattr(client.enums.AssetAutomationTypeEnum, t)
+        s.asset_automation_status = getattr(client.enums.AssetAutomationStatusEnum, st)
+        c.asset_automation_settings.append(s)
+    op.campaign_operation.update_mask.paths.append("asset_automation_settings")
+    _send(client, cid, [op], validate_only)
+    return {"validate_only": validate_only, "campaign": rn, "status": changes["status"]}

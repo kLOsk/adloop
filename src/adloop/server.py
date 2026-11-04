@@ -781,6 +781,42 @@ def get_pmax_performance(
 
 @mcp.tool(annotations=_READONLY)
 @_safe
+def get_pmax_url_expansion(customer_id: str = "", campaign_id: str = "") -> dict:
+    """Get Final URL expansion state (OPTED_IN / OPTED_OUT) for PMax campaigns.
+
+    Reads campaign.asset_automation_settings. Optional campaign_id filter.
+    """
+    from adloop.ads.pmax import get_pmax_url_expansion as _impl
+
+    return _impl(
+        _config,
+        customer_id=customer_id or _config.ads.customer_id,
+        campaign_id=campaign_id,
+    )
+
+
+@mcp.tool(annotations=_WRITE)
+@_safe
+def draft_pmax_url_expansion(
+    campaign_id: str, opted_in: bool = False, customer_id: str = ""
+) -> dict:
+    """Draft setting Final URL expansion on a PMax campaign. Returns a PREVIEW.
+
+    opted_in=false (default) sets OPTED_OUT. Use confirm_and_apply with
+    validate_only=true first, then dry_run=false to apply.
+    """
+    from adloop.ads.pmax_write import draft_pmax_url_expansion as _impl
+
+    return _impl(
+        _config,
+        customer_id=customer_id or _config.ads.customer_id,
+        campaign_id=campaign_id,
+        opted_in=opted_in,
+    )
+
+
+@mcp.tool(annotations=_READONLY)
+@_safe
 def get_asset_performance(
     customer_id: str = "",
     campaign_id: str = "",
@@ -1652,7 +1688,7 @@ def confirm_and_apply(
 ) -> dict:
     """Execute a previously previewed change.
 
-    validate_only=true (PMax plans only) asks Google to validate the full
+    validate_only=true (PMax plans and asset_group removal) asks Google to validate the full
     mutation without creating anything; the plan stays pending.
 
     IMPORTANT: Defaults to dry_run=True. You MUST explicitly pass dry_run=false
