@@ -2605,7 +2605,12 @@ def draft_image_assets(
     explicit (``scope="account"``) and takes BUSINESS_LOGO only, named in
     ``field_types``: one entry per image, in the order uploads, paths, URLs.
     """
-    from adloop.ads.assets import _account_scope_warning, resolve_scope, scope_entity
+    from adloop.ads.assets import (
+        _account_logo_refusal,
+        _account_scope_warning,
+        resolve_scope,
+        scope_entity,
+    )
     from adloop.runtime import deployment_mode
     from adloop.safety.guards import SafetyViolation, check_blocked_operation
     from adloop.safety.preview import ChangePlan, store_plan
@@ -2634,6 +2639,12 @@ def draft_image_assets(
     errors.extend(image_errors)
     if not errors:
         errors.extend(_assign_image_field_types(validated_images, scope, field_types))
+    if not errors and scope == "account":
+        refusal = _account_logo_refusal(
+            config, customer_id, sum(image["field_type"] == "BUSINESS_LOGO" for image in validated_images)
+        )
+        if refusal:
+            errors.append(refusal)
     if errors:
         return {"error": "Validation failed", "details": errors}
 

@@ -5055,7 +5055,9 @@ def draft_image_assets(
             no public URL.
         scope: Empty follows campaign_id. "account" links the images
             account-wide, which Google allows for BUSINESS_LOGO only and which
-            is never inferred from an empty campaign_id.
+            is never inferred from an empty campaign_id. An account takes one
+            business logo: while one is linked, the draft is refused and
+            names the link to remove first.
         field_types: One per image, in the order upload_ids, image_paths,
             image_urls: AD_IMAGE (campaign links; the default) or BUSINESS_LOGO
             (campaign or account links). Required with scope="account".

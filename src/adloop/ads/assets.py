@@ -320,6 +320,35 @@ def draft_business_name_asset(
     return preview
 
 
+def _account_logo_refusal(config: AdLoopConfig, customer_id: str, new_logos: int) -> str:
+    """Why the account cannot take ``new_logos`` more business logos, or "".
+
+    Google allows one enabled account-level business logo and answers a
+    second only at the dry run, with RESOURCE_LIMIT
+    (ENABLED_FAVICON_ASSET_LINKS_PER_CUSTOMER). Say it at the draft instead,
+    with the link to remove.
+    """
+    from adloop.ads.gaql import execute_query
+
+    if not new_logos:
+        return ""
+    if new_logos > 1:
+        return f"Google allows one business logo per account; this draft links {new_logos}."
+    rows = execute_query(config, customer_id, (
+        "SELECT asset.id, asset.name FROM customer_asset "
+        "WHERE customer_asset.field_type = 'BUSINESS_LOGO' AND customer_asset.status = 'ENABLED'"))
+    if not rows:
+        return ""
+    asset_id = rows[0].get("asset.id")
+    name = rows[0].get("asset.name")
+    current = f"asset {asset_id} '{name}'" if name else f"asset {asset_id}"
+    return (
+        f"The account already has a business logo ({current}), and Google allows one per "
+        "account. To replace it, remove its account link first with remove_entity("
+        f'entity_type="customer_asset", entity_id="{asset_id}~BUSINESS_LOGO"), then draft again.'
+    )
+
+
 def link_asset_to_customer(
     config: AdLoopConfig,
     *,
@@ -376,6 +405,12 @@ def link_asset_to_customer(
             )
         elif row.get("asset.name"):
             link["asset_name"] = row["asset.name"]
+    if not errors:
+        refusal = _account_logo_refusal(
+            config, customer_id, sum(link["field_type"] == "BUSINESS_LOGO" for link in validated)
+        )
+        if refusal:
+            errors.append(refusal)
     if errors:
         return {"error": "Validation failed", "details": errors}
 

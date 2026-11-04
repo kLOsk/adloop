@@ -190,10 +190,16 @@ def test_create_links_at_the_plans_scope_in_one_request():
     assert client.ads.operations[1]._pb.WhichOneof("operation") == "campaign_asset_operation"
 
 
+def _asset_rows_and_logos(rows, logos):
+    """GAQL stub: the asset lookup gets ``rows``, the account logo read ``logos``."""
+    return patch("adloop.ads.gaql.execute_query",
+                 side_effect=lambda _c, _cid, query: logos if "FROM customer_asset" in query else rows)
+
+
 def test_account_links_check_the_asset_type(config):
     rows = [{"asset.id": 5, "asset.type": "CALLOUT", "asset.name": ""},
             {"asset.id": 6, "asset.type": "IMAGE", "asset.name": "logo"}]
-    with _gaql(rows):
+    with _asset_rows_and_logos(rows, []):
         wrong = assets.link_asset_to_customer(config, customer_id="1", links=[
             {"asset_id": "5", "field_type": "CALLOUT"}, {"asset_id": "6", "field_type": "SITELINK"}])
         ok = assets.link_asset_to_customer(config, customer_id="1", links=[
@@ -202,6 +208,16 @@ def test_account_links_check_the_asset_type(config):
     assert "SITELINK needs a SITELINK asset" in wrong["details"][0]
     assert [link["asset_id"] for link in ok["changes"]["links"]] == ["5", "6"]
     assert "BUSINESS_MESSAGE" not in assets.CUSTOMER_ASSET_FIELD_TYPES
+
+
+def test_an_account_logo_link_is_refused_while_one_is_linked(config):
+    rows = [{"asset.id": 6, "asset.type": "IMAGE", "asset.name": "new logo"}]
+    with _asset_rows_and_logos(rows, [{"asset.id": 9, "asset.name": ""}]):
+        result = assets.link_asset_to_customer(config, customer_id="1", links=[
+            {"asset_id": "6", "field_type": "BUSINESS_LOGO"}])
+    [detail] = result["details"]
+    assert "already has a business logo (asset 9)" in detail
+    assert 'entity_id="9~BUSINESS_LOGO"' in detail
 
 
 # ---------------------------------------------------------------------------

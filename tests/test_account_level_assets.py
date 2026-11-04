@@ -8,6 +8,7 @@ protos and the real validate-only wrapper; only the services are fakes.
 from __future__ import annotations
 
 from types import SimpleNamespace
+from unittest.mock import patch
 
 import pytest
 from google.ads.googleads.client import GoogleAdsClient
@@ -162,12 +163,34 @@ class TestImageFieldTypes:
         assert ops[3].campaign_asset_operation.create.field_type == kinds.BUSINESS_LOGO
 
     def test_a_business_logo_can_go_on_the_account(self, config, client, images):
-        preview = self._draft(config, images(), scope="account", field_types=["BUSINESS_LOGO"])
+        with patch("adloop.ads.gaql.execute_query", return_value=[]):  # no account logo yet
+            preview = self._draft(config, images(), scope="account", field_types=["BUSINESS_LOGO"])
         assert preview["entity_type"] == "customer_asset"
         assert any("every eligible campaign" in w for w in preview["warnings"])
         _dry_run(config, preview)
         link = client.operations()[1].customer_asset_operation.create
         assert link.field_type == client.enums.AssetFieldTypeEnum.BUSINESS_LOGO
+
+    def test_an_account_with_a_logo_is_refused_at_the_draft(self, config, images):
+        # Google allows one; a second only fails at the dry run with RESOURCE_LIMIT
+        # (ENABLED_FAVICON_ASSET_LINKS_PER_CUSTOMER), seen live on 2026-11-04.
+        existing = [{"asset.id": 322647191710, "asset.name": "android-chrome-192x192.png"}]
+        with patch("adloop.ads.gaql.execute_query", return_value=existing) as query:
+            result = self._draft(config, images(), scope="account", field_types=["BUSINESS_LOGO"])
+        assert "customer_asset.field_type = 'BUSINESS_LOGO'" in query.call_args.args[2]
+        assert "customer_asset.status = 'ENABLED'" in query.call_args.args[2]
+        [detail] = result["details"]
+        assert "already has a business logo (asset 322647191710 'android-chrome-192x192.png')" in detail
+        assert 'entity_id="322647191710~BUSINESS_LOGO"' in detail
+
+    def test_two_logos_on_the_account_are_refused_without_a_read(self, config, images):
+        result = self._draft(config, images(2), scope="account", field_types=["BUSINESS_LOGO"] * 2)
+        assert result["details"] == ["Google allows one business logo per account; this draft links 2."]
+
+    def test_a_campaign_logo_does_not_read_the_account(self, config, images):
+        # conftest refuses any GAQL; campaigns took a second logo in the live dry run.
+        preview = self._draft(config, images(), campaign_id="1001", field_types=["BUSINESS_LOGO"])
+        assert preview["changes"]["field_types"] == ["BUSINESS_LOGO"]
 
     def test_account_scope_has_no_default_field_type(self, config, images):
         result = self._draft(config, images(), scope="account")
