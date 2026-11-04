@@ -122,7 +122,7 @@
       gone: "Diese Änderung ist nicht mehr offen (angewendet, verworfen oder abgelaufen).",
     },
   };
-  const PLATFORMS = { google: "Google Ads", reddit: "Reddit Ads", microsoft: "Microsoft Advertising", chatgpt: "ChatGPT Ads", ga4: "Google Analytics", gtm: "Tag Manager" };
+  const PLATFORMS = { google: "Google Ads", reddit: "Reddit Ads", microsoft: "Microsoft Advertising", chatgpt: "ChatGPT Ads", roku: "Roku Ads", ga4: "Google Analytics", gtm: "Tag Manager" };
   const MAX_ROWS = 14;
 
   let lang = "en";
@@ -160,7 +160,7 @@
   }
 
   function humanize(op) {
-    const s = String(op || "change").replace(/^(reddit|microsoft|chatgpt|gtm|ga4)_/, "").replace(/_/g, " ");
+    const s = String(op || "change").replace(/^(reddit|microsoft|chatgpt|roku|gtm|ga4)_/, "").replace(/_/g, " ");
     return s.charAt(0).toUpperCase() + s.slice(1);
   }
 
@@ -169,6 +169,7 @@
     if (preview.platform === "reddit" || op.startsWith("reddit_")) return "reddit";
     if (preview.platform === "microsoft" || op.startsWith("microsoft_")) return "microsoft";
     if (preview.platform === "chatgpt" || op.startsWith("chatgpt_")) return "chatgpt";
+    if (preview.platform === "roku" || op.startsWith("roku_")) return "roku";
     if (op.startsWith("gtm_")) return "gtm";
     if (op.includes("key_event")) return "ga4";
     return "google";

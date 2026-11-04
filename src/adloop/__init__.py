@@ -40,6 +40,7 @@ def main() -> None:
       adloop microsoft-login Sign in to Microsoft Advertising in the browser
                              (--user <email> preselects the account; --device-code
                              for the code-on-another-device flow).
+      adloop roku-login      Sign in to Roku Ads Manager (authorization code).
       adloop --version, -V   Print version and exit.
     """
     args = sys.argv[1:]
@@ -80,6 +81,21 @@ def main() -> None:
             else:
                 path = browser_login(load_config(), login_hint=hint)
         except MicrosoftAdsAuthError as exc:
+            print(f"\n  {exc}\n")
+            sys.exit(1)
+        except KeyboardInterrupt:
+            print("\n\n  Cancelled.\n")
+            sys.exit(130)
+        print(f"\n  Signed in. Token saved to {path}. Restart the MCP server to use it.\n")
+        return
+
+    if args and args[0] == "roku-login":
+        from adloop.config import load_config
+        from adloop.roku_ads.auth import RokuAdsAuthError, authorization_login
+
+        try:
+            path = authorization_login(load_config())
+        except RokuAdsAuthError as exc:
             print(f"\n  {exc}\n")
             sys.exit(1)
         except KeyboardInterrupt:

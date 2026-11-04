@@ -130,6 +130,24 @@ microsoft_ads:
   ad_account_id: ""
   token_path: "~/.adloop/microsoft_token.json"
 
+roku_ads:
+  # Roku Ads (optional, Ads API beta; self-serve Ads Manager accounts only).
+  # 1. An organization admin opens Roku Ads Manager -> Organization -> Ads API
+  #    -> Add developer app (name, logo, website, redirect URI).
+  # 2. Copy the client id, the client secret (shown once) and the
+  #    authorization URL from that tab. redirect_uri must be exactly the one
+  #    registered on the app; http://localhost:<port>/... lets
+  #    `adloop roku-login` catch the redirect itself, anything else asks you
+  #    to paste the address the browser landed on.
+  # 3. `adloop roku-login` once (the Viewer role is enough to read).
+  client_id: ""
+  client_secret: ""
+  authorization_url: ""
+  redirect_uri: ""
+  # Default ad account (list_roku_accounts shows the uids).
+  account_uid: ""
+  token_path: "~/.adloop/roku_token.json"
+
 safety:
   # Maximum daily budget allowed per campaign (in your account's currency).
   # AdLoop will reject any campaign creation or budget change above this.

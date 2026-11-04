@@ -2904,6 +2904,7 @@ def confirm_and_apply(
     is_reddit = plan.operation.startswith("reddit_")
     is_microsoft = plan.operation.startswith("microsoft_")
     is_chatgpt = plan.operation.startswith("chatgpt_")
+    is_roku = plan.operation.startswith("roku_")
     is_gtm = plan.operation.startswith("gtm_")
     is_ga4 = plan.operation in GA4_OPERATIONS
     # Google Ads calls without a validate_only field: the dry run re-reads the
@@ -2913,6 +2914,7 @@ def confirm_and_apply(
         "Reddit Ads" if is_reddit
         else "Microsoft Advertising" if is_microsoft
         else "ChatGPT Ads" if is_chatgpt
+        else "Roku Ads" if is_roku
         else "Google Tag Manager" if is_gtm
         else "Google Analytics" if is_ga4
         else "Google Ads"
@@ -2927,20 +2929,22 @@ def confirm_and_apply(
         # Either way a failed check leaves dry_run_result unset, so two-phase
         # apply keeps refusing the real write.
         try:
-            if is_reddit or is_gtm or is_microsoft or is_chatgpt:
-                # Reddit, Microsoft Advertising, ChatGPT Ads and Tag Manager
-                # have no validate-only mode for these calls; the dry run
-                # re-reads the target and re-runs the safety checks against
-                # live values.
+            if is_reddit or is_gtm or is_microsoft or is_chatgpt or is_roku:
+                # Reddit, Microsoft Advertising, ChatGPT Ads, Roku and Tag
+                # Manager have no validate-only mode for these calls; the dry
+                # run re-reads the target and re-runs the safety checks
+                # against live values.
                 from adloop.chatgpt_ads.write import preflight as chatgpt_preflight
                 from adloop.gtm.write import preflight as gtm_preflight
                 from adloop.microsoft_ads.write import preflight as microsoft_preflight
                 from adloop.reddit.write import preflight as reddit_preflight
+                from adloop.roku_ads.write import preflight as roku_preflight
 
                 preflight = (
                     reddit_preflight if is_reddit
                     else microsoft_preflight if is_microsoft
                     else chatgpt_preflight if is_chatgpt
+                    else roku_preflight if is_roku
                     else gtm_preflight
                 )
                 preflight_checks = preflight(config, plan)
@@ -2992,7 +2996,7 @@ def confirm_and_apply(
             )
             checked_against = (
                 f"re-checked the target against {platform_label}"
-                if is_reddit or is_microsoft or is_chatgpt or is_gtm or is_ga4 or is_ads_reread
+                if is_reddit or is_microsoft or is_chatgpt or is_roku or is_gtm or is_ga4 or is_ads_reread
                 else "sent the change to Google Ads in validate-only mode"
             )
             return {
@@ -4556,6 +4560,12 @@ def _execute_plan(
         from adloop.chatgpt_ads.write import apply_plan as apply_chatgpt_plan
 
         return apply_chatgpt_plan(config, plan)
+
+    # Roku Ads plans likewise have their own executor.
+    if plan.operation.startswith("roku_"):
+        from adloop.roku_ads.write import apply_plan as apply_roku_plan
+
+        return apply_roku_plan(config, plan)
 
     # Tag Manager plans likewise never touch the Ads client.
     if plan.operation.startswith("gtm_"):

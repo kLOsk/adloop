@@ -48,6 +48,7 @@ TOOLSETS: dict[str, str] = {
     "reddit": "Reddit Ads reads, writes, and planning",
     "chatgpt_ads": "ChatGPT Ads (OpenAI) reads, campaign management and conversion diagnostics",
     "microsoft_ads": "Microsoft Advertising (Bing) reads and campaign management",
+    "roku_ads": "Roku Ads (connected TV) reads, reports, conversion diagnostics and event audiences",
 }
 
 # Finer selections inside "ads" (issue #56): every ads tool also carries
@@ -370,6 +371,7 @@ _API_DOCS: dict[str, str] = {
     "reddit": "Reddit Ads API: https://ads-api.reddit.com/docs/v3/",
     "chatgpt_ads": "OpenAI Advertiser API: https://developers.openai.com/ads/api-overview",
     "microsoft_ads": "Microsoft Advertising API: https://learn.microsoft.com/advertising/guides/",
+    "roku_ads": "Roku Ads API: https://developer.ads.roku.com/ads/reference/introduction",
     # health_check and confirm_and_apply act on whichever platform is set up.
     "core": (
         "Google Ads API: https://developers.google.com/google-ads/api/docs/start, "
@@ -617,6 +619,45 @@ def _microsoft_ads_structured_error(exc: Exception) -> dict | None:
     return None
 
 
+def _roku_ads_structured_error(exc: Exception) -> dict | None:
+    """Roku Ads translations, keyed on exception type."""
+    from adloop.roku_ads.auth import RokuAdsApiError, RokuAdsAuthError
+
+    if isinstance(exc, RokuAdsAuthError):
+        hints = {
+            "missing_client": (
+                "An organization admin adds a developer app in Roku Ads Manager → Organization → "
+                "Ads API; set roku_ads.client_id, client_secret, authorization_url and redirect_uri "
+                "from it, then run `adloop roku-login`."
+            ),
+        }
+        return {
+            "error": str(exc),
+            "hint": hints.get(
+                exc.error_code,
+                "Run `adloop roku-login` and approve access with a user who can see the ad "
+                "accounts, then restart the MCP server.",
+            ),
+            "auth_error": "ROKU_ADS_" + (exc.error_code or "auth").upper(),
+        }
+    if isinstance(exc, RokuAdsApiError):
+        if exc.status == 429:
+            return {
+                "error": str(exc),
+                "hint": "Wait for the reset before calling again; do not retry in a loop.",
+                "auth_error": "ROKU_ADS_RATE_LIMITED",
+                "retry_after": exc.retry_after,
+            }
+        result = {"error": str(exc), "roku_ads_status": exc.status}
+        if exc.status == 403:
+            result["hint"] = (
+                "Roku answers 403 when the signed-in user has no role on that account or the uid "
+                "does not exist. Check list_roku_accounts."
+            )
+        return result
+    return None
+
+
 def _structured_error(fn_name: str, exc: Exception) -> dict:
     """Translate common auth failures into actionable structured errors."""
     reddit = _reddit_structured_error(exc)
@@ -631,6 +672,10 @@ def _structured_error(fn_name: str, exc: Exception) -> dict:
     if microsoft is not None:
         microsoft.setdefault("tool", fn_name)
         return microsoft
+    roku = _roku_ads_structured_error(exc)
+    if roku is not None:
+        roku.setdefault("tool", fn_name)
+        return roku
 
     err = str(exc)
     err_lower = err.lower()
@@ -781,7 +826,7 @@ def _safe(fn: Callable) -> Callable:
 @_safe
 def health_check() -> dict:
     """Test AdLoop connectivity — checks OAuth token, GA4 API, Google Ads API,
-    and (when configured) the Reddit Ads, ChatGPT Ads and Microsoft Advertising APIs.
+    and (when configured) the Reddit Ads, ChatGPT Ads, Microsoft Advertising and Roku Ads APIs.
 
     Returns the status of each service and actionable guidance when something
     is broken, which makes it the diagnostic for failures in other tools.
@@ -940,6 +985,33 @@ def health_check() -> dict:
                 status["microsoft_ads_auth_error"] = parsed["auth_error"]
     else:
         status["microsoft_ads"] = "not_configured"
+
+    roku_cfg = current_config().roku_ads
+    if _roku_ads_configured():
+        try:
+            if roku_cfg.account_uid:
+                from adloop.roku_ads.read import account_meta as roku_account_meta
+
+                meta = roku_account_meta(current_config(), "", fresh=True)
+                status["roku_ads"] = "ok"
+                status["roku_ads_account"] = meta["account_uid"]
+                status["roku_ads_account_name"] = meta["name"]
+            else:
+                from adloop.roku_ads.client import api_get as roku_get
+
+                roku_get(current_config(), "permissions", {"limit": 1})
+                status["roku_ads"] = "ok"
+                status["roku_ads_note"] = "Signed in; set roku_ads.account_uid (see list_roku_accounts)."
+        except Exception as e:
+            parsed = _structured_error("health_check", e)
+            status["roku_ads"] = "error"
+            status["roku_ads_error"] = parsed["error"]
+            if "hint" in parsed:
+                status["roku_ads_hint"] = parsed["hint"]
+            if "auth_error" in parsed:
+                status["roku_ads_auth_error"] = parsed["auth_error"]
+    else:
+        status["roku_ads"] = "not_configured"
 
     if status["ga4"] == "error" or status["ads"] == "error":
         if status.get("ads_hint"):
@@ -6909,6 +6981,18 @@ def _microsoft_ads_configured() -> bool:
     return bool(cfg.developer_token or cfg.client_id)
 
 
+def _roku_ads_configured() -> bool:
+    """Set up here: hosted, the credentials provider must support Roku;
+    self-hosted, the config names an app or an ad account."""
+    from adloop.auth import get_credentials_provider
+    from adloop.runtime import deployment_mode
+
+    if deployment_mode() == "server":
+        return hasattr(get_credentials_provider(), "roku_ads_credentials")
+    cfg = current_config().roku_ads
+    return bool(cfg.client_id or cfg.account_uid)
+
+
 def _chatgpt_ads_configured() -> bool:
     import os
 
@@ -8494,6 +8578,266 @@ def remove_microsoft_entity(ad_account_id: str = "", entity_type: str = "", enti
     from adloop.microsoft_ads.manage import remove_microsoft_entity as _impl
 
     return _impl(current_config(), ad_account_id=ad_account_id, entity_type=entity_type, entity_id=entity_id)
+
+
+# ---------------------------------------------------------------------------
+# Roku Ads Tools (connected TV, Ads API beta; read-only)
+# ---------------------------------------------------------------------------
+# Every tool takes account_uid, which falls back to roku_ads.account_uid.
+
+
+@_tool(title="List Roku Ads accounts", annotations=_READONLY, tags={"roku_ads"})
+@_safe
+def list_roku_accounts() -> dict:
+    """List the Roku Ads organizations and ad accounts the signed-in app can read.
+
+    Returns per account the account_uid the other Roku tools take, the
+    organization, currency, time zone, country, website and the roles the
+    sign-in holds there (Viewer is enough to read). Only self-serve Ads
+    Manager accounts appear; insertion-order accounts are not in the API.
+    """
+    from adloop.roku_ads.read import list_roku_accounts as _impl
+
+    return _impl(current_config())
+
+
+@_tool(title="Roku Ads campaigns", annotations=_READONLY, tags={"roku_ads"})
+@_safe
+def get_roku_campaigns(account_uid: str = "", include_archived: bool = False) -> dict:
+    """List Roku Ads campaigns with their ad group: status, budget, bid, flight, schedule, targeting and goal.
+
+    Each campaign carries its objective, enabled and archived flags, and its
+    ad group's delivery status (draft, scheduled, creative_needed,
+    reviewing_creative, active, inactive, ended, deactivated), budget, bid
+    strategy and max CPM, start and end, day-part schedule, included and
+    excluded locations, audiences, placement, frequency cap, content
+    settings, optimization goal and event group. Insights flag deactivated
+    (billing) campaigns, ad groups without an approved creative, missing
+    location targeting or frequency caps, and conversion goals without an
+    event group.
+
+    Args:
+        account_uid: Roku ad account uid (from list_roku_accounts). Empty uses
+            roku_ads.account_uid from the config.
+        include_archived: Also list archived campaigns.
+    """
+    from adloop.roku_ads.read import get_roku_campaigns as _impl
+
+    return _impl(current_config(), account_uid=account_uid, include_archived=include_archived)
+
+
+@_tool(title="Roku Ads performance", annotations=_READONLY, tags={"roku_ads"})
+@_safe
+def get_roku_performance(
+    account_uid: str = "",
+    level: str = "campaign",
+    date_range_start: str = "",
+    date_range_end: str = "",
+    breakdown: str = "",
+    campaign_uid: str = "",
+    entity_uids: _StrListOpt = None,
+    actions: _StrListOpt = None,
+    attributed_events_by: str = "time_of_impression",
+    include_raw: bool = False,
+) -> dict:
+    """Roku Ads spend, impressions, CPM, video completion and attributed actions per level.
+
+    Reads Roku's synchronous metrics (7 days per request; longer windows,
+    up to 92 days, are read in 7-day pieces and added up). Returns per row
+    impressions, spend, CPM, video starts, completions, quartiles, VCR
+    (completions / impressions), cost per completed view, and the requested
+    actions with CPA, joined with names, statuses and optimization goals.
+    TV has no clicks. Actions are pixel or Conversions API events from
+    households that saw an ad, credited for 14 days; insights flag spend
+    without the goal action and days still filling in.
+
+    Queries the Roku Ads API: https://developer.ads.roku.com/ads/reference/get_metrics
+
+    Args:
+        account_uid: Roku ad account uid. Empty uses the config default.
+        level: "account", "campaign", "ad_group", "ad" or "creative". Ads and
+            creatives need entity_uids, since Roku lists neither.
+        date_range_start: First day, YYYY-MM-DD. Empty means 6 days before
+            date_range_end.
+        date_range_end: Last day (inclusive), YYYY-MM-DD. Empty means yesterday
+            in the account's time zone.
+        breakdown: "" for totals or "date" for one row per day.
+        campaign_uid: Limit campaign and ad_group levels to one campaign.
+        entity_uids: Explicit uids of the chosen level instead of all of them.
+        actions: Action names such as "lead", "page_view", "purchase". Empty
+            means the optimization goals of the ad groups in scope.
+        attributed_events_by: "time_of_impression" (default) or
+            "time_of_conversion": which day an action counts on.
+        include_raw: Add the API's first response page, unmodified, for
+            checking how a beta response is laid out.
+    """
+    from adloop.roku_ads.read import get_roku_performance as _impl
+
+    return _impl(
+        current_config(), account_uid=account_uid, level=level, date_range_start=date_range_start,
+        date_range_end=date_range_end, breakdown=breakdown, campaign_uid=campaign_uid,
+        entity_uids=entity_uids, actions=actions, attributed_events_by=attributed_events_by,
+        include_raw=include_raw,
+    )
+
+
+@_tool(title="Run a Roku Ads report", annotations=_READONLY, tags={"roku_ads"})
+@_safe
+def run_roku_report(
+    account_uid: str = "",
+    metrics: _StrListOpt = None,
+    dimensions: _StrListOpt = None,
+    date_range_start: str = "",
+    date_range_end: str = "",
+    campaign_uid: str = "",
+    name: str = "",
+    wait_seconds: int = 45,
+    max_rows: int = 200,
+) -> dict:
+    """Create a Roku Ads asynchronous report and return its rows if it is ready within wait_seconds.
+
+    Reports cover what metrics do not: household reach and frequency, ROAS,
+    unique actions, and breakdowns by date, week, month, hour, postal code,
+    metro market, state, country, placement, campaign, ad group, ad and
+    creative (13 months of history, about 8 hours of latency, actions
+    credited by conversion time). Roku can take up to an hour to build one;
+    an unfinished report returns its report_uid, which get_roku_report reads
+    later. Rows come back with the file's own column names and totals for
+    the columns that add up.
+
+    Queries the Roku Ads API: https://developer.ads.roku.com/ads/reference/create_reports
+
+    Args:
+        account_uid: Roku ad account uid. Empty uses the config default.
+        metrics: Any of actions, cpa, cpcv, cpm, cpur, roas, household_frequency,
+            household_reach, impressions, order_value, spend,
+            total_unique_actions, vcr, video_view_25pct, video_view_50pct,
+            video_view_75pct, video_view_100pct. Empty means impressions,
+            spend, household_reach, household_frequency and vcr.
+        dimensions: Any of activity_name, account_name, account_id,
+            campaign_id, campaign_name, ad_id, ad_group_id, ad_group_budget,
+            ad_group_end_time, ad_group_start_time, country, creative_id,
+            creative_name, date, metro_market, month, placement, postal_code,
+            state_territory, week, year, hour. Action metrics add
+            activity_name automatically.
+        date_range_start: First day, YYYY-MM-DD. Empty means 29 days before
+            date_range_end.
+        date_range_end: Last day (inclusive), YYYY-MM-DD. Empty means yesterday.
+        campaign_uid: Limit the report to one campaign.
+        name: Report name shown in Roku; empty generates one.
+        wait_seconds: How long to wait for Roku to finish before returning
+            the report_uid instead of rows.
+        max_rows: Most rows to return (totals cover every row).
+    """
+    from adloop.roku_ads.read import run_roku_report as _impl
+
+    return _impl(
+        current_config(), account_uid=account_uid, metrics=metrics, dimensions=dimensions,
+        date_range_start=date_range_start, date_range_end=date_range_end, campaign_uid=campaign_uid,
+        name=name, wait_seconds=wait_seconds, max_rows=max_rows,
+    )
+
+
+@_tool(title="Read a Roku Ads report", annotations=_READONLY, tags={"roku_ads"})
+@_safe
+def get_roku_report(report_uid: str = "", campaign_uid: str = "", max_rows: int = 200) -> dict:
+    """Status of a Roku Ads asynchronous report, and its rows once Roku has built it.
+
+    Returns the status (pending, running, done, error) and, when done, the
+    columns, row count, rows and totals of the columns that add up.
+
+    Args:
+        report_uid: The report_uid run_roku_report returned.
+        campaign_uid: Keep only this campaign's rows (needs a campaign id column).
+        max_rows: Most rows to return (totals cover every row).
+    """
+    from adloop.roku_ads.read import get_roku_report as _impl
+
+    return _impl(current_config(), report_uid=report_uid, campaign_uid=campaign_uid, max_rows=max_rows)
+
+
+@_tool(title="Audit Roku Ads conversion setup", annotations=_READONLY, tags={"roku_ads"})
+@_safe
+def get_roku_conversion_setup(
+    account_uid: str = "",
+    date_range_start: str = "",
+    date_range_end: str = "",
+    min_impressions: int = 5000,
+) -> dict:
+    """Audit Roku Ads conversion tracking: event groups, ad group goals and actions from delivery.
+
+    Checks every event group (the Roku pixel / Conversions API container:
+    active, stale, inactive, archived, and which live ad groups use it),
+    every live ad group's optimization goal against its event group, and,
+    over the window, whether impressions produced the goal action. Returns a
+    verdict (ok, needs attention, broken), checks sorted fail → warn →
+    info → pass, per ad group activity with CPA, and insights. Configuration
+    problems fail; missing actions only warn, since nobody may have acted.
+
+    Args:
+        account_uid: Roku ad account uid. Empty uses the config default.
+        date_range_start: First day, YYYY-MM-DD. Empty means 13 days before
+            date_range_end.
+        date_range_end: Last day (inclusive), YYYY-MM-DD. Empty means yesterday.
+        min_impressions: Impressions an ad group needs before missing goal
+            actions are flagged.
+    """
+    from adloop.roku_ads.read import get_roku_conversion_setup as _impl
+
+    return _impl(current_config(), account_uid=account_uid, date_range_start=date_range_start,
+                 date_range_end=date_range_end, min_impressions=min_impressions)
+
+
+@_tool(title="Roku Ads audiences", annotations=_READONLY, tags={"roku_ads"})
+@_safe
+def get_roku_audiences(account_uid: str = "") -> dict:
+    """List Roku Ads custom and standard audiences, what they are built from, and which campaigns use them.
+
+    Custom audiences show their source: website or app events (event names,
+    lookback, event group and its status), a customer file (file status and
+    matched households) or a partner. Insights flag audiences fed by a stale
+    or missing event group, customer files that failed matching, archived
+    audiences still on an active or upcoming ad group, and unused audiences. Roku returns
+    no audience size or status.
+
+    Args:
+        account_uid: Roku ad account uid. Empty uses the config default.
+    """
+    from adloop.roku_ads.read import get_roku_audiences as _impl
+
+    return _impl(current_config(), account_uid=account_uid)
+
+
+@_tool(title="Draft a Roku Ads event audience", annotations=_WRITE, tags={"roku_ads"})
+@_safe
+def draft_roku_event_audience(
+    account_uid: str = "",
+    name: str = "",
+    event_group_uid: str = "",
+    event_names: _StrListOpt = None,
+    lookback_days: int = 30,
+) -> dict:
+    """Draft a Roku Ads custom audience of households that fired pixel events within a lookback (preview only).
+
+    Custom audiences are the only thing Roku's Ads API (beta) can create;
+    campaigns, ad groups and creatives are edited in Ads Manager until Roku
+    adds those endpoints. Checks the event group (and warns when it is stale
+    or inactive) and duplicate names. A new audience shows as pending for
+    about 72 hours. The returned plan_id is applied with confirm_and_apply.
+    Customer-file audiences are not uploaded: they are personal data.
+
+    Args:
+        account_uid: Roku ad account uid. Empty uses the config default.
+        name: Audience name (at least 3 characters).
+        event_group_uid: Event group (Roku pixel) to read events from; empty
+            uses the account's default event group.
+        event_names: Events that qualify a household, e.g. ["page_view"] or ["lead"].
+        lookback_days: How far back a qualifying event counts (1–90).
+    """
+    from adloop.roku_ads.write import draft_roku_event_audience as _impl
+
+    return _impl(current_config(), account_uid=account_uid, name=name, event_group_uid=event_group_uid,
+                 event_names=event_names, lookback_days=lookback_days)
 
 
 # ---------------------------------------------------------------------------

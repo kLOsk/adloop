@@ -20,6 +20,7 @@ if TYPE_CHECKING:
 
     from adloop.config import AdLoopConfig
     from adloop.microsoft_ads.auth import MicrosoftCredentials
+    from adloop.roku_ads.auth import RokuCredentials
     from adloop.reddit.auth import RedditCredentials
 
 # Request all scopes in a single OAuth flow so one token works for both
@@ -95,6 +96,8 @@ class CredentialsProvider(Protocol):
 
     def microsoft_ads_credentials(self, config: AdLoopConfig) -> MicrosoftCredentials: ...
 
+    def roku_ads_credentials(self, config: AdLoopConfig) -> RokuCredentials: ...
+
 
 class LocalFileCredentialsProvider:
     """OSS default: local credential files + interactive OAuth.
@@ -160,6 +163,14 @@ class LocalFileCredentialsProvider:
         # (microsoft_ads.token_path), written by `adloop microsoft-login`.
         self._guard_local_only()
         from adloop.microsoft_ads.auth import local_credentials
+
+        return local_credentials(config)
+
+    def roku_ads_credentials(self, config: AdLoopConfig) -> RokuCredentials:
+        # Roku Ads Manager developer app, own token file (roku_ads.token_path),
+        # written by `adloop roku-login`.
+        self._guard_local_only()
+        from adloop.roku_ads.auth import local_credentials
 
         return local_credentials(config)
 
@@ -333,6 +344,18 @@ def get_microsoft_ads_credentials(config: AdLoopConfig) -> MicrosoftCredentials:
             "the provider implements microsoft_ads_credentials()."
         )
     return provider.microsoft_ads_credentials(config)
+
+
+def get_roku_ads_credentials(config: AdLoopConfig) -> RokuCredentials:
+    """Return refreshable bearer credentials for the Roku Ads API."""
+    provider = _active_provider
+    if not hasattr(provider, "roku_ads_credentials"):
+        raise RuntimeError(
+            "This deployment's credentials provider does not support Roku Ads. "
+            "Roku Ads tools are only available where the provider implements "
+            "roku_ads_credentials()."
+        )
+    return provider.roku_ads_credentials(config)
 
 
 def _requested_scopes(config: AdLoopConfig) -> list[str]:

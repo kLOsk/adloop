@@ -1,7 +1,7 @@
 """One-shot localhost listener for OAuth redirects (sign-in commands).
 
-``adloop microsoft-login`` opens the provider's sign-in page in the
-browser; the provider then redirects to
+``adloop roku-login`` and ``adloop microsoft-login`` open the provider's
+sign-in page in the browser; the provider then redirects to
 ``http://localhost:<port>/<path>?code=...&state=...``. This serves that one
 request and returns its query parameters.
 

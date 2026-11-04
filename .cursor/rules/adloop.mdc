@@ -1,5 +1,5 @@
 ---
-description: AdLoop MCP orchestration — Google Ads + Reddit Ads + ChatGPT Ads + Microsoft Ads + GA4 + codebase intelligence
+description: AdLoop MCP orchestration — Google Ads + Reddit Ads + ChatGPT Ads + Microsoft Ads + Roku Ads + GA4 + codebase intelligence
 globs:
 alwaysApply: true
 ---
@@ -14,7 +14,7 @@ You have access to AdLoop MCP tools that connect Google Ads, Reddit Ads and Goog
 
 | Tool | When to Use | Key Parameters |
 |------|-------------|----------------|
-| `health_check` | First thing to run when tools are failing — tests OAuth token, GA4, Ads, and (when configured) Reddit Ads, ChatGPT Ads and Microsoft Advertising connectivity | (none) |
+| `health_check` | First thing to run when tools are failing — tests OAuth token, GA4, Ads, and (when configured) Reddit Ads, ChatGPT Ads, Microsoft Advertising and Roku Ads connectivity | (none) |
 
 **A tool you expect is missing?** Apps such as claude.ai, ChatGPT and Perplexity cache AdLoop's tool list from when the connection was made. `health_check` returns `adloop_version` and `tools_offered`, the tools this server offers to you. If the user asks for something a tool in `tools_offered` does and that tool isn't in your own tool list, don't improvise with other tools: tell the user their app shows an older list and to refresh the AdLoop connection (claude.ai: Settings → Connectors → AdLoop; ChatGPT: the AdLoop plugin's settings; Perplexity: remove and add the connector again; coding agents: reconnect the MCP server or start a new session).
 
@@ -322,6 +322,37 @@ Microsoft Advertising (Bing, Yahoo, AOL, DuckDuckGo search ads) through the REST
 - Search terms with clicks and no conversions are candidates, not verdicts: calls from Microsoft ads convert outside its view unless call tracking feeds back.
 - **Conversions** come from Microsoft's `ConversionsQualified` columns (the old `Conversions` columns are deprecated and read 0 in keyword and search-term reports); conversion rate and CPA are computed from them. A UET tag is required only by URL, duration, pages-per-visit and event goals: offline-import goals need none, and an unverified tag that no active goal uses is a loose end (warn), not a broken setup.
 
+### Roku Ads Tools
+
+Roku Ads Manager (connected TV) through the Roku Ads API (beta; self-serve accounts only, insertion-order accounts are not in it). Toolset `roku_ads`; needs a developer app that an organization admin adds in Ads Manager → Organization → Ads API, its `client_id`, `client_secret`, `authorization_url` and `redirect_uri` under `roku_ads`, and a one-time `adloop roku-login`. `account_uid` is the default ad account. The hierarchy is organization → ad account → campaign (objective Awareness or Conversion) → one ad group (budget, bid, flight, schedule, targeting, frequency cap, optimization goal, event group) → creatives.
+
+| Tool | When to Use | Key Parameters |
+|------|-------------|----------------|
+| `list_roku_accounts` | Discovery: organizations, ad accounts (uid, currency, time zone), the sign-in's roles | (none) |
+| `get_roku_campaigns` | Status at campaign and ad group level, budget, bid, flight dates, schedule, locations, audiences, frequency cap, goal and event group | `include_archived` |
+| `get_roku_performance` | Spend, impressions, CPM, video completion (VCR, CPCV) and actions with CPA per account, campaign, ad group, ad or creative | `level`, date range (≤92 days), `breakdown` (date), `campaign_uid`, `entity_uids`, `actions`, `attributed_events_by`, `include_raw` |
+| `run_roku_report` / `get_roku_report` | Household reach and frequency, ROAS, unique actions, and breakdowns by postal code, metro, state, placement, hour, creative | `metrics`, `dimensions`, date range (13 months), `campaign_uid`, `wait_seconds`; later `report_uid` |
+| `get_roku_conversion_setup` | Audit with a `verdict`: event groups (active/stale/inactive), each active or upcoming ad group's goal against its event group, goal actions from delivery | date range, `min_impressions` |
+| `get_roku_audiences` | Custom audiences (events, customer files, partners), what feeds them, which campaigns use them | (none) |
+| `draft_roku_event_audience` | New custom audience of households that fired pixel events within a lookback (the only write Roku's API offers) | `name`, `event_names`, `event_group_uid`, `lookback_days` |
+
+- **Roku campaigns cannot be changed through the API yet.** Roku's Ads API (beta) has no campaign, ad group or creative write endpoints ("coming soon" in its docs). Budget, bid, schedule, targeting, creative and status changes are made in Roku Ads Manager; say so instead of improvising. Event audiences are drafted here and attached to a campaign in Ads Manager. Customer-file audiences are not uploaded: they are personal data.
+
+- **TV has no clicks.** Roku reports impressions, video completion and actions: pixel or Conversions API events from households that saw an ad, credited for 14 days (by impression time in metrics, by conversion time in reports). Never compare Roku with search on CTR or CPC; compare cost per action, reach and cost per completed view.
+- **Status has two levels.** The campaign and its ad group each carry draft, scheduled, creative_needed, reviewing_creative, active, inactive, ended or deactivated, plus `is_enabled` and `is_archived` on the campaign. `deactivated` means billing (an overdue invoice or a card) and nothing serves; `creative_needed` means no approved creative. `serving` is true only when both levels are active (and the campaign enabled, not archived); a scheduled one, or one waiting for or reviewing a creative, shows `serving: false` with the reason in `serving_note`, though the conversion setup audit still covers it.
+- **Recent days are incomplete.** Actions keep arriving for 14 days and reports lag about 8 hours; the tools say which days are still filling in.
+- **Metrics reach 7 days per request**; `get_roku_performance` reads longer windows in 7-day pieces. Reports cover up to 13 months but Roku can take up to an hour to build one: when `run_roku_report` returns a `report_uid` with status pending or running, read it later with `get_roku_report`.
+- **Beta response layouts.** Roku leaves some response details undocumented. If numbers look wrong, `include_raw=true` on `get_roku_performance` shows the API's own first page.
+- Budgets and max CPM are shown as Roku returns them (Roku documents no unit); compare with Ads Manager before quoting them.
+
+### When user asks how Roku / TV ads are doing or whether they work
+
+1. `get_roku_campaigns` first: a deactivated campaign or an ad group waiting for a creative explains zero delivery
+2. `get_roku_performance` (level `campaign`, last 7 or 14 days, or longer) for spend, impressions, CPM, VCR and goal actions
+3. If actions are zero, run `get_roku_conversion_setup` before judging the channel: no event group, a stale one, or a goal event the site never sends explains most "TV doesn't convert" cases. Missing actions on a working setup only warn: households may simply not have acted yet
+4. For reach and geography (did the spot reach the service area?), `run_roku_report` with `household_reach`, `household_frequency`, `impressions`, `spend` by `metro_market` or `postal_code`
+5. TV drives calls and later searches, not clicks: if the spot shows a tracked phone number, count those calls in call tracking, and look for lifts in direct, organic and branded search traffic in GA4 over the flight. Roku cannot see either
+
 ### When user asks about organic traffic, SEO, or paid/organic overlap
 
 1. Call `list_gsc_sites` if no site is configured; confirm the property with the user
@@ -485,7 +516,7 @@ Same draft → preview → `confirm_and_apply` gate; the plan carries `platform:
 - `two_phase_apply: true` in config (always on for AdLoop Cloud) refuses `dry_run=false` with status `DRY_RUN_REQUIRED` until that plan_id has completed one `dry_run=true` pass. Run the dry run, show the user, then apply — do not retry `dry_run=false` in a loop.
 - All operations (including dry runs) are logged to `~/.adloop/audit.log`.
 - `blocked_operations` is checked again by `confirm_and_apply`: a plan whose operation was blocked after it was drafted is refused with status `BLOCKED`, dry run and apply alike.
-- **`PARTIAL_APPLY` and `UNKNOWN_OUTCOME`** (Microsoft): `PARTIAL_APPLY` means part of the change is in the account (`created` names it), from a multi-step apply whose later step failed or a batch Microsoft accepted only in part; `UNKNOWN_OUTCOME` means Microsoft never answered a create, so it may or may not exist. In both cases the plan is retired and cannot be applied again: read the account (`get_microsoft_*`), tell the user what exists, and draft only what is missing. ChatGPT Ads creates carry an idempotency key instead, so after a lost response the same plan can simply be applied again.
+- **`PARTIAL_APPLY` and `UNKNOWN_OUTCOME`** (Microsoft, Roku): `PARTIAL_APPLY` means part of the change is in the account (`created` names it), from a multi-step apply whose later step failed or a batch Microsoft accepted only in part; `UNKNOWN_OUTCOME` means the platform never answered a create, so it may or may not exist (neither has idempotency). In both cases the plan is retired and cannot be applied again: read the account (`get_microsoft_*`, `get_roku_audiences`), tell the user what exists, and draft only what is missing. ChatGPT Ads creates carry an idempotency key instead, so after a lost response the same plan can simply be applied again.
 
 ## Safety Rules (CRITICAL — always follow)
 

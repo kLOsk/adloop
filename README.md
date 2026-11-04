@@ -290,6 +290,24 @@ The same management rules as Google Ads apply: broad match is refused on manual 
 
 > **Setup for Microsoft Advertising tools** — You need a developer token (Microsoft Advertising → **Settings → Developer settings**, or [developers.ads.microsoft.com](https://developers.ads.microsoft.com/Account)) and an app registration in Microsoft Entra ID: allow public client flows, add the delegated `msads.manage` permission of Microsoft Advertising, and add `http://localhost:8080/callback` as a mobile and desktop redirect URI. Put the token and the app's client id under `microsoft_ads` in `~/.adloop/config.yaml`, then run `adloop microsoft-login` and sign in with the user that has access to the ad accounts. It stores the refresh token at `~/.adloop/microsoft_token.json`. Directories with security defaults block the device-code flow (sign-in error 530035), so `adloop microsoft-login --device-code` is only a fallback. Microsoft has no validate-only mode, so `confirm_and_apply(dry_run=true)` re-reads the target, refuses one that changed since the draft and re-checks the caps; the real apply runs the same checks again first.
 
+### Roku Ads Tools
+
+Roku Ads Manager (connected TV) through the Roku Ads API, which is in beta and covers self-serve accounts only (insertion-order accounts are not in it). TV has no clicks: Roku reports impressions, video completion and actions, meaning pixel or Conversions API events from households that saw an ad, credited for 14 days. Compare Roku with other channels on cost per action, reach and cost per completed view, never on CTR or CPC. Every tool takes `account_uid`, which falls back to `roku_ads.account_uid`.
+
+| Tool | What It Does |
+|------|-------------|
+| `list_roku_accounts` | Organizations, ad accounts (uid, currency, time zone) and the signed-in user's roles |
+| `get_roku_campaigns` | Campaign and ad group status (both levels), budget, bid, flight dates, schedule, locations, audiences, frequency cap, optimization goal and event group |
+| `get_roku_performance` | Spend, impressions, CPM, video completion (VCR, CPCV) and actions with CPA per account, campaign, ad group, ad or creative; windows longer than Roku's 7-day limit are read in pieces |
+| `run_roku_report` / `get_roku_report` | Asynchronous reports: household reach and frequency, ROAS, unique actions, and breakdowns by postal code, metro, state, placement, hour or creative; a report Roku is still building is picked up later by its `report_uid` |
+| `get_roku_conversion_setup` | Audit with a verdict: event groups (active, stale, inactive), each active or upcoming ad group's goal against its event group, and goal actions from delivery |
+| `get_roku_audiences` | Custom audiences (events, customer files, partners), what feeds them and which campaigns use them |
+| `draft_roku_event_audience` | A custom audience of households that fired chosen pixel events within a lookback, through the preview gate. Customer-file audiences are not uploaded. |
+
+Roku's API has no campaign, ad group or creative writes yet ("coming soon" in its documentation), so budget, bid, schedule, targeting, creative and status changes stay in Roku Ads Manager, and a new event audience is attached to a campaign there. Recent days are incomplete: actions keep arriving for 14 days and reports lag about 8 hours.
+
+> **Setup for Roku Ads tools** — An organization admin opens Roku Ads Manager → **Organization → Ads API** and adds a developer app (name, logo, website, redirect URI). Copy the client id, the client secret (shown once) and the authorization URL from that tab into `roku_ads` in `~/.adloop/config.yaml`, with `redirect_uri` exactly as registered on the app. Then run `adloop roku-login` once. A `http://localhost:<port>/...` redirect URI lets the command catch the redirect itself; any other URI makes it ask you to paste the address the browser landed on. It stores the tokens at `~/.adloop/roku_token.json`. The Viewer role is enough to read; creating an event audience needs the Audience Manager role. Roku has no validate-only mode, so `confirm_and_apply(dry_run=true)` re-reads the event group and the account's audiences instead.
+
 ### Image Uploads
 
 An image on your computer, or one you attached in the chat, has no public URL, and an AI app cannot hand the file to a tool. `upload_images` gives it a way in.
@@ -596,6 +614,11 @@ All configuration lives in `~/.adloop/config.yaml`. See [`config.yaml.example`](
 | `microsoft_ads` | `customer_id` | *(empty)* | Manager account id (the CustomerId header) |
 | `microsoft_ads` | `ad_account_id` | *(empty)* | Default ad account for every Microsoft tool |
 | `microsoft_ads` | `token_path` | `~/.adloop/microsoft_token.json` | Where `adloop microsoft-login` stores the refresh token |
+| `roku_ads` | `client_id` / `client_secret` | *(empty)* | Your Roku Ads Manager developer app (Organization → Ads API) |
+| `roku_ads` | `authorization_url` | *(empty)* | The authorization URL shown on the app's tab |
+| `roku_ads` | `redirect_uri` | *(empty)* | Exactly the redirect URI registered on the app |
+| `roku_ads` | `account_uid` | *(empty)* | Default Roku ad account for every Roku tool |
+| `roku_ads` | `token_path` | `~/.adloop/roku_token.json` | Where `adloop roku-login` stores the tokens |
 | `safety` | `max_daily_budget` | `50.00` | Maximum allowed daily budget per campaign |
 | `safety` | `require_dry_run` | `true` | Force all writes to dry-run mode |
 | `safety` | `two_phase_apply` | `false` | Refuse real applies until the plan had a dry-run pass |
@@ -621,6 +644,7 @@ Most MCP clients (claude.ai, ChatGPT, Cursor, …) load **every tool schema into
 | `reddit` | Reddit Ads reads, writes, and planning |
 | `chatgpt_ads` | ChatGPT Ads reads, campaign management and conversion diagnostics |
 | `microsoft_ads` | Microsoft Advertising reads and campaign management |
+| `roku_ads` | Roku Ads (connected TV) reads, reports, conversion diagnostics and event audiences |
 
 Google Ads can be narrowed further. Use one of these instead of `ads`:
 
@@ -674,6 +698,11 @@ src/adloop/
 │   ├── read.py        # Accounts, campaigns, ad groups, keywords, ads, reports, search terms, conversion audit
 │   ├── manage.py      # Drafts, preflight and apply for campaigns, targeting, keywords, negatives, ads, extensions
 │   └── write.py       # Budget and status drafts; routes every microsoft_ plan to its preflight and apply
+├── roku_ads/
+│   ├── auth.py        # Roku developer-app sign-in (authorization code), token refresh, redacted errors
+│   ├── client.py      # Roku Ads API client — pagination, rate-limit retry hints, report downloads
+│   ├── read.py        # Accounts, campaigns, metrics in 7-day pieces, reports, conversion audit, audiences
+│   └── write.py       # Draft/preflight/apply for event audiences (Roku has no campaign writes yet)
 ├── oauth_redirect.py  # One-shot localhost listener for sign-in redirects
 └── safety/
     ├── guards.py      # Budget caps, bid limits, blocked operations, Broad Match safety

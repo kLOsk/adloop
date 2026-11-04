@@ -28,6 +28,7 @@ src/adloop/
 ├── reddit/            # Reddit Ads API v3 (own OAuth app, REST client, reads, PAUSED-creating writes)
 ├── chatgpt_ads/       # ChatGPT Ads (OpenAI Advertiser API key, REST client, reads, paused-creating writes)
 ├── microsoft_ads/     # Microsoft Advertising (REST v13, Entra sign-in, reads, reports, campaign management)
+├── roku_ads/          # Roku Ads (connected TV; Ads API beta, own OAuth app, reads, reports, event audiences)
 └── safety/            # Guards, previews, audit logging
 ```
 

@@ -283,6 +283,8 @@ def _platform_label(plan: ChangePlan) -> str:
         return "Microsoft Advertising"
     if op.startswith("chatgpt_"):
         return "ChatGPT Ads"
+    if op.startswith("roku_"):
+        return "Roku Ads"
     if op.startswith("gtm_"):
         return "Google Tag Manager"
     if "key_event" in op:
@@ -321,7 +323,7 @@ def display_fields(changes: dict) -> list[tuple[str, Any]]:
 
 def confirmation_message(plan: ChangePlan) -> str:
     """The dialog text: what changes, where, and what confirming does."""
-    title = re.sub(r"^(reddit|microsoft|chatgpt|gtm)_", "", plan.operation).replace("_", " ")
+    title = re.sub(r"^(reddit|microsoft|chatgpt|roku|gtm)_", "", plan.operation).replace("_", " ")
     target = " ".join(
         part for part in (plan.entity_type.replace("_", " "), plan.entity_id) if part
     )

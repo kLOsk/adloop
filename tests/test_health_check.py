@@ -134,7 +134,7 @@ def test_hosted_provider_without_an_integration_reports_not_configured(monkeypat
     platform is not offered, even when shared config names its app."""
     import adloop.ga4.reports as reports
     from adloop import auth
-    from adloop.config import ChatGPTAdsConfig, MicrosoftAdsConfig
+    from adloop.config import ChatGPTAdsConfig, MicrosoftAdsConfig, RokuAdsConfig
 
     class OlderProvider:
         pass
@@ -145,6 +145,7 @@ def test_hosted_provider_without_an_integration_reports_not_configured(monkeypat
     monkeypatch.setattr("adloop.runtime.deployment_mode", lambda: "server")
     monkeypatch.setattr("adloop.microsoft_ads.auth.local_credentials", no_local_files)
     monkeypatch.setattr("adloop.chatgpt_ads.client.local_api_key", no_local_files)
+    monkeypatch.setattr("adloop.roku_ads.auth.local_credentials", no_local_files)
     monkeypatch.setattr(reports, "get_account_summaries", lambda _c: _summaries())
     monkeypatch.setattr(reports, "probe_data_api", lambda _c, _p: None)
     previous = auth.get_credentials_provider()
@@ -152,6 +153,7 @@ def test_hosted_provider_without_an_integration_reports_not_configured(monkeypat
     runtime.set_default_config(AdLoopConfig(
         chatgpt_ads=ChatGPTAdsConfig(api_key="sk-ads-shared"),
         microsoft_ads=MicrosoftAdsConfig(developer_token="dev-token", client_id="app-id"),
+        roku_ads=RokuAdsConfig(client_id="roku-app", account_uid="PaccTest1"),
     ))
     try:
         status = server.health_check()
@@ -159,3 +161,4 @@ def test_hosted_provider_without_an_integration_reports_not_configured(monkeypat
         auth.set_credentials_provider(previous)
     assert status["chatgpt_ads"] == "not_configured"
     assert status["microsoft_ads"] == "not_configured"
+    assert status["roku_ads"] == "not_configured"
