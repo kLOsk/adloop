@@ -71,6 +71,7 @@ def get_campaign_performance(
     from adloop.ads.gaql import execute_query
 
     date_clause = _date_clause(date_range_start, date_range_end)
+    where = date_clause.removeprefix("AND ")
 
     query = f"""
         SELECT campaign.id, campaign.name, campaign.status,
@@ -79,12 +80,13 @@ def get_campaign_performance(
                metrics.conversions, metrics.conversions_value,
                metrics.ctr, metrics.average_cpc
         FROM campaign
-        WHERE campaign.status != 'REMOVED'
-          {date_clause}
+        WHERE {where}
         ORDER BY metrics.cost_micros DESC
     """
 
-    rows = execute_query(config, customer_id, query)
+    rows = _drop_idle_removed(
+        execute_query(config, customer_id, query), "campaign.status"
+    )
     currency_code = get_currency_code(config, customer_id)
     _enrich_cost_fields(rows, currency_code)
     share_error = _attach_impression_share(config, customer_id, rows, date_clause)
@@ -199,8 +201,7 @@ def _attach_impression_share(
         SELECT campaign.id, metrics.impressions,
                {", ".join(_IMPRESSION_SHARE_FIELDS)}
         FROM campaign
-        WHERE campaign.status != 'REMOVED'
-          AND campaign.advertising_channel_type IN ({channels})
+        WHERE campaign.advertising_channel_type IN ({channels})
           {date_clause}
     """
 
@@ -273,7 +274,7 @@ def get_ad_performance(
     """Get ad-level performance data including headlines, descriptions, and metrics."""
     from adloop.ads.gaql import execute_query
 
-    date_clause = _date_clause(date_range_start, date_range_end)
+    where = _date_clause(date_range_start, date_range_end).removeprefix("AND ")
 
     query = f"""
         SELECT campaign.name, campaign.id, ad_group.name, ad_group.id,
@@ -288,12 +289,13 @@ def get_ad_performance(
                metrics.impressions, metrics.clicks, metrics.ctr,
                metrics.conversions, metrics.cost_micros
         FROM ad_group_ad
-        WHERE ad_group_ad.status != 'REMOVED'
-          {date_clause}
+        WHERE {where}
         ORDER BY metrics.cost_micros DESC
     """
 
-    rows = execute_query(config, customer_id, query)
+    rows = _drop_idle_removed(
+        execute_query(config, customer_id, query), "ad_group_ad.status"
+    )
     currency_code = get_currency_code(config, customer_id)
     _enrich_cost_fields(rows, currency_code)
     for r in rows:
@@ -467,10 +469,11 @@ def get_keyword_performance(
     """Get keyword metrics including quality scores and competitive data."""
     from adloop.ads.gaql import execute_query
 
-    date_clause = _date_clause(date_range_start, date_range_end)
+    where = _date_clause(date_range_start, date_range_end).removeprefix("AND ")
 
     query = f"""
         SELECT campaign.name, ad_group.name,
+               ad_group_criterion.status,
                ad_group_criterion.keyword.text,
                ad_group_criterion.keyword.match_type,
                ad_group_criterion.quality_info.quality_score,
@@ -478,12 +481,13 @@ def get_keyword_performance(
                metrics.average_cpc, metrics.cost_micros,
                metrics.conversions
         FROM keyword_view
-        WHERE ad_group_criterion.status != 'REMOVED'
-          {date_clause}
+        WHERE {where}
         ORDER BY metrics.cost_micros DESC
     """
 
-    rows = execute_query(config, customer_id, query)
+    rows = _drop_idle_removed(
+        execute_query(config, customer_id, query), "ad_group_criterion.status"
+    )
     currency_code = get_currency_code(config, customer_id)
     _enrich_cost_fields(rows, currency_code)
 
@@ -940,14 +944,14 @@ def get_audience_performance(
     """Get audience segment performance metrics (remarketing, in-market, affinity, demographics)."""
     from adloop.ads.gaql import execute_query
 
-    date_clause = _date_clause(date_range_start, date_range_end)
+    where = _date_clause(date_range_start, date_range_end).removeprefix("AND ")
 
     campaign_filter = ""
     if campaign_id:
         campaign_filter = f"AND campaign.id = {campaign_id}"
 
     query = f"""
-        SELECT campaign.id, campaign.name,
+        SELECT campaign.id, campaign.name, campaign.status,
                campaign.advertising_channel_type,
                ad_group.id, ad_group.name,
                ad_group_criterion.display_name,
@@ -955,14 +959,15 @@ def get_audience_performance(
                metrics.impressions, metrics.clicks, metrics.cost_micros,
                metrics.conversions, metrics.ctr, metrics.average_cpc
         FROM ad_group_audience_view
-        WHERE campaign.status != 'REMOVED'
-          {date_clause}
+        WHERE {where}
           {campaign_filter}
         ORDER BY metrics.cost_micros DESC
         LIMIT 200
     """
 
-    rows = execute_query(config, customer_id, query)
+    rows = _drop_idle_removed(
+        execute_query(config, customer_id, query), "campaign.status"
+    )
     currency_code = get_currency_code(config, customer_id)
     _enrich_cost_fields(rows, currency_code)
 
@@ -1358,6 +1363,22 @@ def _improvement(base: float, potential: float) -> float | None:
     if potential == 0 and base != 0:
         return None
     return round(potential - base, 4)
+
+
+def _drop_idle_removed(rows: list[dict], status_field: str) -> list[dict]:
+    """Drop REMOVED rows that had no impressions in the period.
+
+    Date-ranged reports cannot filter on status in GAQL: status is today's,
+    metrics are the period's, so a status predicate hides spend from anything
+    removed since. GAQL has no OR, and ``metrics.impressions > 0`` alone would
+    also hide enabled entities with no impressions, which people look for.
+    Rows without a status field are kept.
+    """
+    return [
+        r for r in rows
+        if str(r.get(status_field)) != "REMOVED"
+        or (r.get("metrics.impressions") or 0) > 0
+    ]
 
 
 def _date_clause(start: str, end: str) -> str:
