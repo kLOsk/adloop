@@ -26,6 +26,7 @@ src/adloop/
 ├── ga4/               # GA4 Data + Admin API (reports, realtime, events)
 ├── ads/               # Google Ads API (read, write, GAQL, forecasting, PMax, recommendations)
 ├── reddit/            # Reddit Ads API v3 (own OAuth app, REST client, reads, PAUSED-creating writes)
+├── chatgpt_ads/       # ChatGPT Ads (OpenAI Advertiser API key, REST client, reads, paused-creating writes)
 └── safety/            # Guards, previews, audit logging
 ```
 

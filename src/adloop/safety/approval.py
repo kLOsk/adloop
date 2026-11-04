@@ -28,6 +28,7 @@ import contextvars
 import hashlib
 import hmac
 import json
+import re
 import secrets
 from dataclasses import dataclass
 from collections.abc import Iterator
@@ -278,6 +279,8 @@ def _platform_label(plan: ChangePlan) -> str:
     op = plan.operation
     if op.startswith("reddit_"):
         return "Reddit Ads"
+    if op.startswith("chatgpt_"):
+        return "ChatGPT Ads"
     if op.startswith("gtm_"):
         return "Google Tag Manager"
     if "key_event" in op:
@@ -285,21 +288,48 @@ def _platform_label(plan: ChangePlan) -> str:
     return "Google Ads"
 
 
+# Plan fields that carry the request an applier sends or the snapshot a
+# preflight compares; they are for the code, not for the person approving.
+_INTERNAL_FIELDS = frozenset({"body", "before", "image_source"})
+# Payload objects under names that other plans use for display text.
+_INTERNAL_IF_OBJECT = frozenset({"image"})
+# What the person approves first: the target and its before → after.
+_FIRST_FIELDS = ("entity_name", "current_status", "target_status", "changes")
+
+
+def display_fields(changes: dict) -> list[tuple[str, Any]]:
+    """The fields a dialog or card shows, the actual change first."""
+    def hidden(key: str, value: Any) -> bool:
+        if key in _INTERNAL_FIELDS:
+            return True
+        if key in _INTERNAL_IF_OBJECT and isinstance(value, (dict, list)) and value and (
+            isinstance(value, dict) or isinstance(value[0], dict)
+        ):
+            return True
+        # A second copy of the entity's name adds nothing.
+        return key == "name" and value == changes.get("entity_name")
+
+    shown = [(k, v) for k, v in changes.items() if not hidden(k, v)]
+    first = [item for key in _FIRST_FIELDS for item in shown if item[0] == key]
+    return first + [item for item in shown if item[0] not in _FIRST_FIELDS]
+
+
 def confirmation_message(plan: ChangePlan) -> str:
     """The dialog text: what changes, where, and what confirming does."""
-    title = plan.operation.replace("reddit_", "").replace("gtm_", "").replace("_", " ")
+    title = re.sub(r"^(reddit|chatgpt|gtm)_", "", plan.operation).replace("_", " ")
     target = " ".join(
         part for part in (plan.entity_type.replace("_", " "), plan.entity_id) if part
     )
     lines = [f"AdLoop: apply this change in {_platform_label(plan)}?", ""]
     lines.append(title.capitalize() + (f" ({target})" if target else ""))
-    for key, value in list(plan.changes.items())[:_MAX_DIALOG_FIELDS]:
+    fields = display_fields(plan.changes)
+    for key, value in fields[:_MAX_DIALOG_FIELDS]:
         text = value if isinstance(value, str) else json.dumps(value, default=str)
         if len(text) > 160:
             text = text[:157] + "..."
         lines.append(f"- {key.replace('_', ' ')}: {text}")
-    if len(plan.changes) > _MAX_DIALOG_FIELDS:
-        lines.append(f"- ... {len(plan.changes) - _MAX_DIALOG_FIELDS} more fields in the preview")
+    if len(fields) > _MAX_DIALOG_FIELDS:
+        lines.append(f"- ... {len(fields) - _MAX_DIALOG_FIELDS} more fields in the preview")
     lines.append("")
     if plan.requires_double_confirm:
         lines.append("This cannot be undone. Tick both boxes to apply it for real.")

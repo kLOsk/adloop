@@ -96,6 +96,19 @@ reddit:
   user_agent: ""
   token_path: "~/.adloop/reddit_token.json"
 
+chatgpt_ads:
+  # ChatGPT Ads (optional, OpenAI Advertiser API). Create a key in OpenAI Ads
+  # Manager -> Settings -> API keys (https://ads.openai.com/settings). It is an
+  # Ads key, not a platform.openai.com key. Each key belongs to exactly one ad
+  # account. Leave blank to read OPENAI_ADS_API_KEY from the environment.
+  api_key: ""
+  # Optional: the default key's ad account id (adacct_...). When set, a tool
+  # call for another account id is refused instead of reading this one.
+  ad_account_id: ""
+  # More ad accounts (agencies): one key per account id. A tool's
+  # ad_account_id picks the key.
+  accounts: {}
+
 safety:
   # Maximum daily budget allowed per campaign (in your account's currency).
   # AdLoop will reject any campaign creation or budget change above this.
