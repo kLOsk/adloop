@@ -1,5 +1,5 @@
 ---
-description: AdLoop MCP orchestration — Google Ads + Reddit Ads + ChatGPT Ads + GA4 + codebase intelligence
+description: AdLoop MCP orchestration — Google Ads + Reddit Ads + ChatGPT Ads + Microsoft Ads + GA4 + codebase intelligence
 globs:
 alwaysApply: true
 ---
@@ -14,7 +14,7 @@ You have access to AdLoop MCP tools that connect Google Ads, Reddit Ads and Goog
 
 | Tool | When to Use | Key Parameters |
 |------|-------------|----------------|
-| `health_check` | First thing to run when tools are failing — tests OAuth token, GA4, Ads, and (when configured) Reddit Ads and ChatGPT Ads connectivity | (none) |
+| `health_check` | First thing to run when tools are failing — tests OAuth token, GA4, Ads, and (when configured) Reddit Ads, ChatGPT Ads and Microsoft Advertising connectivity | (none) |
 
 **A tool you expect is missing?** Apps such as claude.ai, ChatGPT and Perplexity cache AdLoop's tool list from when the connection was made. `health_check` returns `adloop_version` and `tools_offered`, the tools this server offers to you. If the user asks for something a tool in `tools_offered` does and that tool isn't in your own tool list, don't improvise with other tools: tell the user their app shows an older list and to refresh the AdLoop connection (claude.ai: Settings → Connectors → AdLoop; ChatGPT: the AdLoop plugin's settings; Perplexity: remove and add the connector again; coding agents: reconnect the MCP server or start a new session).
 
@@ -280,6 +280,48 @@ ChatGPT Ads (OpenAI Ads Manager, ads.openai.com) through the OpenAI Advertiser A
 6. If performance moved suddenly, `get_chatgpt_change_history` for the days before
 7. Phone calls reach OpenAI only when call tracking sends them through the Conversions API (`action_source: phone_call`); the browser pixel never sees them. For call-driven businesses without that, compare against call-tracking or CRM data before concluding
 
+### Microsoft Advertising Tools
+
+Microsoft Advertising (Bing, Yahoo, AOL, DuckDuckGo search ads) through the REST API v13. Toolset `microsoft_ads`; needs `microsoft_ads.developer_token`, `microsoft_ads.client_id` (an Entra app with public client flows and the msads.manage permission) and a one-time `adloop microsoft-login` (browser sign-in on `http://localhost:8080/callback`; sign in with the user that has access to the ad accounts. Directories with security defaults block the device-code flow with sign-in error 530035, so `--device-code` is only a fallback). `customer_id` is the manager account, `ad_account_id` the default ad account; `list_microsoft_ads_accounts` shows both.
+
+| Tool | When to Use | Key Parameters |
+|------|-------------|----------------|
+| `list_microsoft_ads_accounts` | Discovery: the signed-in user, manager accounts, ad accounts (id, number, currency, time zone, status) | (none) |
+| `get_microsoft_campaigns` | Budget (own or shared), bidding, languages, included/excluded locations and location intent | `include_targeting` |
+| `get_microsoft_ad_groups` | Bid, network (search partners on/off), Audience Network exposure, dates, campaign status | `campaign_id` |
+| `get_microsoft_keywords` | Match type, bid, status, editorial review, parent statuses | `campaign_id`, `ad_group_id` |
+| `get_microsoft_ads` | Headlines (pins), descriptions, paths, final URLs, editorial review | `campaign_id`, `ad_group_id` |
+| `get_microsoft_performance` | Spend, clicks, CTR, CPC, conversions, CPA, revenue, impression share and share lost to budget/rank | `level` (account/campaign/ad_group/keyword/ad), date range, `breakdown` (date/device), `campaign_id`, `compact` |
+| `get_microsoft_search_terms` | What people searched, the keyword and match type it matched, waste candidates | date range, `campaign_id`, `min_clicks`, `compact` |
+| `get_microsoft_location_performance` | Where clicks came from; people physically there vs searching about the place | date range, `group_by` (city/metro/state/postal_code/most_specific) |
+| `get_microsoft_conversion_setup` | Audit: UET tag status, conversion goals (tracking status, excluded from bidding), campaign goals, clicks without conversions | date range, `min_clicks` |
+| `update_microsoft_campaign_budget` | Draft a new daily budget (own budget only; capped by `max_daily_budget`) | `campaign_id`, `daily_budget` |
+| `pause_microsoft_entity` / `enable_microsoft_entity` | Draft pausing or enabling a campaign, ad group, keyword or ad | `entity_type`, `entity_id`, `parent_id` (optional) |
+| `search_microsoft_locations` | Location ids (country, state, metro, city, postal code) by name; Microsoft's file is cached | `query`, `location_type` |
+| `update_microsoft_campaign` | Name, bid strategy (ManualCpc, EnhancedCpc, MaxClicks, MaxConversions + target CPA), tracking template, final URL suffix | `campaign_id` + fields |
+| `update_microsoft_campaign_targeting` | Included / excluded locations (full lists), location intent, ad schedule (replaces; account time zone, or the searcher's when the campaign uses AdScheduleUseSearcherTimeZone: the preview's `hours_in` says which) | `campaign_id`, `location_ids`, `excluded_location_ids`, `location_intent`, `ad_schedule` |
+| `draft_microsoft_campaign` | New Search campaign, paused, with budget, bidding, languages, locations, intent | `name`, `daily_budget`, `languages`, `location_ids` |
+| `draft_microsoft_ad_group` / `update_microsoft_ad_group` | New ad group (with keywords) / name, default bid, network, Audience Network adjustment | `campaign_id` or `ad_group_id` + fields |
+| `draft_microsoft_keywords` / `update_microsoft_keyword_bids` | Add keywords (duplicates skipped) / change keyword bids | `ad_group_id`, `keywords` or `bids` |
+| `get_microsoft_negative_keywords` | Direct negatives and shared lists with items, attachments and `remove_id`s | `campaign_id` |
+| `propose_microsoft_negative_keyword_list` / `add_to_microsoft_negative_keyword_list` | New shared list (attached) / append to a list | `list_name` or `list_id`, `keywords`, `campaign_ids` |
+| `attach_microsoft_negative_keyword_list` / `detach_microsoft_negative_keyword_list` | Link or unlink a list and campaigns | `list_id`, `campaign_ids` |
+| `add_microsoft_negative_keywords` | Negatives directly on a campaign or ad group | `campaign_id` or `ad_group_id`, `keywords` |
+| `draft_microsoft_responsive_search_ad` / `update_microsoft_responsive_search_ad` | New RSA (paused) / replace headlines, descriptions, URL, paths | `ad_group_id` or `ad_id` + copy |
+| `get_microsoft_ad_extensions` | Sitelinks, callouts, snippets, call extensions per campaign and account, with `remove_id`s | `campaign_id` |
+| `draft_microsoft_sitelinks` / `draft_microsoft_callouts` / `draft_microsoft_structured_snippet` / `draft_microsoft_call_extension` | Create and link extensions to a campaign (or the account) | `campaign_id` or `scope="account"` + content |
+| `remove_microsoft_entity` | Delete (irreversible, double confirmation): campaign, ad group, ad, keyword, or by `remove_id` a negative, list item, criterion, extension link | `entity_type`, `entity_id` |
+
+- **Statuses at every level.** Keyword and ad rows carry the ad group and campaign status; reports carry `campaign_status`, `ad_group_status`, `keyword_status`. An account whose status is not Active serves nothing; `BudgetPaused` campaigns stopped on budget.
+- **Location intent matters for local businesses.** `PeopleInOrSearchingForOrViewingPages` (Microsoft's default) also reaches people elsewhere searching about the area. `get_microsoft_location_performance` shows how much spend that "location of interest" traffic took.
+- **Monthly spend:** Microsoft may spend up to 30.4 × the daily budget in a month; the budget preview says so.
+- **Writes** go through draft → preview → `confirm_and_apply`. Microsoft has no validate-only mode: the dry run re-reads the target, refuses if the budget or status changed since the draft or the campaign moved to a shared budget, and re-checks the cap. The real apply runs the same checks again right before sending, so a change made in Microsoft Advertising in between is refused, not overwritten: draft again. Updates send only the changed field.
+- **Management rules** mirror Google Ads: broad match is refused on ManualCpc / EnhancedCpc campaigns, moving to manual bidding is refused while active broad keywords exist, new campaigns need languages and locations (default PeopleIn), new RSAs and campaigns are paused, while new keywords and ad groups are created Active as in Google Ads (the preview's `status_on_create` says so, and keywords in a live ad group serve as soon as they are applied), keyword and ad group bid raises are capped by `max_bid_increase_pct` (including a keyword falling back to the ad group bid), a first ad schedule needs a double confirmation. Replacing a schedule window deletes the old window before adding the new one when they overlap; the preview warns when that leaves the campaign briefly unscheduled. Negative keywords go in shared lists by default; every negative draft names active keywords it would block.
+- **Multi-step applies** (a campaign then its targeting, a list then its attachments, extensions then their links) end with `PARTIAL_APPLY` when a later step fails, or when Microsoft creates some items of a batch and refuses others: `created` lists the IDs that exist, and the plan is retired so nothing is created twice. Check the account, then draft only what is missing.
+- Reports are built asynchronously and take a few seconds; long date ranges at keyword or search-term level take longer.
+- Search terms with clicks and no conversions are candidates, not verdicts: calls from Microsoft ads convert outside its view unless call tracking feeds back.
+- **Conversions** come from Microsoft's `ConversionsQualified` columns (the old `Conversions` columns are deprecated and read 0 in keyword and search-term reports); conversion rate and CPA are computed from them. A UET tag is required only by URL, duration, pages-per-visit and event goals: offline-import goals need none, and an unverified tag that no active goal uses is a loose end (warn), not a broken setup.
+
 ### When user asks about organic traffic, SEO, or paid/organic overlap
 
 1. Call `list_gsc_sites` if no site is configured; confirm the property with the user
@@ -443,6 +485,7 @@ Same draft → preview → `confirm_and_apply` gate; the plan carries `platform:
 - `two_phase_apply: true` in config (always on for AdLoop Cloud) refuses `dry_run=false` with status `DRY_RUN_REQUIRED` until that plan_id has completed one `dry_run=true` pass. Run the dry run, show the user, then apply — do not retry `dry_run=false` in a loop.
 - All operations (including dry runs) are logged to `~/.adloop/audit.log`.
 - `blocked_operations` is checked again by `confirm_and_apply`: a plan whose operation was blocked after it was drafted is refused with status `BLOCKED`, dry run and apply alike.
+- **`PARTIAL_APPLY` and `UNKNOWN_OUTCOME`** (Microsoft): `PARTIAL_APPLY` means part of the change is in the account (`created` names it), from a multi-step apply whose later step failed or a batch Microsoft accepted only in part; `UNKNOWN_OUTCOME` means Microsoft never answered a create, so it may or may not exist. In both cases the plan is retired and cannot be applied again: read the account (`get_microsoft_*`), tell the user what exists, and draft only what is missing. ChatGPT Ads creates carry an idempotency key instead, so after a lost response the same plan can simply be applied again.
 
 ## Safety Rules (CRITICAL — always follow)
 

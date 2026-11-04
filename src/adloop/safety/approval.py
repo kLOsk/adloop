@@ -240,7 +240,7 @@ def is_app_only(meta: dict | None) -> bool:
 # ---------------------------------------------------------------------------
 
 DIALOG_KEY = "adloop_confirm"
-_MAX_DIALOG_FIELDS = 10
+_MAX_DIALOG_FIELDS = 14
 
 
 @dataclass
@@ -279,6 +279,8 @@ def _platform_label(plan: ChangePlan) -> str:
     op = plan.operation
     if op.startswith("reddit_"):
         return "Reddit Ads"
+    if op.startswith("microsoft_"):
+        return "Microsoft Advertising"
     if op.startswith("chatgpt_"):
         return "ChatGPT Ads"
     if op.startswith("gtm_"):
@@ -290,9 +292,12 @@ def _platform_label(plan: ChangePlan) -> str:
 
 # Plan fields that carry the request an applier sends or the snapshot a
 # preflight compares; they are for the code, not for the person approving.
-_INTERNAL_FIELDS = frozenset({"body", "before", "image_source"})
+_INTERNAL_FIELDS = frozenset({
+    "body", "before", "update", "operations", "criteria", "keyword_rows", "negative_rows",
+    "request", "image_source", "entity_kind", "update_audience_adjustment", "customer_id",
+})
 # Payload objects under names that other plans use for display text.
-_INTERNAL_IF_OBJECT = frozenset({"image"})
+_INTERNAL_IF_OBJECT = frozenset({"campaign", "ad", "ad_group", "image", "extensions"})
 # What the person approves first: the target and its before → after.
 _FIRST_FIELDS = ("entity_name", "current_status", "target_status", "changes")
 
@@ -316,7 +321,7 @@ def display_fields(changes: dict) -> list[tuple[str, Any]]:
 
 def confirmation_message(plan: ChangePlan) -> str:
     """The dialog text: what changes, where, and what confirming does."""
-    title = re.sub(r"^(reddit|chatgpt|gtm)_", "", plan.operation).replace("_", " ")
+    title = re.sub(r"^(reddit|microsoft|chatgpt|gtm)_", "", plan.operation).replace("_", " ")
     target = " ".join(
         part for part in (plan.entity_type.replace("_", " "), plan.entity_id) if part
     )

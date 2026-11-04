@@ -95,6 +95,27 @@ class ChatGPTAdsConfig:
 
 
 @dataclass
+class MicrosoftAdsConfig:
+    """Microsoft Advertising (Bing Ads) REST API.
+
+    Needs a developer token (Microsoft Ads → Settings → Developer settings,
+    or developers.ads.microsoft.com) and an Entra app registered as a public
+    client with the msads.manage permission (``client_id``). ``adloop
+    microsoft-login`` signs in once and stores the refresh token at
+    ``token_path``. ``customer_id`` is the manager account (CustomerId
+    header); ``ad_account_id`` the default ad account (CustomerAccountId).
+    """
+
+    developer_token: str = ""
+    client_id: str = ""
+    client_secret: str = ""  # only for confidential (web) apps; public clients leave it empty
+    tenant: str = "common"
+    customer_id: str = ""
+    ad_account_id: str = ""
+    token_path: str = "~/.adloop/microsoft_token.json"
+
+
+@dataclass
 class SafetyConfig:
     max_daily_budget: float = 50.0
     max_bid_increase_pct: int = 100
@@ -126,6 +147,7 @@ class AdLoopConfig:
     pagespeed: PageSpeedConfig = field(default_factory=PageSpeedConfig)
     reddit: RedditConfig = field(default_factory=RedditConfig)
     chatgpt_ads: ChatGPTAdsConfig = field(default_factory=ChatGPTAdsConfig)
+    microsoft_ads: MicrosoftAdsConfig = field(default_factory=MicrosoftAdsConfig)
     safety: SafetyConfig = field(default_factory=SafetyConfig)
     # Absolute path the config was resolved from (even if it did not exist
     # on disk when loaded). Used by the runtime to tell callers exactly
@@ -199,6 +221,7 @@ def load_config(config_path: str | None = None) -> AdLoopConfig:
     reddit_raw = raw.get("reddit", {}) or {}
     chatgpt_raw = raw.get("chatgpt_ads", {}) or {}
     chatgpt_accounts_raw = chatgpt_raw.get("accounts", {}) or {}
+    microsoft_raw = raw.get("microsoft_ads", {}) or {}
     safety_raw = raw.get("safety", {})
 
     return AdLoopConfig(
@@ -251,6 +274,15 @@ def load_config(config_path: str | None = None) -> AdLoopConfig:
                 )
                 if str(account).strip() and key and str(key).strip()
             },
+        ),
+        microsoft_ads=MicrosoftAdsConfig(
+            developer_token=_text(microsoft_raw, "developer_token"),
+            client_id=_text(microsoft_raw, "client_id"),
+            client_secret=_text(microsoft_raw, "client_secret"),
+            tenant=_text(microsoft_raw, "tenant", "common"),
+            customer_id=_text(microsoft_raw, "customer_id"),
+            ad_account_id=_text(microsoft_raw, "ad_account_id"),
+            token_path=_text(microsoft_raw, "token_path", "~/.adloop/microsoft_token.json"),
         ),
         safety=SafetyConfig(
             max_daily_budget=safety_raw.get("max_daily_budget", 50.0),

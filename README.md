@@ -264,6 +264,32 @@ ChatGPT Ads (OpenAI Ads Manager) through the OpenAI Advertiser API, with the sam
 
 > **Setup for ChatGPT Ads tools** — In OpenAI Ads Manager open **Settings → API keys** ([ads.openai.com/settings](https://ads.openai.com/settings)) and create an Advertiser API key (a platform.openai.com key does not work). Put it in `chatgpt_ads.api_key` in `~/.adloop/config.yaml`, or set `OPENAI_ADS_API_KEY`; agencies add further accounts under `chatgpt_ads.accounts`. OpenAI has no validate-only mode for single resources, so `confirm_and_apply(dry_run=true)` re-reads the target, refuses when a field the plan changes was edited since the preview, and re-checks the budget cap, the bid-increase cap, the landing page and that the key still belongs to the previewed account.
 
+### Microsoft Advertising Tools
+
+Microsoft Advertising (Bing, Yahoo, AOL and DuckDuckGo search ads) through the REST API v13, with the same safety model. `customer_id` is the manager account and `ad_account_id` the default ad account; every tool takes `ad_account_id` to pick another.
+
+| Tool | What It Does |
+|------|-------------|
+| `list_microsoft_ads_accounts` | The signed-in user, manager accounts and ad accounts (id, number, currency, time zone, status) |
+| `get_microsoft_campaigns` / `get_microsoft_ad_groups` / `get_microsoft_keywords` / `get_microsoft_ads` | Structure with the status of every parent level, budgets (own or shared), bidding, languages, included and excluded locations and location intent, bids, networks, Audience Network exposure, match types, RSA copy with pins, editorial review |
+| `get_microsoft_performance` | Spend, clicks, CTR, CPC, conversions, CPA, revenue, impression share and share lost to budget and rank per account/campaign/ad group/keyword/ad, optional date or device breakdown, compact mode with insights |
+| `get_microsoft_search_terms` | What people searched, the keyword and match type it matched, and waste candidates |
+| `get_microsoft_location_performance` | Where clicks came from, split into people physically in a place and people searching about it |
+| `get_microsoft_conversion_setup` | Audit of UET tags, conversion goals (tracking status, excluded from bidding), campaign goals and clicks without conversions |
+| `get_microsoft_negative_keywords` / `get_microsoft_ad_extensions` | Direct negatives, shared negative lists with their items and attachments, and sitelinks, callouts, snippets and call extensions per campaign and account, each with a `remove_id` |
+| `search_microsoft_locations` | Location ids (country, state, metro, city, postal code) by name from Microsoft's location file, cached |
+| `update_microsoft_campaign_budget` / `update_microsoft_campaign` / `update_microsoft_campaign_targeting` | Daily budget (capped by `max_daily_budget`), name, bid strategy, tracking template and final URL suffix, included and excluded locations, location intent, ad schedule |
+| `pause_microsoft_entity` / `enable_microsoft_entity` / `remove_microsoft_entity` | Status changes through the preview gate; removal is irreversible and double-confirmed |
+| `draft_microsoft_campaign` / `draft_microsoft_ad_group` / `update_microsoft_ad_group` | New Search campaigns (created **paused**, with languages and locations required) and ad groups with keywords; ad group name, default bid, network and Audience Network adjustment |
+| `draft_microsoft_keywords` / `update_microsoft_keyword_bids` | Add keywords (duplicates skipped) and change keyword bids, capped by `max_bid_increase_pct` including bids inherited from the ad group |
+| `add_microsoft_negative_keywords` / `propose_microsoft_negative_keyword_list` / `add_to_microsoft_negative_keyword_list` / `attach_microsoft_negative_keyword_list` / `detach_microsoft_negative_keyword_list` | Negatives on a campaign or ad group, or in shared lists; every draft names the active keywords a negative would block |
+| `draft_microsoft_responsive_search_ad` / `update_microsoft_responsive_search_ad` | New RSAs (created **paused**) and copy, URL and path changes |
+| `draft_microsoft_sitelinks` / `draft_microsoft_callouts` / `draft_microsoft_structured_snippet` / `draft_microsoft_call_extension` | Create extensions and link them to a campaign or the account |
+
+The same management rules as Google Ads apply: broad match is refused on manual bidding (at the draft and again at apply), moving to manual bidding is refused while active broad keywords exist, and a campaign's first ad schedule needs a double confirmation.
+
+> **Setup for Microsoft Advertising tools** — You need a developer token (Microsoft Advertising → **Settings → Developer settings**, or [developers.ads.microsoft.com](https://developers.ads.microsoft.com/Account)) and an app registration in Microsoft Entra ID: allow public client flows, add the delegated `msads.manage` permission of Microsoft Advertising, and add `http://localhost:8080/callback` as a mobile and desktop redirect URI. Put the token and the app's client id under `microsoft_ads` in `~/.adloop/config.yaml`, then run `adloop microsoft-login` and sign in with the user that has access to the ad accounts. It stores the refresh token at `~/.adloop/microsoft_token.json`. Directories with security defaults block the device-code flow (sign-in error 530035), so `adloop microsoft-login --device-code` is only a fallback. Microsoft has no validate-only mode, so `confirm_and_apply(dry_run=true)` re-reads the target, refuses one that changed since the draft and re-checks the caps; the real apply runs the same checks again first.
+
 ### Image Uploads
 
 An image on your computer, or one you attached in the chat, has no public URL, and an AI app cannot hand the file to a tool. `upload_images` gives it a way in.
@@ -563,6 +589,13 @@ All configuration lives in `~/.adloop/config.yaml`. See [`config.yaml.example`](
 | `chatgpt_ads` | `api_key` | *(empty)* | Advertiser API key from OpenAI Ads Manager → Settings → API keys; empty reads `OPENAI_ADS_API_KEY` |
 | `chatgpt_ads` | `ad_account_id` | *(empty)* | Optional: the default key's ad account id; a call for another account id is then refused instead of reading this one |
 | `chatgpt_ads` | `accounts` | `{}` | Further ad accounts, one key per `adacct_...` id; a tool's `ad_account_id` picks the key |
+| `microsoft_ads` | `developer_token` | *(empty)* | Microsoft Advertising developer token |
+| `microsoft_ads` | `client_id` | *(empty)* | Client id of your Entra app registration (public client, `msads.manage` permission) |
+| `microsoft_ads` | `client_secret` | *(empty)* | Only for a confidential (web) app; public clients leave it empty |
+| `microsoft_ads` | `tenant` | `common` | Entra tenant for sign-in |
+| `microsoft_ads` | `customer_id` | *(empty)* | Manager account id (the CustomerId header) |
+| `microsoft_ads` | `ad_account_id` | *(empty)* | Default ad account for every Microsoft tool |
+| `microsoft_ads` | `token_path` | `~/.adloop/microsoft_token.json` | Where `adloop microsoft-login` stores the refresh token |
 | `safety` | `max_daily_budget` | `50.00` | Maximum allowed daily budget per campaign |
 | `safety` | `require_dry_run` | `true` | Force all writes to dry-run mode |
 | `safety` | `two_phase_apply` | `false` | Refuse real applies until the plan had a dry-run pass |
@@ -587,6 +620,7 @@ Most MCP clients (claude.ai, ChatGPT, Cursor, …) load **every tool schema into
 | `merchant` | Merchant Center feed health |
 | `reddit` | Reddit Ads reads, writes, and planning |
 | `chatgpt_ads` | ChatGPT Ads reads, campaign management and conversion diagnostics |
+| `microsoft_ads` | Microsoft Advertising reads and campaign management |
 
 Google Ads can be narrowed further. Use one of these instead of `ads`:
 
@@ -634,6 +668,13 @@ src/adloop/
 │   ├── client.py      # OpenAI Advertiser API REST client — per-account keys, pagination, rate limits
 │   ├── read.py        # Account, campaigns, ad groups, ads, performance, conversions, setup audit, GA4 cross-check
 │   └── write.py       # Draft/preflight/apply for status, campaign, ad group and ad changes, paused creation
+├── microsoft_ads/
+│   ├── auth.py        # Entra sign-in (browser auth code + PKCE, device-code fallback), refresh tokens
+│   ├── client.py      # REST v13 client — Campaign Management, Customer Management, Reporting services
+│   ├── read.py        # Accounts, campaigns, ad groups, keywords, ads, reports, search terms, conversion audit
+│   ├── manage.py      # Drafts, preflight and apply for campaigns, targeting, keywords, negatives, ads, extensions
+│   └── write.py       # Budget and status drafts; routes every microsoft_ plan to its preflight and apply
+├── oauth_redirect.py  # One-shot localhost listener for sign-in redirects
 └── safety/
     ├── guards.py      # Budget caps, bid limits, blocked operations, Broad Match safety
     ├── preview.py     # Change plans and previews

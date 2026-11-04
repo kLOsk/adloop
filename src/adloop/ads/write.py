@@ -2902,6 +2902,7 @@ def confirm_and_apply(
     from adloop.ga4.write import GA4_OPERATIONS
 
     is_reddit = plan.operation.startswith("reddit_")
+    is_microsoft = plan.operation.startswith("microsoft_")
     is_chatgpt = plan.operation.startswith("chatgpt_")
     is_gtm = plan.operation.startswith("gtm_")
     is_ga4 = plan.operation in GA4_OPERATIONS
@@ -2910,6 +2911,7 @@ def confirm_and_apply(
     is_ads_reread = plan.operation == "dismiss_recommendations"
     platform_label = (
         "Reddit Ads" if is_reddit
+        else "Microsoft Advertising" if is_microsoft
         else "ChatGPT Ads" if is_chatgpt
         else "Google Tag Manager" if is_gtm
         else "Google Analytics" if is_ga4
@@ -2925,16 +2927,19 @@ def confirm_and_apply(
         # Either way a failed check leaves dry_run_result unset, so two-phase
         # apply keeps refusing the real write.
         try:
-            if is_reddit or is_gtm or is_chatgpt:
-                # Reddit, ChatGPT Ads and Tag Manager have no validate-only
-                # mode for these calls; the dry run re-reads the target and
-                # re-runs the safety checks against live values.
+            if is_reddit or is_gtm or is_microsoft or is_chatgpt:
+                # Reddit, Microsoft Advertising, ChatGPT Ads and Tag Manager
+                # have no validate-only mode for these calls; the dry run
+                # re-reads the target and re-runs the safety checks against
+                # live values.
                 from adloop.chatgpt_ads.write import preflight as chatgpt_preflight
                 from adloop.gtm.write import preflight as gtm_preflight
+                from adloop.microsoft_ads.write import preflight as microsoft_preflight
                 from adloop.reddit.write import preflight as reddit_preflight
 
                 preflight = (
                     reddit_preflight if is_reddit
+                    else microsoft_preflight if is_microsoft
                     else chatgpt_preflight if is_chatgpt
                     else gtm_preflight
                 )
@@ -2987,7 +2992,7 @@ def confirm_and_apply(
             )
             checked_against = (
                 f"re-checked the target against {platform_label}"
-                if is_reddit or is_chatgpt or is_gtm or is_ga4 or is_ads_reread
+                if is_reddit or is_microsoft or is_chatgpt or is_gtm or is_ga4 or is_ads_reread
                 else "sent the change to Google Ads in validate-only mode"
             )
             return {
@@ -3200,6 +3205,35 @@ def confirm_and_apply(
             and not e.sent_total
             and not e.unknown_status
         )
+        from adloop.safety.outcomes import PartialApplyError
+
+        if isinstance(e, PartialApplyError):
+            # Part of the change happened (or may have): replaying the plan
+            # would repeat it. Retire it and say what was done.
+            remove_plan(plan.plan_id)
+            log_mutation(
+                config.safety.log_file,
+                operation=plan.operation,
+                customer_id=plan.customer_id,
+                entity_type=plan.entity_type,
+                entity_id=plan.entity_id,
+                changes=plan.changes,
+                dry_run=False,
+                result="unknown_status" if e.unknown else "partial_apply",
+                error=error_message,
+            )
+            return {
+                "status": "UNKNOWN_OUTCOME" if e.unknown else "PARTIAL_APPLY",
+                "plan_id": plan.plan_id,
+                "operation": plan.operation,
+                "error": error_message,
+                "created": e.created,
+                "message": (
+                    "Part of this change may already be in the account, so the plan was retired "
+                    "and cannot be applied again. Read the account back, then draft only what is "
+                    "still missing."
+                ),
+            }
         if not plan.operation.startswith("upload_") or nothing_written:
             store_plan(plan)
 
@@ -4510,6 +4544,12 @@ def _execute_plan(
         from adloop.reddit.write import apply_plan
 
         return apply_plan(config, plan)
+
+    # Microsoft Advertising plans likewise have their own executor.
+    if plan.operation.startswith("microsoft_"):
+        from adloop.microsoft_ads.write import apply_plan as apply_microsoft_plan
+
+        return apply_microsoft_plan(config, plan)
 
     # ChatGPT Ads plans likewise have their own executor.
     if plan.operation.startswith("chatgpt_"):
