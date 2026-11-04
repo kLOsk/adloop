@@ -667,3 +667,204 @@ def apply_update_pmax_url_expansion(
     op.campaign_operation.update_mask.paths.append("asset_automation_settings")
     _send(client, cid, [op], validate_only)
     return {"validate_only": validate_only, "campaign": rn, "status": changes["status"]}
+
+
+# ---------------------------------------------------------------------------
+# Single-asset add / remove inside an existing asset group
+# ---------------------------------------------------------------------------
+
+# field type -> (min count Google requires, max count, max text length or None)
+ASSET_FIELD_LIMITS = {
+    "HEADLINE": (HEADLINE_MIN, HEADLINE_MAX, HEADLINE_MAX_LEN),
+    "LONG_HEADLINE": (LONG_HEADLINE_MIN, LONG_HEADLINE_MAX, LONG_HEADLINE_MAX_LEN),
+    "DESCRIPTION": (DESCRIPTION_MIN, DESCRIPTION_MAX, DESCRIPTION_MAX_LEN),
+    "BUSINESS_NAME": (1, 1, BUSINESS_NAME_MAX_LEN),
+    "MARKETING_IMAGE": (1, 20, None),
+    "SQUARE_MARKETING_IMAGE": (1, 20, None),
+    "LOGO": (1, 5, None),
+    "LANDSCAPE_LOGO": (0, 5, None),
+}
+TEXT_FIELDS = ("HEADLINE", "LONG_HEADLINE", "DESCRIPTION")
+IMAGE_FIELDS = ("MARKETING_IMAGE", "SQUARE_MARKETING_IMAGE", "LOGO", "LANDSCAPE_LOGO")
+
+
+def _group_field_counts(config, customer_id: str, asset_group_id: str) -> dict[str, list[str]]:
+    """Return {field_type: [asset ids]} for non-removed links of one asset group."""
+    from adloop.ads.gaql import execute_query
+
+    query = f"""
+        SELECT asset_group_asset.field_type, asset_group_asset.asset,
+               asset_group_asset.status
+        FROM asset_group_asset
+        WHERE asset_group.id = {asset_group_id}
+          AND asset_group_asset.status != 'REMOVED'
+    """
+    out: dict[str, list[str]] = {}
+    for row in execute_query(config, customer_id, query):
+        ft = str(row.get("asset_group_asset.field_type", ""))
+        aid = str(row.get("asset_group_asset.asset", "")).rsplit("/", 1)[-1]
+        out.setdefault(ft, []).append(aid)
+    return out
+
+
+def check_asset_group_asset_removal(config, customer_id: str, entity_id: str) -> list[str]:
+    """Errors if removing ``assetGroupId~assetId~fieldType`` breaks a Google minimum.
+
+    Fails closed: if the group cannot be read, the removal is refused.
+    """
+    parts = str(entity_id).split("~")
+    if len(parts) != 3 or not all(p.strip() for p in parts):
+        return [f"asset_group_asset entity_id must be 'assetGroupId~assetId~fieldType', got '{entity_id}'"]
+    ag_id, asset_id, field = (p.strip() for p in parts)
+    if not ag_id.isdigit() or not asset_id.isdigit():
+        return ["asset_group_id and asset_id must be numeric"]
+    field = field.upper()
+    if field not in ASSET_FIELD_LIMITS:
+        return [f"field_type '{field}' must be one of {sorted(ASSET_FIELD_LIMITS)}"]
+    try:
+        counts = _group_field_counts(config, customer_id, ag_id)
+    except Exception as e:  # fail closed
+        return [f"could not read asset group {ag_id} to check minimums: {e}"]
+    linked = counts.get(field, [])
+    if asset_id not in linked:
+        return [f"asset {asset_id} is not linked to asset group {ag_id} as {field}"]
+    minimum = ASSET_FIELD_LIMITS[field][0]
+    if len(linked) - 1 < minimum:
+        return [
+            f"removing this {field} would leave {len(linked) - 1} in asset group {ag_id}; "
+            f"Google requires at least {minimum}. Add the replacement first, then remove."
+        ]
+    return []
+
+
+def validate_asset_group_additions(add: list[dict] | None) -> tuple[list[dict], list[str]]:
+    errors: list[str] = []
+    cleaned: list[dict] = []
+    if not add:
+        return [], ["add must be a non-empty list of {field_type, text | image_asset_id}"]
+    for i, item in enumerate(add, 1):
+        label = f"add #{i}"
+        if not isinstance(item, dict):
+            errors.append(f"{label}: must be an object")
+            continue
+        field = str(item.get("field_type", "")).strip().upper()
+        if field in TEXT_FIELDS:
+            text = str(item.get("text") or "").strip()
+            if item.get("image_asset_id"):
+                errors.append(f"{label}: {field} takes text, not image_asset_id")
+            max_len = ASSET_FIELD_LIMITS[field][2]
+            if not text:
+                errors.append(f"{label}: text is required for {field}")
+            elif len(text) > max_len:
+                errors.append(f"{label}: {len(text)} chars, max {max_len} for {field} ({text!r})")
+            else:
+                cleaned.append({"field_type": field, "text": text})
+        elif field in IMAGE_FIELDS:
+            aid = str(item.get("image_asset_id") or "").strip()
+            if item.get("text"):
+                errors.append(f"{label}: {field} takes image_asset_id, not text")
+            if not aid.isdigit():
+                errors.append(f"{label}: image_asset_id must be a numeric asset ID")
+            else:
+                cleaned.append({"field_type": field, "image_asset_id": aid})
+        else:
+            errors.append(
+                f"{label}: field_type '{field}' must be one of {list(TEXT_FIELDS + IMAGE_FIELDS)}"
+            )
+    return cleaned, errors
+
+
+def draft_pmax_asset_group_assets(
+    config: "AdLoopConfig",
+    *,
+    customer_id: str = "",
+    asset_group_id: str = "",
+    add: list[dict] | None = None,
+) -> dict:
+    """Draft adding single assets to an existing PMax asset group."""
+    from adloop.safety.guards import SafetyViolation, check_blocked_operation
+    from adloop.safety.preview import ChangePlan, store_plan
+
+    try:
+        check_blocked_operation("add_pmax_asset_group_assets", config.safety)
+    except SafetyViolation as e:
+        return {"error": str(e)}
+    errors: list[str] = []
+    if not str(asset_group_id or "").strip().isdigit():
+        errors.append("asset_group_id must be numeric")
+    cleaned, add_errors = validate_asset_group_additions(add)
+    errors.extend(add_errors)
+    if errors:
+        return {"error": "Validation failed", "details": errors}
+    # Cap check (best effort: if the group cannot be read, Google enforces it).
+    try:
+        counts = _group_field_counts(config, customer_id, str(asset_group_id).strip())
+    except Exception:
+        counts = None
+    if counts is not None:
+        adding: dict[str, int] = {}
+        for item in cleaned:
+            adding[item["field_type"]] = adding.get(item["field_type"], 0) + 1
+        for field, n in adding.items():
+            cap = ASSET_FIELD_LIMITS[field][1]
+            have = len(counts.get(field, []))
+            if have + n > cap:
+                errors.append(
+                    f"{field}: group already has {have}, adding {n} exceeds the max of {cap}. "
+                    "Remove one first (remove_entity asset_group_asset)."
+                )
+        if errors:
+            return {"error": "Validation failed", "details": errors}
+    plan = ChangePlan(
+        operation="add_pmax_asset_group_assets",
+        entity_type="asset_group_asset",
+        entity_id=str(asset_group_id).strip(),
+        customer_id=customer_id,
+        changes={"asset_group_id": str(asset_group_id).strip(), "add": cleaned},
+    )
+    store_plan(plan)
+    return plan.to_preview()
+
+
+def build_asset_group_asset_add_ops(client, cid: str, changes: dict):
+    """Return (operations, labels): create text assets as needed, then link."""
+    ops, labels = [], []
+    asset_service = client.get_service("AssetService")
+    ag_rn = client.get_service("AssetGroupService").asset_group_path(
+        cid, changes["asset_group_id"]
+    )
+    links: list[tuple[str, str]] = []
+    counter = 0
+    for item in changes["add"]:
+        if item.get("text"):
+            counter += 1
+            tid = str(-(2000 + counter))
+            op = client.get_type("MutateOperation")
+            a = op.asset_operation.create
+            a.resource_name = asset_service.asset_path(cid, tid)
+            a.text_asset.text = item["text"]
+            ops.append(op); labels.append("asset")
+            links.append((asset_service.asset_path(cid, tid), item["field_type"]))
+        else:
+            links.append(
+                (asset_service.asset_path(cid, item["image_asset_id"]), item["field_type"])
+            )
+    for asset_rn, field in links:
+        op = client.get_type("MutateOperation")
+        aga = op.asset_group_asset_operation.create
+        aga.asset_group = ag_rn
+        aga.asset = asset_rn
+        aga.field_type = getattr(client.enums.AssetFieldTypeEnum, field)
+        ops.append(op); labels.append("asset_group_asset")
+    return ops, labels
+
+
+def apply_add_pmax_asset_group_assets(
+    client, cid: str, changes: dict, validate_only: bool = False
+) -> dict:
+    ops, labels = build_asset_group_asset_add_ops(client, cid, changes)
+    resp = _send(client, cid, ops, validate_only)
+    result = {"validate_only": validate_only, "operations": len(ops)}
+    if not validate_only:
+        result.update(_collect(resp, labels))
+    return result

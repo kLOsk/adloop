@@ -135,6 +135,7 @@ _WRITE_TOOL_NAMES = {
     "draft_pmax_campaign",
     "draft_pmax_asset_group",
     "draft_pmax_url_expansion",
+    "draft_pmax_asset_group_assets",
     "draft_ad_group",
     "update_campaign",
     "draft_responsive_search_ad",
@@ -1175,6 +1176,35 @@ def draft_pmax_asset_group(
         audience_id=audience_id,
         path1=path1,
         path2=path2,
+    )
+
+
+@mcp.tool(annotations=_WRITE)
+@_safe
+def draft_pmax_asset_group_assets(
+    asset_group_id: str,
+    add: _DictList,
+    customer_id: str = "",
+) -> dict:
+    """Draft adding single assets to an EXISTING PMax asset group. Returns a PREVIEW.
+
+    add: list of {"field_type": HEADLINE | LONG_HEADLINE | DESCRIPTION,
+      "text": "..."} (text asset is created, then linked) or
+      {"field_type": MARKETING_IMAGE | SQUARE_MARKETING_IMAGE | LOGO |
+      LANDSCAPE_LOGO, "image_asset_id": "123"} (existing image asset linked).
+    Limits: headline 30 chars, long headline 90, description 90.
+    Run validate_plan_only first, then confirm_and_apply. To swap an asset,
+    add the new one first, then remove_entity entity_type=asset_group_asset
+    (id assetGroupId~assetId~fieldType); removals that drop a field below
+    Google's minimum are refused.
+    """
+    from adloop.ads.pmax_write import draft_pmax_asset_group_assets as _impl
+
+    return _impl(
+        _config,
+        customer_id=customer_id or _config.ads.customer_id,
+        asset_group_id=asset_group_id,
+        add=add,
     )
 
 

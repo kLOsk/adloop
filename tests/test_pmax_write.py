@@ -366,7 +366,12 @@ class TestServerGuards:
     def test_new_tools_are_customer_locked(self, monkeypatch):
         from adloop import server
 
-        for name in ("draft_pmax_campaign", "draft_pmax_asset_group", "draft_pmax_url_expansion"):
+        for name in (
+            "draft_pmax_campaign",
+            "draft_pmax_asset_group",
+            "draft_pmax_url_expansion",
+            "draft_pmax_asset_group_assets",
+        ):
             assert name in server._WRITE_TOOL_NAMES
             monkeypatch.setenv("ADLOOP_ALLOWED_CUSTOMER_ID", "3865591631")
             with pytest.raises(RuntimeError, match="restricted to customer_id"):
@@ -475,3 +480,127 @@ class TestUrlExpansion:
             c = pmax.get_pmax_url_expansion(config, customer_id="1")["campaigns"][0]
         assert c["final_url_expansion"] == "OPTED_OUT"
         assert c["asset_automation_settings"]["TEXT_ASSET_AUTOMATION"] == "OPTED_IN"
+
+
+def _rows(ag, spec):
+    """spec: {field: [asset ids]} -> GAQL-style rows."""
+    return [
+        {"asset_group_asset.field_type": f, "asset_group_asset.asset": f"customers/1/assets/{a}"}
+        for f, ids in spec.items() for a in ids
+    ]
+
+
+class TestAssetGroupAsset:
+    def test_remove_drafts_when_above_minimum(self, config):
+        rows = _rows("1", {"SQUARE_MARKETING_IMAGE": ["10", "11"]})
+        with patch("adloop.ads.gaql.execute_query", return_value=rows):
+            r = remove_entity(config, customer_id="1", entity_type="asset_group_asset",
+                              entity_id="5~10~SQUARE_MARKETING_IMAGE")
+        assert r["entity_type"] == "asset_group_asset"
+        remove_plan(r["plan_id"])
+
+    @pytest.mark.parametrize("field", ["SQUARE_MARKETING_IMAGE", "LONG_HEADLINE"])
+    def test_remove_refused_below_minimum(self, config, field):
+        rows = _rows("1", {field: ["10"]})
+        with patch("adloop.ads.gaql.execute_query", return_value=rows):
+            r = remove_entity(config, customer_id="1", entity_type="asset_group_asset",
+                              entity_id=f"5~10~{field}")
+        assert r["error"] == "Validation failed"
+        assert "at least 1" in r["details"][0]
+
+    def test_remove_refused_when_not_linked_or_unreadable(self, config):
+        with patch("adloop.ads.gaql.execute_query", return_value=[]):
+            r = remove_entity(config, customer_id="1", entity_type="asset_group_asset",
+                              entity_id="5~10~LOGO")
+        assert "not linked" in r["details"][0]
+        with patch("adloop.ads.gaql.execute_query", side_effect=RuntimeError("boom")):
+            r = remove_entity(config, customer_id="1", entity_type="asset_group_asset",
+                              entity_id="5~10~LOGO")
+        assert "could not read" in r["details"][0]
+
+    def test_remove_bad_id(self, config):
+        r = remove_entity(config, customer_id="1", entity_type="asset_group_asset", entity_id="5~10")
+        assert r["error"] == "Validation failed"
+
+    def test_apply_builds_remove_op(self, real_client):
+        svc = MagicMock()
+        real_client.get_service = MagicMock(return_value=svc)
+        out = _apply_remove(real_client, "1", "asset_group_asset", "5~10~SQUARE_MARKETING_IMAGE", validate_only=True)
+        req = svc.mutate.call_args.kwargs["request"]
+        assert req.validate_only is True
+        assert req.mutate_operations[0].asset_group_asset_operation.remove == \
+            "customers/1/assetGroupAssets/5~10~SQUARE_MARKETING_IMAGE"
+        assert out["status"] == "validated"
+
+    def test_validate_only_routes_asset_group_asset_removal(self, config, real_client):
+        svc = MagicMock()
+        real_client.get_service = MagicMock(return_value=svc)
+        rows = _rows("1", {"SQUARE_MARKETING_IMAGE": ["10", "11"]})
+        with patch("adloop.ads.gaql.execute_query", return_value=rows):
+            r = remove_entity(config, customer_id="1", entity_type="asset_group_asset",
+                              entity_id="5~10~SQUARE_MARKETING_IMAGE")
+        with patch("adloop.ads.client.get_ads_client", return_value=real_client):
+            out = validate_plan_only(config, plan_id=r["plan_id"])
+        assert out["status"] == "VALIDATE_ONLY_OK"
+        assert svc.mutate.call_args.kwargs["request"].validate_only is True
+        remove_plan(r["plan_id"])
+
+    def test_draft_add_text_and_image(self, config):
+        r = pmax_write.draft_pmax_asset_group_assets(
+            config, customer_id="1", asset_group_id="5",
+            add=[{"field_type": "long_headline", "text": "Free consult"},
+                 {"field_type": "SQUARE_MARKETING_IMAGE", "image_asset_id": "99"}],
+        )
+        assert r["operation"] == "add_pmax_asset_group_assets"
+        assert r["changes"]["add"][0] == {"field_type": "LONG_HEADLINE", "text": "Free consult"}
+        remove_plan(r["plan_id"])
+
+    @pytest.mark.parametrize("add", [
+        None, [], [{"field_type": "HEADLINE", "text": "x" * 31}],
+        [{"field_type": "LONG_HEADLINE", "text": "x" * 91}],
+        [{"field_type": "HEADLINE"}], [{"field_type": "BOGUS", "text": "a"}],
+        [{"field_type": "SQUARE_MARKETING_IMAGE", "image_asset_id": "abc"}],
+        [{"field_type": "HEADLINE", "text": "a", "image_asset_id": "1"}],
+    ])
+    def test_draft_add_rejects_bad_input(self, config, add):
+        r = pmax_write.draft_pmax_asset_group_assets(config, customer_id="1", asset_group_id="5", add=add)
+        assert r["error"] == "Validation failed"
+
+    def test_draft_add_rejects_bad_group(self, config):
+        r = pmax_write.draft_pmax_asset_group_assets(
+            config, customer_id="1", asset_group_id="x", add=[{"field_type": "HEADLINE", "text": "a"}])
+        assert r["error"] == "Validation failed"
+
+    def test_add_ops_create_text_asset_then_link(self, real_client):
+        ch = {"asset_group_id": "5", "add": [
+            {"field_type": "LONG_HEADLINE", "text": "Free consult"},
+            {"field_type": "SQUARE_MARKETING_IMAGE", "image_asset_id": "99"}]}
+        ops, labels = pmax_write.build_asset_group_asset_add_ops(real_client, "1", ch)
+        assert labels == ["asset", "asset_group_asset", "asset_group_asset"]
+        assert ops[0].asset_operation.create.text_asset.text == "Free consult"
+        l0 = ops[1].asset_group_asset_operation.create
+        assert l0.asset == ops[0].asset_operation.create.resource_name
+        assert l0.asset_group == "customers/1/assetGroups/5"
+        assert l0.field_type.name == "LONG_HEADLINE"
+        assert ops[2].asset_group_asset_operation.create.asset == "customers/1/assets/99"
+
+    def test_add_validate_only_routes_and_apply_sends(self, config, real_client):
+        svc = MagicMock()
+        real_client.get_service = MagicMock(side_effect=lambda n: svc if n == "GoogleAdsService" else
+                                            __import__("google.ads.googleads.client", fromlist=["x"]).GoogleAdsClient.get_service(real_client, n))
+        r = pmax_write.draft_pmax_asset_group_assets(
+            config, customer_id="1", asset_group_id="5", add=[{"field_type": "HEADLINE", "text": "Hi"}])
+        with patch("adloop.ads.client.get_ads_client", return_value=real_client):
+            out = validate_plan_only(config, plan_id=r["plan_id"])
+        assert out["status"] == "VALIDATE_ONLY_OK"
+        assert svc.mutate.call_args.kwargs["request"].validate_only is True
+        remove_plan(r["plan_id"])
+
+    def test_draft_add_refused_at_max(self, config):
+        rows = _rows("1", {"LONG_HEADLINE": ["1", "2", "3", "4", "5"]})
+        with patch("adloop.ads.gaql.execute_query", return_value=rows):
+            r = pmax_write.draft_pmax_asset_group_assets(
+                config, customer_id="1", asset_group_id="5",
+                add=[{"field_type": "LONG_HEADLINE", "text": "one more"}])
+        assert r["error"] == "Validation failed"
+        assert "max of 5" in r["details"][0]

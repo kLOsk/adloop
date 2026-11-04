@@ -777,6 +777,9 @@ def remove_entity(
     - ``customer_asset``: ``assetId~fieldType``
     - ``asset``: bare asset ID
     - ``asset_group``: bare PMax asset group ID
+    - ``asset_group_asset``: ``assetGroupId~assetId~fieldType`` (unlinks one
+      asset from a PMax asset group; refused if the group would fall below
+      Google's minimum for that field)
 
     This is a DESTRUCTIVE operation — removed entities cannot be re-enabled.
     Prefer ``pause_entity`` unless the user explicitly wants permanent removal.
@@ -800,6 +803,14 @@ def remove_entity(
         errors.append("entity_id is required")
     if errors:
         return {"error": "Validation failed", "details": errors}
+
+    if entity_type == "asset_group_asset":
+        from adloop.ads.pmax_write import check_asset_group_asset_removal
+
+        entity_id = entity_id.replace(",", "~")
+        guard_errors = check_asset_group_asset_removal(config, customer_id, entity_id)
+        if guard_errors:
+            return {"error": "Validation failed", "details": guard_errors}
 
     # Normalize composite IDs: commas → tildes
     if entity_type in ("campaign_asset", "customer_asset"):
@@ -1508,7 +1519,7 @@ def confirm_and_apply(
 _VALID_MATCH_TYPES = {"EXACT", "PHRASE", "BROAD"}
 _VALID_ENTITY_TYPES = {"campaign", "ad_group", "ad", "keyword"}
 _REMOVABLE_ENTITY_TYPES = _VALID_ENTITY_TYPES | {
-    "ad_group_ad", "asset_group",
+    "ad_group_ad", "asset_group", "asset_group_asset",
     "negative_keyword", "campaign_asset", "asset", "customer_asset",
     "shared_criterion",
 }
@@ -2160,6 +2171,7 @@ def _execute_plan(config: AdLoopConfig, plan: object) -> dict:
         "create_pmax_campaign": _apply_create_pmax_campaign,
         "create_pmax_asset_group": _apply_create_pmax_asset_group,
         "update_pmax_url_expansion": _apply_update_pmax_url_expansion,
+        "add_pmax_asset_group_assets": _apply_add_pmax_asset_group_assets,
     }
 
     handler = dispatch.get(plan.operation)
@@ -2179,6 +2191,12 @@ def _execute_plan(config: AdLoopConfig, plan: object) -> dict:
         return handler(client, cid, plan.entity_type, plan.entity_id)
 
     return handler(client, cid, plan.changes)
+
+
+def _apply_add_pmax_asset_group_assets(client: object, cid: str, changes: dict) -> dict:
+    from adloop.ads.pmax_write import apply_add_pmax_asset_group_assets
+
+    return apply_add_pmax_asset_group_assets(client, cid, changes)
 
 
 def _apply_update_pmax_url_expansion(client: object, cid: str, changes: dict) -> dict:
@@ -2215,21 +2233,28 @@ def validate_plan_only(config: AdLoopConfig, *, plan_id: str) -> dict:
     plan = get_plan(plan_id)
     if plan is None:
         return {"error": f"No pending plan found with id '{plan_id}'."}
-    from adloop.ads.pmax_write import apply_update_pmax_url_expansion
+    from adloop.ads.pmax_write import (
+        apply_add_pmax_asset_group_assets,
+        apply_update_pmax_url_expansion,
+    )
 
     fn = {
         "create_pmax_campaign": apply_create_pmax_campaign,
         "create_pmax_asset_group": apply_create_pmax_asset_group,
         "update_pmax_url_expansion": apply_update_pmax_url_expansion,
+        "add_pmax_asset_group_assets": apply_add_pmax_asset_group_assets,
     }.get(plan.operation)
-    if plan.operation == "remove_entity" and plan.entity_type == "asset_group":
+    if plan.operation == "remove_entity" and plan.entity_type in (
+        "asset_group", "asset_group_asset",
+    ):
         eid = plan.entity_id
+        etype = plan.entity_type
 
         def fn(client, cid, changes, validate_only=False):
-            return _apply_remove(client, cid, "asset_group", eid, validate_only=validate_only)
+            return _apply_remove(client, cid, etype, eid, validate_only=validate_only)
 
     if fn is None:
-        return {"error": f"validate_only is supported for PMax plans and asset_group removal only, not '{plan.operation}'."}
+        return {"error": f"validate_only is supported for PMax plans and asset_group / asset_group_asset removal only, not '{plan.operation}'."}
     client = get_ads_client(config)
     try:
         result = fn(client, normalize_customer_id(plan.customer_id), plan.changes, validate_only=True)
@@ -2743,11 +2768,20 @@ def _apply_remove(
     validate_only: bool = False,
 ) -> dict:
     """Remove an entity via the REMOVE mutate operation (irreversible)."""
-    if entity_type == "asset_group":
+    if entity_type in ("asset_group", "asset_group_asset"):
         ga_service = client.get_service("GoogleAdsService")
         op = client.get_type("MutateOperation")
-        resource_name = f"customers/{cid}/assetGroups/{entity_id}"
-        op.asset_group_operation.remove = resource_name
+        if entity_type == "asset_group_asset":
+            if len(entity_id.split("~")) != 3:
+                raise ValueError(
+                    "asset_group_asset entity_id must be "
+                    f"'assetGroupId~assetId~fieldType', got '{entity_id}'"
+                )
+            resource_name = f"customers/{cid}/assetGroupAssets/{entity_id}"
+            op.asset_group_asset_operation.remove = resource_name
+        else:
+            resource_name = f"customers/{cid}/assetGroups/{entity_id}"
+            op.asset_group_operation.remove = resource_name
         request = client.get_type("MutateGoogleAdsRequest")
         request.customer_id = cid
         request.mutate_operations.append(op)
