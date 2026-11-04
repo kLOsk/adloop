@@ -598,6 +598,29 @@ def _sha256_hex(value: str) -> str:
     return hashlib.sha256(value.encode("utf-8")).hexdigest()
 
 
+_SHA256_HEX_RE = re.compile(r"[0-9a-fA-F]{64}")
+_SHA256_OF_NOTHING = hashlib.sha256(b"").hexdigest()
+
+
+def _prehashed(value: str) -> str:
+    """A cell that already holds a SHA-256 hex digest, lowercased; else "".
+
+    A CRM export can hash before it writes, so raw values never reach disk.
+    Hashing such a digest again, or reading it as a malformed address, would
+    upload an identifier that matches nobody.
+    """
+    text = (value or "").strip()
+    return text.lower() if _SHA256_HEX_RE.fullmatch(text) else ""
+
+
+def _blank_if_hash_of_nothing(value: str) -> str:
+    """An export that hashes every cell turns a blank one into the digest of "".
+
+    That digest identifies nobody, so it counts as the blank it was.
+    """
+    return "" if _prehashed(value) == _SHA256_OF_NOTHING else value
+
+
 def _normalize_email(email: str) -> str:
     """Normalize an email the way Enhanced Conversions expect it hashed.
 
@@ -2348,7 +2371,9 @@ def _parse_ec_for_leads_csv(
     Each is normalized (email→trim+lowercase, phone→E.164, names→trim+
     lowercase) and then SHA-256-hashed here. Returned rows contain ONLY the
     hashes (``*_sha256`` keys) plus non-PII fields — the raw values never
-    leave this function.
+    leave this function. A cell that already is a SHA-256 hex digest is used
+    as it is (``prehashed_cells`` counts those), and the digest of an empty
+    string counts as a blank cell.
     """
     records, errors, timezone = _read_upload_csv(csv_path)
     if errors:
@@ -2394,16 +2419,22 @@ def _parse_ec_for_leads_csv(
         if "Order ID" in optional_col:
             order_id = raw[optional_col["Order ID"]].strip()
         # Normalize THEN hash. Raw values are discarded immediately.
-        raw_email = raw[col["Email"]]
+        raw_email = _blank_if_hash_of_nothing(raw[col["Email"]])
+        email_hash = _prehashed(raw_email)
         email_norm = _normalize_email(raw_email)
-        raw_phone = raw[col["Phone Number"]]
-        phone_norm = _normalize_phone_e164(raw_phone, default_region)
+        raw_phone = _blank_if_hash_of_nothing(raw[col["Phone Number"]])
+        phone_hash = _prehashed(raw_phone)
+        phone_norm = _normalize_phone_e164(raw_phone, default_region) if not phone_hash else ""
         # A phone that is not E.164 hashes to a value Google can never match —
         # sending it would only pad the payload. Keep the row (email/address
         # may still match) but drop the identifier and say so.
-        phone_usable = phone_norm.startswith("+")
-        first_norm = _normalize_name(raw[col["First Name"]])
-        last_norm = _normalize_name(raw[col["Last Name"]])
+        phone_usable = bool(phone_hash) or phone_norm.startswith("+")
+        raw_first = _blank_if_hash_of_nothing(raw[col["First Name"]])
+        raw_last = _blank_if_hash_of_nothing(raw[col["Last Name"]])
+        first_hash = _prehashed(raw_first)
+        last_hash = _prehashed(raw_last)
+        first_norm = _normalize_name(raw_first)
+        last_norm = _normalize_name(raw_last)
 
         def _optional(name: str) -> str:
             return raw[optional_col[name]].strip() if name in optional_col else ""
@@ -2446,13 +2477,14 @@ def _parse_ec_for_leads_csv(
             postal = ""
         out.append({
             "source_line": source_line,
-            "email_sha256": _sha256_hex(email_norm),
+            "email_sha256": email_hash or _sha256_hex(email_norm),
             "email_was_given": bool((raw_email or "").strip()),
-            "phone_sha256": _sha256_hex(phone_norm) if phone_usable else "",
+            "phone_sha256": phone_hash or (_sha256_hex(phone_norm) if phone_usable else ""),
             "phone_was_given": bool((raw_phone or "").strip()),
             "phone_usable": phone_usable,
-            "first_name_sha256": _sha256_hex(first_norm),
-            "last_name_sha256": _sha256_hex(last_norm),
+            "first_name_sha256": first_hash or _sha256_hex(first_norm),
+            "last_name_sha256": last_hash or _sha256_hex(last_norm),
+            "prehashed_cells": sum(map(bool, (email_hash, phone_hash, first_hash, last_hash))),
             "postal_code": postal,
             "country_code": country,
             "conversion_name": raw[col["Conversion Name"]].strip(),
@@ -2483,6 +2515,7 @@ def _match_warnings(
     address_without_names: list[int],
     unusable_phones: list[int],
     unusable_emails: list[int],
+    prehashed: list[int] | None = None,
 ) -> list[str]:
     """Warnings about identifiers that will not match, said up front.
 
@@ -2522,6 +2555,13 @@ def _match_warnings(
             "match. Those rows are uploaded without the email identifier; "
             f"first affected rows: {unusable_emails[:5]}."
         )
+    if prehashed:
+        warnings.append(
+            f"{len(prehashed)} row(s) carry identifiers that already are SHA-256 "
+            "digests, used as they are. They match only if the values were normalized "
+            "the way Google asks before hashing, which cannot be checked from a "
+            f"digest; first affected rows: {prehashed[:5]}."
+        )
     return warnings
 
 
@@ -2540,7 +2580,9 @@ def draft_upload_enhanced_conversions_for_leads(
     Email / Phone / First Name / Last Name columns, and previews what will
     be pushed via ConversionUploadService.UploadClickConversions with
     user_identifiers populated. Only the hashes are stored in the plan —
-    raw PII never lands in plan.changes or the audit log.
+    raw PII never lands in plan.changes or the audit log. A cell that already
+    is a SHA-256 hex digest (a CRM export that hashes before writing) is used
+    as it is, and the preview says how many rows carry one.
 
     The target conversion action must be of type UPLOAD_CLICKS (EC for Leads
     layers user-identifier matching on top of click conversions). Works
@@ -2684,6 +2726,11 @@ def draft_upload_enhanced_conversions_for_leads(
         for index, r in enumerate(rows, start=1)
         if r["email_was_given"] and not r["email_sha256"]
     ]
+    prehashed_rows = [
+        _source_line(r, index)
+        for index, r in enumerate(rows, start=1)
+        if r.get("prehashed_cells")
+    ]
     names_without_address = [
         _source_line(r, index)
         for index, r in enumerate(rows, start=1)
@@ -2761,6 +2808,7 @@ def draft_upload_enhanced_conversions_for_leads(
             "rows_with_phone": with_phone,
             "rows_with_order_id": with_order_id,
             "rows_with_address": with_address,
+            **({"rows_with_prehashed_identifiers": len(prehashed_rows)} if prehashed_rows else {}),
             "skipped_count": len(skipped),
             "skipped_rows": skipped,
             # Say it in prose too: the count is easy to miss in a JSON blob.
@@ -2782,6 +2830,7 @@ def draft_upload_enhanced_conversions_for_leads(
                 address_without_names,
                 unusable_phones,
                 unusable_emails,
+                prehashed_rows,
             ),
             "sample_rows": [
                 {

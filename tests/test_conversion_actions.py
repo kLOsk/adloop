@@ -4899,3 +4899,130 @@ class TestUploadedCsv:
         assert result["status"] == "PENDING_CONFIRMATION"
         assert store.list("", kind="csv") == []
         assert "jane@example.com" not in str(_stored_plan(result).apply_only_payload)
+
+
+# ---------------------------------------------------------------------------
+# Enhanced conversions: cells that are already SHA-256 digests
+# ---------------------------------------------------------------------------
+
+
+def _digest(value: str) -> str:
+    return hashlib.sha256(value.encode()).hexdigest()
+
+
+_EMPTY_DIGEST = _digest("")
+
+
+class TestPrehashedEcIdentifiers:
+    @pytest.fixture(autouse=True)
+    def _ads(self, monkeypatch):
+        return _patch_drafts_client(monkeypatch, "UPLOAD_CLICKS")
+
+    def _path(self, tmp_path, *rows, header=_EC_HEADER):
+        path = tmp_path / "ec.csv"
+        path.write_text("\n".join([header, *rows]) + "\n")
+        return str(path)
+
+    def _draft(self, config, path):
+        return conversion_actions.draft_upload_enhanced_conversions_for_leads(
+            config, customer_id="1234567890", csv_path=path
+        )
+
+    @pytest.mark.parametrize("cell, expected", [
+        ("a" * 64, "a" * 64),
+        ("  " + "AB" * 32 + " ", "ab" * 32),
+        ("a" * 63, ""),
+        ("a" * 65, ""),
+        ("g" * 64, ""),
+        ("user@example.com", ""),
+        ("", ""),
+    ])
+    def test_only_a_full_digest_counts(self, cell, expected):
+        assert conversion_actions._prehashed(cell) == expected
+
+    def test_digests_are_used_unchanged_and_raw_cells_still_hashed(self, tmp_path):
+        email, phone, first = _digest("user@example.com"), _digest("+14155550142"), _digest("test")
+        path = self._path(
+            tmp_path,
+            f"{email.upper()},{phone},{first},User,My Action,2026-03-01T12:00:00Z,250.00,USD",
+        )
+        rows, errors, _advisories, _skipped = conversion_actions._parse_ec_for_leads_csv(path)
+        assert errors == []
+        row = rows[0]
+        assert (row["email_sha256"], row["phone_sha256"], row["first_name_sha256"]) == (email, phone, first)
+        assert row["last_name_sha256"] == _LAST_HASH
+        assert row["phone_usable"] is True
+        assert row["prehashed_cells"] == 3
+
+    def test_preview_counts_a_fully_hashed_file_like_a_raw_one(self, config, tmp_path):
+        raw = self._draft(config, self._path(
+            tmp_path,
+            "user@example.com,+14155550142,Test,User,Job Close,2026-03-01T12:00:00Z,500.00,USD",
+        ))["changes"]
+        hashed = self._draft(config, self._path(
+            tmp_path,
+            f"{_EMAIL_HASH},{_PHONE_HASH},{_FIRST_HASH},{_LAST_HASH},Job Close,2026-03-01T12:00:00Z,500.00,USD",
+        ))["changes"]
+        for key in ("row_count", "rows_with_email", "rows_with_phone", "rows_with_address", "skipped_count"):
+            assert hashed[key] == raw[key], key
+        assert hashed["rows_with_prehashed_identifiers"] == 1
+        assert "rows_with_prehashed_identifiers" not in raw
+
+    def test_digests_are_not_reported_as_broken_identifiers(self, config, tmp_path):
+        changes = self._draft(config, self._path(
+            tmp_path,
+            f"{_EMAIL_HASH},{_PHONE_HASH},,,Job Close,2026-03-01T12:00:00Z,500.00,USD",
+        ))["changes"]
+        warnings = " ".join(changes["match_warnings"])
+        assert "not a valid E.164" not in warnings and "not an address" not in warnings
+        assert "normalized the way Google asks" in warnings
+        assert "first affected rows: [2]" in warnings
+
+    def test_the_address_identifier_takes_hashed_names(self, config, tmp_path):
+        changes = self._draft(config, self._path(
+            tmp_path,
+            f",,{_FIRST_HASH},{_LAST_HASH},Job Close,2026-03-01T12:00:00Z,500.00,USD,US,94105",
+            header=_EC_HEADER + ",Country Code,Postal Code",
+        ))["changes"]
+        assert changes["rows_with_address"] == 1 and changes["row_count"] == 1
+
+    def test_the_digest_of_nothing_is_a_blank_cell(self, config, tmp_path):
+        row = (f"{_EMAIL_HASH},{_EMPTY_DIGEST},{_EMPTY_DIGEST},{_EMPTY_DIGEST},"
+               "Job Close,2026-03-01T12:00:00Z,500.00,USD")
+        changes = self._draft(config, self._path(tmp_path, row))["changes"]
+        assert changes["rows_with_email"] == 1
+        assert changes["rows_with_phone"] == 0
+        assert "not a valid E.164" not in " ".join(changes["match_warnings"])
+
+    def test_a_row_of_nothing_but_empty_digests_is_skipped(self, config, tmp_path):
+        row = (f"{_EMPTY_DIGEST},{_EMPTY_DIGEST},{_EMPTY_DIGEST},{_EMPTY_DIGEST},"
+               "Job Close,2026-03-01T12:00:00Z,500.00,USD")
+        result = self._draft(config, self._path(tmp_path, row))
+        assert "No row carries a usable identifier" in result["error"]
+        assert "no usable identifier" in result["skipped_rows"][0]["reason"]
+
+    def test_the_dry_run_uploads_the_digests_validate_only(self, tmp_path, monkeypatch):
+        config = AdLoopConfig(
+            ads=AdsConfig(customer_id="1234567890"),
+            safety=SafetyConfig(log_file=str(tmp_path / "audit.log")),
+        )
+        upload = _FakeClickUploadService(results_count=1)
+        client = _client_with(upload_service=upload, ads_service=_EchoActionRows("UPLOAD_CLICKS"))
+        monkeypatch.setattr("adloop.ads.client.get_ads_client", lambda _cfg: client)
+        monkeypatch.setattr(
+            write, "_validate_with_google",
+            lambda cfg, plan: write._execute_plan(cfg, plan, validate_only=True),
+        )
+        preview = self._draft(config, self._path(
+            tmp_path,
+            f"{_EMAIL_HASH},{_PHONE_HASH},,,Job Close,2026-03-01T12:00:00Z,500.00,USD",
+        ))
+
+        result = write.confirm_and_apply(config, plan_id=preview["plan_id"], dry_run=True)
+
+        assert result["status"] == "DRY_RUN_SUCCESS", result
+        assert upload.calls[0]["validate_only"] is True
+        identifiers = upload.calls[0]["conversions"][0].user_identifiers
+        assert identifiers[0].hashed_email == _EMAIL_HASH
+        assert identifiers[1].hashed_phone_number == _PHONE_HASH
+

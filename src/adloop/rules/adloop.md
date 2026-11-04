@@ -262,7 +262,7 @@ Conversions that happen offline (a sales call, a lead that turned into a deal) g
 | `draft_upload_enhanced_conversions_for_leads` | Form leads that became a conversion; matched by hashed email, phone or name and address | exactly one of `csv_path` or `upload_id`; `default_region`; `consent` |
 
 - The conversion action named in the CSV's `Conversion Name` column must exist and be of type UPLOAD_CALLS (calls) or UPLOAD_CLICKS (leads); the draft checks it against the account.
-- **The CSV holds personal data** (phone numbers, emails, names). An uploaded file lasts two hours at most and is deleted as soon as a draft has read it, so a second draft needs a new upload; a failed draft keeps it for a retry (for example with `default_region`). Lead identifiers are hashed while drafting. Never ask the user to paste rows into the chat.
+- **The CSV holds personal data** (phone numbers, emails, names). An uploaded file lasts two hours at most and is deleted as soon as a draft has read it, so a second draft needs a new upload; a failed draft keeps it for a retry (for example with `default_region`). Lead identifiers are hashed while drafting; a cell that already is a SHA-256 hex digest is used as it is. Never ask the user to paste rows into the chat.
 - EEA traffic needs consent signals: pass `consent` or fill the CSV's `Ad User Data` / `Ad Personalization` columns. Present the preview's `consent_summary`, `skipped_rows` and `dedup_warnings`.
 - Apply sends batches of 2,000 rows. `PARTIAL_UPLOAD` means some batches are already in the account: the plan is retired, and a new draft continues at `resume_from_line`. Don't re-upload rows that went through.
 
