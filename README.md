@@ -288,7 +288,7 @@ All write operations follow a **draft → preview → confirm** workflow. Nothin
 | `add_ad_schedule` | Add ad schedule windows to a campaign; overlaps are refused, and a campaign's first schedule needs a double confirmation. |
 | `draft_promotion` / `update_promotion` | Create a promotion asset, or edit one in place without losing the fields you don't pass; amounts in the account currency. |
 | `draft_price_asset` | Create a price asset with 3-8 offerings, in the account currency. |
-| `draft_image_assets` | Create campaign image assets from local files, public image URLs or uploads (PNG, JPEG, or GIF). |
+| `draft_image_assets` | Create campaign image assets from local files, public image URLs or uploads (PNG, JPEG, or GIF); a business logo can also go on the account. |
 | `draft_keywords` | Propose keyword additions with match types. Proactively checks bidding strategy — flags BROAD match on campaigns without Smart Bidding as dangerous in the preview. |
 | `add_negative_keywords` | Propose negative keywords directly on a campaign |
 | `add_negative_locations` | Propose negative geo exclusions on a campaign — exclude cities/regions while keeping broader positive targets |

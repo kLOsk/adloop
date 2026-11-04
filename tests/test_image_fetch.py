@@ -647,7 +647,7 @@ async def test_tool_schema_describes_both_image_sources():
     properties = tool.parameters["properties"]
     for param in ("campaign_id", "image_paths", "image_urls", "customer_id"):
         assert properties[param].get("description"), param
-    assert "campaign_id" in tool.parameters.get("required", [])
+    assert "campaign_id" not in tool.parameters.get("required", [])  # scope="account" takes none
     assert "image_paths" not in tool.parameters.get("required", [])
 
 

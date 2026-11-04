@@ -168,7 +168,7 @@ class TestConsumers:
         from adloop.ads.write import _validate_image_assets
 
         upload = store.put("local", "Hero Banner.png", _png())
-        images, errors = _validate_image_assets("123", [], [], [upload.upload_id, "up_missing0000"])
+        images, errors = _validate_image_assets([], [], [upload.upload_id, "up_missing0000"])
         assert len(images) == 1 and len(errors) == 1
         assert images[0]["upload_id"] == upload.upload_id
         assert images[0]["sha256"] == upload.sha256
