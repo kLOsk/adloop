@@ -765,7 +765,8 @@ def get_pmax_performance(
       that Google uses for most PMax traffic — full channel splits are not
       available via the API.
     - asset_groups: per-asset-group metrics including ad_strength (EXCELLENT,
-      GOOD, AVERAGE, POOR).
+      GOOD, AVERAGE, POOR) and asset_counts: {field_type: {total, eligible}}
+      (ELIGIBLE = primary_status) in the same call.
 
     Includes insights flagging weak ad strength, zero-conversion asset groups,
     and network type distribution.
@@ -1191,7 +1192,12 @@ def draft_pmax_asset_group_assets(
     add: list of {"field_type": HEADLINE | LONG_HEADLINE | DESCRIPTION,
       "text": "..."} (text asset is created, then linked) or
       {"field_type": MARKETING_IMAGE | SQUARE_MARKETING_IMAGE | LOGO |
-      LANDSCAPE_LOGO, "image_asset_id": "123"} (existing image asset linked).
+      LANDSCAPE_LOGO | PORTRAIT_MARKETING_IMAGE, "image_asset_id": "123"}
+      (existing image asset linked) or {"field_type": <same image types>,
+      "image_path": "C:/path/img.png"} (new image asset uploaded; size, ratio
+      and 5 MB checked; portrait is 4:5, min 480x600) or
+      {"field_type": "YOUTUBE_VIDEO", "youtube_video_id": "<11 chars>"}
+      (YouTube video asset created, then linked).
     Limits: headline 30 chars, long headline 90, description 90.
     Run validate_plan_only first, then confirm_and_apply. To swap an asset,
     add the new one first, then remove_entity entity_type=asset_group_asset

@@ -55,6 +55,19 @@ def get_pmax_performance(
     asset_groups = execute_query(config, customer_id, asset_group_query)
     _enrich_cost_fields(asset_groups, currency_code)
 
+    # One extra read: per group, per field_type, total vs ELIGIBLE asset counts.
+    asset_count_error = ""
+    try:
+        counts_by_group = _asset_counts_by_group(config, customer_id)
+    except Exception as e:  # keep the performance read usable if this fails
+        counts_by_group = None
+        asset_count_error = str(e)
+    for ag in asset_groups:
+        if counts_by_group is None:
+            ag["asset_counts_error"] = asset_count_error
+        else:
+            ag["asset_counts"] = counts_by_group.get(str(ag.get("asset_group.id")), {})
+
     insights: list[str] = []
 
     poor_strength = [
@@ -107,6 +120,31 @@ def get_pmax_performance(
         "total_asset_groups": len(asset_groups),
         "insights": insights,
     }
+
+
+def _asset_counts_by_group(config: AdLoopConfig, customer_id: str) -> dict:
+    """Return {asset_group_id: {field_type: {"total": n, "eligible": n}}}.
+
+    Counts non-removed asset_group_asset links; ELIGIBLE is primary_status.
+    """
+    from adloop.ads.gaql import execute_query
+
+    query = """
+        SELECT asset_group.id, asset_group_asset.field_type,
+               asset_group_asset.status, asset_group_asset.primary_status
+        FROM asset_group_asset
+        WHERE campaign.advertising_channel_type = 'PERFORMANCE_MAX'
+          AND asset_group_asset.status != 'REMOVED'
+    """
+    out: dict = {}
+    for row in execute_query(config, customer_id, query):
+        gid = str(row.get("asset_group.id"))
+        ft = str(row.get("asset_group_asset.field_type", "UNSPECIFIED"))
+        slot = out.setdefault(gid, {}).setdefault(ft, {"total": 0, "eligible": 0})
+        slot["total"] += 1
+        if str(row.get("asset_group_asset.primary_status")) == "ELIGIBLE":
+            slot["eligible"] += 1
+    return out
 
 
 def get_asset_performance(

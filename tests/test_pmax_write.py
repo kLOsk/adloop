@@ -604,3 +604,126 @@ class TestAssetGroupAsset:
                 add=[{"field_type": "LONG_HEADLINE", "text": "one more"}])
         assert r["error"] == "Validation failed"
         assert "max of 5" in r["details"][0]
+
+
+class TestPortraitVideoUpload:
+    def test_new_tools_in_write_set(self):
+        from adloop import server
+
+        assert "draft_pmax_asset_group_assets" in server._WRITE_TOOL_NAMES
+
+    def test_portrait_spec(self):
+        assert pmax_write.IMAGE_SPECS["portrait"][5] == "PORTRAIT_MARKETING_IMAGE"
+        assert "PORTRAIT_MARKETING_IMAGE" in pmax_write.ASSET_FIELD_LIMITS
+
+    def test_draft_portrait_by_asset_id(self, config):
+        r = pmax_write.draft_pmax_asset_group_assets(
+            config, customer_id="1", asset_group_id="5",
+            add=[{"field_type": "portrait_marketing_image", "image_asset_id": "9"}])
+        assert r["changes"]["add"][0] == {"field_type": "PORTRAIT_MARKETING_IMAGE", "image_asset_id": "9"}
+        remove_plan(r["plan_id"])
+
+    def test_draft_portrait_file_ok(self, config, tmp_path):
+        p = make_png(tmp_path / "p.png", 480, 600)
+        r = pmax_write.draft_pmax_asset_group_assets(
+            config, customer_id="1", asset_group_id="5",
+            add=[{"field_type": "PORTRAIT_MARKETING_IMAGE", "image_path": p}])
+        item = r["changes"]["add"][0]
+        assert item["width"] == 480 and item["height"] == 600 and item["image_path"]
+        remove_plan(r["plan_id"])
+
+    @pytest.mark.parametrize("w,h,msg", [(400, 500, "below"), (600, 600, "aspect")])
+    def test_draft_portrait_file_rejected(self, config, tmp_path, w, h, msg):
+        p = make_png(tmp_path / "p.png", w, h)
+        r = pmax_write.draft_pmax_asset_group_assets(
+            config, customer_id="1", asset_group_id="5",
+            add=[{"field_type": "PORTRAIT_MARKETING_IMAGE", "image_path": p}])
+        assert r["error"] == "Validation failed"
+        assert msg in " ".join(r["details"])
+
+    def test_draft_image_file_missing_and_conflicts(self, config, tmp_path):
+        for item in (
+            {"field_type": "LOGO", "image_path": str(tmp_path / "nope.png")},
+            {"field_type": "LOGO", "image_path": "x", "image_asset_id": "1"},
+            {"field_type": "LOGO"},
+        ):
+            r = pmax_write.draft_pmax_asset_group_assets(
+                config, customer_id="1", asset_group_id="5", add=[item])
+            assert r["error"] == "Validation failed"
+
+    def test_image_file_size_cap(self, config, tmp_path, monkeypatch):
+        p = make_png(tmp_path / "sq.png", 600, 600)
+        monkeypatch.setattr(pmax_write, "MAX_FILE_BYTES", 100)
+        r = pmax_write.draft_pmax_asset_group_assets(
+            config, customer_id="1", asset_group_id="5",
+            add=[{"field_type": "SQUARE_MARKETING_IMAGE", "image_path": p}])
+        assert "exceeds" in " ".join(r["details"])
+
+    @pytest.mark.parametrize("vid", ["", "short", "has space!!", "dQw4w9WgXcQx", "https://youtu.be/dQw4w9WgXcQ"])
+    def test_youtube_bad_id(self, config, vid):
+        r = pmax_write.draft_pmax_asset_group_assets(
+            config, customer_id="1", asset_group_id="5",
+            add=[{"field_type": "YOUTUBE_VIDEO", "youtube_video_id": vid}])
+        assert r["error"] == "Validation failed"
+
+    def test_youtube_mixed_fields_rejected(self, config):
+        r = pmax_write.draft_pmax_asset_group_assets(
+            config, customer_id="1", asset_group_id="5",
+            add=[{"field_type": "YOUTUBE_VIDEO", "youtube_video_id": "dQw4w9WgXcQ", "text": "x"}])
+        assert r["error"] == "Validation failed"
+
+    def test_ops_youtube_and_image_file(self, config, real_client, tmp_path):
+        p = make_png(tmp_path / "p.png", 480, 600)
+        r = pmax_write.draft_pmax_asset_group_assets(
+            config, customer_id="1", asset_group_id="5",
+            add=[{"field_type": "YOUTUBE_VIDEO", "youtube_video_id": "dQw4w9WgXcQ"},
+                 {"field_type": "PORTRAIT_MARKETING_IMAGE", "image_path": p}])
+        ops, labels = pmax_write.build_asset_group_asset_add_ops(real_client, "1", r["changes"])
+        assert labels == ["asset", "asset", "asset_group_asset", "asset_group_asset"]
+        assert ops[0].asset_operation.create.youtube_video_asset.youtube_video_id == "dQw4w9WgXcQ"
+        img = ops[1].asset_operation.create
+        assert img.image_asset.full_size.width_pixels == 480 and len(img.image_asset.data) > 0
+        l0, l1 = (o.asset_group_asset_operation.create for o in ops[2:])
+        assert l0.asset == ops[0].asset_operation.create.resource_name and l0.field_type.name == "YOUTUBE_VIDEO"
+        assert l1.asset == img.resource_name and l1.field_type.name == "PORTRAIT_MARKETING_IMAGE"
+        remove_plan(r["plan_id"])
+
+    def test_apply_rechecks_file(self, real_client, tmp_path):
+        p = make_png(tmp_path / "p.png", 480, 600)
+        bad = make_png(tmp_path / "p.png", 100, 100)
+        assert bad
+        with pytest.raises(ValueError):
+            pmax_write.apply_add_pmax_asset_group_assets(
+                real_client, "1",
+                {"asset_group_id": "5", "add": [{"field_type": "PORTRAIT_MARKETING_IMAGE", "image_path": p}]},
+                validate_only=True)
+
+    def test_youtube_remove_floor_is_zero(self, config):
+        rows = _rows("1", {"YOUTUBE_VIDEO": ["10"]})
+        with patch("adloop.ads.gaql.execute_query", return_value=rows):
+            r = remove_entity(config, customer_id="1", entity_type="asset_group_asset",
+                              entity_id="5~10~YOUTUBE_VIDEO")
+        assert "error" not in r
+        remove_plan(r["plan_id"])
+
+    def test_perf_read_returns_ad_strength_and_counts(self, config):
+        from adloop.ads import pmax
+
+        def fake(cfg, cid, q):
+            if "FROM asset_group_asset" in q:
+                return [
+                    {"asset_group.id": 5, "asset_group_asset.field_type": "YOUTUBE_VIDEO", "asset_group_asset.primary_status": "ELIGIBLE"},
+                    {"asset_group.id": 5, "asset_group_asset.field_type": "YOUTUBE_VIDEO", "asset_group_asset.primary_status": "PENDING"},
+                    {"asset_group.id": 5, "asset_group_asset.field_type": "LOGO", "asset_group_asset.primary_status": "ELIGIBLE"},
+                ]
+            if "FROM asset_group" in q:
+                return [{"asset_group.id": 5, "asset_group.name": "g", "asset_group.ad_strength": "POOR"}]
+            return []
+
+        with patch("adloop.ads.gaql.execute_query", side_effect=fake), \
+             patch("adloop.ads.pmax.get_currency_code", return_value="USD"):
+            out = pmax.get_pmax_performance(config, customer_id="1")
+        ag = out["asset_groups"][0]
+        assert ag["asset_group.ad_strength"] == "POOR"
+        assert ag["asset_counts"]["YOUTUBE_VIDEO"] == {"total": 2, "eligible": 1}
+        assert ag["asset_counts"]["LOGO"] == {"total": 1, "eligible": 1}

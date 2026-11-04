@@ -7,6 +7,7 @@ accepts a status argument, and the apply step refuses anything but PAUSED.
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -29,6 +30,7 @@ IMAGE_SPECS = {
     "square": (1.0, 300, 300, 1, 20, "SQUARE_MARKETING_IMAGE"),
     "logo": (1.0, 128, 128, 1, 5, "LOGO"),
     "landscape_logo": (4.0, 512, 128, 0, 5, "LANDSCAPE_LOGO"),
+    "portrait": (0.8, 480, 600, 0, 20, "PORTRAIT_MARKETING_IMAGE"),
 }
 ASPECT_TOLERANCE = 0.02  # 2 percent
 
@@ -683,9 +685,18 @@ ASSET_FIELD_LIMITS = {
     "SQUARE_MARKETING_IMAGE": (1, 20, None),
     "LOGO": (1, 5, None),
     "LANDSCAPE_LOGO": (0, 5, None),
+    "PORTRAIT_MARKETING_IMAGE": (0, 20, None),
+    "YOUTUBE_VIDEO": (0, 5, None),
 }
 TEXT_FIELDS = ("HEADLINE", "LONG_HEADLINE", "DESCRIPTION")
-IMAGE_FIELDS = ("MARKETING_IMAGE", "SQUARE_MARKETING_IMAGE", "LOGO", "LANDSCAPE_LOGO")
+IMAGE_FIELDS = (
+    "MARKETING_IMAGE", "SQUARE_MARKETING_IMAGE", "LOGO", "LANDSCAPE_LOGO",
+    "PORTRAIT_MARKETING_IMAGE",
+)
+VIDEO_FIELDS = ("YOUTUBE_VIDEO",)
+# asset field type -> IMAGE_SPECS kind (for image_path validation)
+FIELD_TO_KIND = {spec[5]: kind for kind, spec in IMAGE_SPECS.items()}
+YOUTUBE_ID_RE = re.compile(r"^[A-Za-z0-9_-]{11}$")
 
 
 def _group_field_counts(config, customer_id: str, asset_group_id: str) -> dict[str, list[str]]:
@@ -761,15 +772,42 @@ def validate_asset_group_additions(add: list[dict] | None) -> tuple[list[dict], 
                 cleaned.append({"field_type": field, "text": text})
         elif field in IMAGE_FIELDS:
             aid = str(item.get("image_asset_id") or "").strip()
-            if item.get("text"):
-                errors.append(f"{label}: {field} takes image_asset_id, not text")
-            if not aid.isdigit():
-                errors.append(f"{label}: image_asset_id must be a numeric asset ID")
+            path = str(item.get("image_path") or "").strip()
+            if item.get("text") or item.get("youtube_video_id"):
+                errors.append(f"{label}: {field} takes image_asset_id or image_path only")
+            elif aid and path:
+                errors.append(f"{label}: give image_asset_id or image_path, not both")
+            elif path:
+                meta, errs = validate_image(FIELD_TO_KIND[field], path)
+                if errs:
+                    errors.extend(f"{label}: {e}" for e in errs)
+                else:
+                    cleaned.append({
+                        "field_type": field, "image_path": meta["path"],
+                        "name": meta["name"], "mime_type": meta["mime_type"],
+                        "width": int(meta["width"]), "height": int(meta["height"]),
+                    })
+            elif not aid.isdigit():
+                errors.append(
+                    f"{label}: image_asset_id (numeric) or image_path is required for {field}"
+                )
             else:
                 cleaned.append({"field_type": field, "image_asset_id": aid})
+        elif field in VIDEO_FIELDS:
+            vid = str(item.get("youtube_video_id") or "").strip()
+            if item.get("text") or item.get("image_asset_id") or item.get("image_path"):
+                errors.append(f"{label}: {field} takes youtube_video_id only")
+            elif not YOUTUBE_ID_RE.match(vid):
+                errors.append(
+                    f"{label}: youtube_video_id must be the 11-character video id "
+                    f"(letters, digits, - and _), got {vid!r}"
+                )
+            else:
+                cleaned.append({"field_type": field, "youtube_video_id": vid})
         else:
             errors.append(
-                f"{label}: field_type '{field}' must be one of {list(TEXT_FIELDS + IMAGE_FIELDS)}"
+                f"{label}: field_type '{field}' must be one of "
+                f"{list(TEXT_FIELDS + IMAGE_FIELDS + VIDEO_FIELDS)}"
             )
     return cleaned, errors
 
@@ -835,14 +873,29 @@ def build_asset_group_asset_add_ops(client, cid: str, changes: dict):
     )
     links: list[tuple[str, str]] = []
     counter = 0
+    from adloop.ads.write import _VALID_IMAGE_MIME_TYPES
+
     for item in changes["add"]:
-        if item.get("text"):
+        if item.get("text") or item.get("youtube_video_id") or item.get("image_path"):
             counter += 1
             tid = str(-(2000 + counter))
             op = client.get_type("MutateOperation")
             a = op.asset_operation.create
             a.resource_name = asset_service.asset_path(cid, tid)
-            a.text_asset.text = item["text"]
+            if item.get("text"):
+                a.text_asset.text = item["text"]
+            elif item.get("youtube_video_id"):
+                a.name = f"AdLoop YouTube {item['youtube_video_id']}"
+                a.youtube_video_asset.youtube_video_id = item["youtube_video_id"]
+            else:
+                a.name = item["name"]
+                a.type_ = client.enums.AssetTypeEnum.IMAGE
+                a.image_asset.data = Path(item["image_path"]).read_bytes()
+                a.image_asset.mime_type = getattr(
+                    client.enums.MimeTypeEnum, _VALID_IMAGE_MIME_TYPES[item["mime_type"]]
+                )
+                a.image_asset.full_size.width_pixels = int(item["width"])
+                a.image_asset.full_size.height_pixels = int(item["height"])
             ops.append(op); labels.append("asset")
             links.append((asset_service.asset_path(cid, tid), item["field_type"]))
         else:
@@ -862,6 +915,12 @@ def build_asset_group_asset_add_ops(client, cid: str, changes: dict):
 def apply_add_pmax_asset_group_assets(
     client, cid: str, changes: dict, validate_only: bool = False
 ) -> dict:
+    # Re-validate image files from disk at apply time (files may have changed).
+    for item in changes["add"]:
+        if item.get("image_path"):
+            _meta, errs = validate_image(FIELD_TO_KIND[item["field_type"]], item["image_path"])
+            if errs:
+                raise ValueError("; ".join(errs))
     ops, labels = build_asset_group_asset_add_ops(client, cid, changes)
     resp = _send(client, cid, ops, validate_only)
     result = {"validate_only": validate_only, "operations": len(ops)}
