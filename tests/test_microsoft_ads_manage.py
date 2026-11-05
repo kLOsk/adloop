@@ -84,6 +84,7 @@ class FakeMicrosoft:
             "7002": {"Id": 7002, "Type": "CalloutAdExtension", "Text": "Licensed"},
         }
         self.ext_links = [("7001", CAMPAIGN, "Campaign"), ("7002", CAMPAIGN, "Campaign")]
+        self.media: dict[str, dict] = {}
         self.goals = [{"Id": 9, "Name": "Lead", "Type": "Event", "Status": "Active", "ExcludeFromBidding": False}]
         # Accounts outside Microsoft's in-store pilot cannot ask for InStoreTransaction goals.
         self.in_store_pilot = True
@@ -100,7 +101,7 @@ class FakeMicrosoft:
 
     _write_paths = {"Campaigns", "CampaignCriterions", "AdGroups", "Keywords", "Ads", "EntityNegativeKeywords",
                     "SharedEntity", "ListItems", "SharedEntityAssociations/Set", "SharedEntityAssociations",
-                    "AdExtensions", "AdExtensionsAssociations/Set", "AdExtensionsAssociations"}
+                    "AdExtensions", "AdExtensionsAssociations/Set", "AdExtensionsAssociations", "Media"}
 
     @staticmethod
     def _pub(obj: dict) -> dict:
@@ -156,11 +157,17 @@ class FakeMicrosoft:
             return {"Associations": [dict(a, EntityType="Campaign", SharedEntityType="NegativeKeywordList")
                                      for a in self.associations if a["EntityId"] in ids]}
         if path == "AdExtensionsAssociations/Query":
-            entity = str(body["EntityIds"][0])
-            links = [l for l in self.ext_links if l[1] == entity and l[2] == body["AssociationType"]]
-            return {"AdExtensionAssociationCollection": [{"AdExtensionAssociations": [
-                {"AdExtension": copy.deepcopy(self.extensions[e]), "AssociationType": a, "EntityId": int(o),
-                 "EditorialStatus": "Active"} for e, o, a in links]}]}
+            # One collection per requested entity, at most 100 entities, like Microsoft.
+            assert len(body["EntityIds"]) <= 100
+            wanted = {x.strip() for x in body["AdExtensionType"].split(",")}
+            collections = []
+            for entity in body["EntityIds"]:
+                links = [l for l in self.ext_links if l[1] == str(entity) and l[2] == body["AssociationType"]
+                         and self.extensions[l[0]]["Type"] in wanted]
+                collections.append({"AdExtensionAssociations": [
+                    {"AdExtension": copy.deepcopy(self.extensions[e]), "AssociationType": a, "EntityId": int(o),
+                     "EditorialStatus": "Active"} for e, o, a in links]} if links else None)
+            return {"AdExtensionAssociationCollection": collections}
         if path == "GeoLocationsFileUrl/Query":
             return {"FileUrl": "https://geo.example/locations.csv.gz?sig=SECRET", "LastModifiedTimeUtc": "2026-10-01T00:00:00"}
         # -------- writes
@@ -298,6 +305,14 @@ class FakeMicrosoft:
             drop = {(a["SharedEntityId"], a["EntityId"]) for a in body["Associations"]}
             self.associations = [a for a in self.associations if (a["SharedEntityId"], a["EntityId"]) not in drop]
             return {"PartialErrors": []}
+        if path == "Media" and method == "POST":
+            assert len(body["Media"]) <= 10
+            ids = []
+            for m in body["Media"]:
+                mid = self._id()
+                self.media[str(mid)] = m
+                ids.append(mid)
+            return {"MediaIds": ids}
         if path == "AdExtensions":
             identities = []
             for e in body["AdExtensions"]:
@@ -1242,3 +1257,300 @@ class TestGoalsWithoutInStorePilot:
     def test_an_unreadable_goal_list_is_unknown(self, api, config):
         api.fail[("POST", "ConversionGoals/QueryByIds")] = MicrosoftAdsApiError("Internal error", status=500)
         assert manage._counted_goals(config, ACCOUNT, CUSTOMER) == -1
+
+
+# ---------------------------------------------------------------------------
+# Image extensions
+# ---------------------------------------------------------------------------
+
+
+def _png(width: int, height: int, *, animated: bool = False, pad: int = 0) -> bytes:
+    import struct
+    import zlib
+
+    def chunk(kind: bytes, data: bytes) -> bytes:
+        return struct.pack(">I", len(data)) + kind + data + struct.pack(">I", zlib.crc32(kind + data) & 0xFFFFFFFF)
+
+    out = b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", struct.pack(">IIBBBBB", width, height, 8, 2, 0, 0, 0))
+    if animated:  # APNG: the animation control chunk comes before the image data
+        out += chunk(b"acTL", struct.pack(">II", 2, 0))
+    if pad:
+        out += chunk(b"tEXt", b"pad\x00" + b"x" * pad)
+    return out + chunk(b"IDAT", zlib.compress(b"\x00" * 16)) + chunk(b"IEND", b"")
+
+
+def _jpeg(width: int, height: int) -> bytes:
+    import struct
+
+    return b"\xff\xd8\xff\xc0" + struct.pack(">HBHHB", 11, 8, height, width, 1) + b"\x01\x11\x00\xff\xd9"
+
+
+def _gif(width: int, height: int, frames: int = 1) -> bytes:
+    import struct
+
+    frame = b"\x2c" + struct.pack("<HHHH", 0, 0, width, height) + b"\x00" + b"\x02\x01\x00\x00"
+    control = b"\x21\xf9\x04\x00\x0a\x00\x00\x00"  # graphic control extension (frame delay)
+    return b"GIF89a" + struct.pack("<HH", width, height) + b"\x00\x00\x00" + (control + frame) * frames + b"\x3b"
+
+
+def _file(tmp_path, name: str, data: bytes) -> str:
+    path = tmp_path / name
+    path.write_bytes(data)
+    return str(path)
+
+
+class TestImageExtensions:
+    @pytest.fixture
+    def web(self, monkeypatch):
+        """Public image URLs served from a dict the test can change."""
+        from adloop.ads.image_fetch import FetchedImage
+
+        pages: dict[str, bytes] = {}
+        monkeypatch.setattr("adloop.ads.image_fetch.fetch_image_bytes",
+                            lambda url: FetchedImage(url=url, final_url=url, data=pages[url]))
+        return pages
+
+    def _image_link(self, api, ext_id: str, owner: str, association: str, alt: str = "Technician at a drain"):
+        api.extensions[ext_id] = {"Id": int(ext_id), "Type": "ImageAdExtension", "AlternativeText": alt,
+                                  "ImageMediaIds": [int(ext_id) + 100], "Description": "AdLoop image van",
+                                  "Layouts": ["SearchSingle"]}
+        api.ext_links.append((ext_id, owner, association))
+
+    def test_bad_images_and_fields_are_refused_with_the_reason(self, api, config, tmp_path):
+        good = _file(tmp_path, "van.png", _png(1200, 628))
+
+        def refused(**kw):
+            kw.setdefault("alt_text", "Plumbing van")
+            return _text(manage.draft_microsoft_image_extension(config, campaign_id=CAMPAIGN, **kw))
+
+        assert "703x368" in refused(image_paths=[_file(tmp_path, "small.png", _png(600, 314))])
+        square = refused(image_paths=[_file(tmp_path, "square.jpg", _jpeg(1200, 1200))])
+        assert "1.00:1" in square and "1.91:1" in square and "Crop it to 1200x628" in square
+        assert "maximum (width 2592, height 2048)" in refused(image_paths=[_file(tmp_path, "huge.png", _png(3000, 1571))])
+        assert "animated images are not accepted" in refused(image_paths=[_file(tmp_path, "spin.gif", _gif(1200, 628, frames=2))])
+        assert "animated images are not accepted" in refused(image_paths=[_file(tmp_path, "spin.png", _png(1200, 628, animated=True))])
+        assert "5 MB limit" in refused(image_paths=[_file(tmp_path, "heavy.png", _png(1200, 628, pad=5 * 1024 * 1024))])
+        assert "Unsupported image type" in refused(image_paths=[_file(tmp_path, "photo.bmp", b"BM" + b"\x00" * 64)])
+        assert "twice" in refused(image_paths=[good, good])
+        assert "alt_text is required" in refused(image_paths=[good], alt_text=" ")
+        assert "alt_text is 36 characters" in refused(image_paths=[good], alt_text="x" * 36)
+        assert "display_text is 36 characters" in refused(image_paths=[good], display_text="y" * 36)
+        assert "At least one image" in refused()
+        assert "At most 10 images" in refused(image_paths=[good] * 11)
+        # A still GIF at the right size passes the image checks.
+        still = manage.draft_microsoft_image_extension(config, campaign_id=CAMPAIGN, alt_text="Van",
+                                                       image_paths=[_file(tmp_path, "still.gif", _gif(1200, 628))])
+        assert "plan_id" in still, still
+        both = manage.draft_microsoft_image_extension(config, campaign_id=CAMPAIGN, ad_group_id="11", alt_text="Van",
+                                                      image_paths=[good])
+        assert "not both" in _text(both)
+        assert "was not found" in _text(manage.draft_microsoft_image_extension(
+            config, ad_group_id="999", alt_text="Van", image_paths=[good]))
+        assert not [c for c in api.calls if c["path"] in ("Media", "AdExtensions")]
+
+    def test_preview_shows_images_target_and_alt_text(self, api, config, tmp_path, web):
+        from adloop.safety.approval import confirmation_message
+        from adloop.safety.preview import get_plan
+
+        web["https://cdn.example.com/team.jpg"] = _jpeg(1406, 736)
+        preview = manage.draft_microsoft_image_extension(
+            config, ad_group_id="11", image_paths=[_file(tmp_path, "van.png", _png(1200, 628))],
+            image_urls=["https://cdn.example.com/team.jpg"], alt_text="Plumber clearing a drain",
+            display_text="Same-day drain service", final_url="https://example.com/drain")
+        assert preview["operation"] == "microsoft_add_image_extension" and preview["entity_type"] == "ad_group"
+        changes = preview["changes"]
+        assert changes["entity_name"] == "ad group 'Drains' in campaign 'Acme Plumbing - Search'"
+        assert changes["association_type"] == "AdGroup" and changes["entity_id"] == "11"
+        assert changes["images"][0].endswith("PNG 1200x628 (1.91:1), 0.1 KB")
+        assert changes["images"][1] == "https://cdn.example.com/team.jpg: JPEG 1406x736 (1.91:1), 0.0 KB"
+        assert changes["alt_text"] == "Plumber clearing a drain" and changes["display_text"] == "Same-day drain service"
+        assert changes["final_url"] == "https://example.com/drain"
+        assert changes["layouts"] == ["SearchSingle", "SearchMultiple"]
+        warnings = " ".join(preview["warnings"])
+        assert "Audience Network" in warnings and "multi-image layout" in warnings and "PNG images to JPEG" in warnings
+        # The approval dialog shows the images, never the pinned payloads.
+        message = confirmation_message(get_plan(preview["plan_id"]))
+        assert "1200x628" in message and "image payloads" not in message and "sha256" not in message
+        plain = manage.draft_microsoft_image_extension(config, campaign_id=CAMPAIGN, alt_text="Van",
+                                                       image_paths=[_file(tmp_path, "van2.png", _png(1910, 1000))])
+        assert plain["changes"]["layouts"] == ["SearchSingle"] and "display_text" not in plain["changes"]
+        assert plain["changes"]["final_url"] == "the ad's own final URL"
+        assert not [c for c in api.calls if c["path"] in ("Media", "AdExtensions")]
+
+    def test_apply_uploads_media_then_creates_then_links(self, api, config, tmp_path, web):
+        import base64
+
+        png, jpeg = _png(1200, 628), _jpeg(1406, 736)
+        web["https://cdn.example.com/team.jpg"] = jpeg
+        preview = manage.draft_microsoft_image_extension(
+            config, ad_group_id="11", image_paths=[_file(tmp_path, "van.png", png)],
+            image_urls=["https://cdn.example.com/team.jpg"], alt_text="Plumber clearing a drain",
+            display_text="Same-day drain service", final_url="https://example.com/drain")
+        result = _apply(config, preview)
+        writes = [c["path"] for c in api.writes()]
+        assert writes == ["Media", "AdExtensions", "AdExtensionsAssociations/Set"]
+        media = _last(api, "Media", "POST")["body"]
+        assert media["AccountId"] == ACCOUNT
+        assert [(m["Type"], m["MediaType"]) for m in media["Media"]] == [("Image", "GenericImage")] * 2
+        assert [base64.b64decode(m["Data"]) for m in media["Media"]] == [png, jpeg]
+        assert result["media_ids"] == [str(i) for i in sorted(int(i) for i in api.media)]
+        created = _last(api, "AdExtensions")["body"]["AdExtensions"]
+        first_media = int(result["media_ids"][0])
+        assert created[0] == {
+            "Type": "ImageAdExtension", "AlternativeText": "Plumber clearing a drain",
+            "Description": preview["changes"]["image_payloads"][0]["name"][:100],
+            "ImageMediaIds": [first_media],
+            "Images": [{"Asset": {"Type": "ImageAsset", "Id": first_media, "SubType": "LandscapeImageMedia"}}],
+            "Layouts": ["SearchSingle", "SearchMultiple"], "DisplayText": "Same-day drain service",
+            "FinalUrls": ["https://example.com/drain"]}
+        assert created[1]["ImageMediaIds"] == [int(result["media_ids"][1])]
+        link = _last(api, "AdExtensionsAssociations/Set")["body"]
+        assert link["AssociationType"] == "AdGroup"
+        assert link["AdExtensionIdToEntityIdAssociations"] == [
+            {"AdExtensionId": int(i), "EntityId": 11} for i in result["extension_ids"]]
+        assert result["linked_to"].startswith("ad group 'Drains'")
+        # The new extensions now show up on the ad group.
+        rows = [r for r in manage.get_microsoft_ad_extensions(config)["extensions"] if r["type"] == "Image"]
+        assert sorted(r["extension_id"] for r in rows) == sorted(result["extension_ids"])
+        # Account and campaign scope link to those entities.
+        account = manage.draft_microsoft_image_extension(config, scope="account", alt_text="Van",
+                                                         image_paths=[_file(tmp_path, "acct.png", _png(1300, 681))])
+        _apply(config, account)
+        assert _last(api, "AdExtensionsAssociations/Set")["body"]["AssociationType"] == "Account"
+        assert _last(api, "AdExtensionsAssociations/Set")["body"]["AdExtensionIdToEntityIdAssociations"][0]["EntityId"] == int(ACCOUNT)
+        assert "FinalUrls" not in _last(api, "AdExtensions")["body"]["AdExtensions"][0]
+        campaign = manage.draft_microsoft_image_extension(config, campaign_id="600", alt_text="Van",
+                                                          image_paths=[_file(tmp_path, "brand.png", _png(1400, 733))])
+        _apply(config, campaign)
+        assert _last(api, "AdExtensionsAssociations/Set")["body"]["AssociationType"] == "Campaign"
+
+    @pytest.mark.parametrize("failing,created_keys", [
+        ("AdExtensions", {"media_ids", "done"}),
+        ("AdExtensionsAssociations/Set", {"media_ids", "extension_ids", "done"}),
+    ])
+    def test_a_later_step_failing_reports_what_exists(self, api, config, tmp_path, failing, created_keys):
+        preview = manage.draft_microsoft_image_extension(config, campaign_id=CAMPAIGN, alt_text="Van",
+                                                         image_paths=[_file(tmp_path, "van.png", _png(1200, 628))])
+        api.fail[("POST", failing)] = MicrosoftAdsApiError("CampaignServiceImageAdExtensionPilotNotEnabledForCustomer",
+                                                           status=400, codes=["CampaignServiceImageAdExtensionPilotNotEnabledForCustomer"])
+        result = ads_write.confirm_and_apply(config, plan_id=preview["plan_id"], dry_run=False)
+        again = ads_write.confirm_and_apply(config, plan_id=preview["plan_id"], dry_run=False)
+        assert result["status"] == "PARTIAL_APPLY", result
+        assert set(result["created"]) == created_keys
+        assert result["created"]["media_ids"] == list(api.media)
+        if "extension_ids" in created_keys:
+            assert result["created"]["extension_ids"][0] in api.extensions
+        assert "PilotNotEnabled" in result["error"] and "uploaded 1 image(s)" in result["error"]
+        assert "No pending plan" in _text(again)
+        assert len(api.media) == 1
+
+    def test_a_refused_upload_changes_nothing_and_keeps_the_plan(self, api, config, tmp_path):
+        preview = manage.draft_microsoft_image_extension(config, campaign_id=CAMPAIGN, alt_text="Van",
+                                                         image_paths=[_file(tmp_path, "van.png", _png(1200, 628))])
+        api.fail[("POST", "Media")] = MicrosoftAdsApiError("CampaignServiceImageOverweight", status=400,
+                                                           codes=["CampaignServiceImageOverweight"])
+        result = ads_write.confirm_and_apply(config, plan_id=preview["plan_id"], dry_run=False)
+        assert result.get("status") != "PARTIAL_APPLY" and "ImageOverweight" in _text(result), result
+        assert not [c for c in api.calls if c["path"] == "AdExtensions"] and not api.media
+        # Nothing was created, so the plan stays pending and can be applied once the cause is fixed.
+        del api.fail[("POST", "Media")]
+        assert ads_write.confirm_and_apply(config, plan_id=preview["plan_id"], dry_run=False)["status"] == "APPLIED"
+
+    def test_dry_run_rechecks_every_image(self, api, config, tmp_path, web):
+        web["https://cdn.example.com/team.jpg"] = _jpeg(1406, 736)
+        from_url = manage.draft_microsoft_image_extension(config, campaign_id=CAMPAIGN, alt_text="Team",
+                                                          image_urls=["https://cdn.example.com/team.jpg"])
+        web["https://cdn.example.com/team.jpg"] = _jpeg(1200, 628)  # replaced on the server
+        dry = ads_write.confirm_and_apply(config, plan_id=from_url["plan_id"], dry_run=True)
+        assert dry["status"] != "DRY_RUN_SUCCESS" and "changed since the preview" in _text(dry)
+        path = _file(tmp_path, "van.png", _png(1200, 628))
+        from_file = manage.draft_microsoft_image_extension(config, campaign_id=CAMPAIGN, alt_text="Van", image_paths=[path])
+        dry = ads_write.confirm_and_apply(config, plan_id=from_file["plan_id"], dry_run=True)
+        assert dry["status"] == "DRY_RUN_SUCCESS" and dry["checks"]["images_verified"] == 1, dry
+        (tmp_path / "van.png").write_bytes(_png(1200, 628, pad=10))
+        assert "changed since the preview" in _text(ads_write.confirm_and_apply(config, plan_id=from_file["plan_id"], dry_run=False))
+        assert not api.media and not [c for c in api.calls if c["path"] == "Media"]
+
+    def test_link_limits(self, api, config, tmp_path):
+        image = _file(tmp_path, "van.png", _png(1200, 628))
+        for n in range(6):
+            self._image_link(api, str(7100 + n), "600", "Campaign")
+        warned = manage.draft_microsoft_image_extension(config, campaign_id="600", alt_text="Van", image_paths=[image])
+        assert any("would have 7 image extensions" in w for w in warned["warnings"])
+        for n in range(6, 25):
+            self._image_link(api, str(7100 + n), "600", "Campaign")
+        refused = manage.draft_microsoft_image_extension(config, campaign_id="600", alt_text="Van", image_paths=[image])
+        assert "has 25 image extension(s)" in _text(refused) and "over Microsoft's 25" in _text(refused)
+        # Links added after the draft are caught by the dry run.
+        api.ext_links = [l for l in api.ext_links if l[1] != "600"]
+        preview = manage.draft_microsoft_image_extension(config, campaign_id="600", alt_text="Van", image_paths=[image])
+        for n in range(25):
+            self._image_link(api, str(7200 + n), "600", "Campaign")
+        assert "now has 25" in _text(ads_write.confirm_and_apply(config, plan_id=preview["plan_id"], dry_run=True))
+
+    def test_read_lists_image_extensions_at_every_level(self, api, config):
+        assert any("No image extensions are linked" in i for i in manage.get_microsoft_ad_extensions(config)["insights"])
+        self._image_link(api, "7003", "11", "AdGroup")
+        self._image_link(api, "7004", ACCOUNT, "Account", alt="Our team")
+        before = len(api.calls)
+        result = manage.get_microsoft_ad_extensions(config)
+        rows = {r["extension_id"]: r for r in result["extensions"]}
+        group = rows["7003"]
+        assert group["type"] == "Image" and group["level"] == "ad_group" and group["entity"] == "Drains"
+        assert group["campaign"] == "Acme Plumbing - Search" and group["media_ids"] == ["7103"]
+        assert group["alt_text"] == "Technician at a drain" and group["layouts"] == ["SearchSingle"]
+        assert group["remove_id"] == "7003~11~AdGroup"
+        assert rows["7004"]["level"] == "account" and rows["7004"]["remove_id"] == f"7004~{ACCOUNT}~Account"
+        assert rows["7001"]["level"] == "campaign"  # the sitelink is still there
+        assert not any("No image extensions" in i for i in result["insights"])
+        # Ad groups are asked for together, not one request each.
+        group_queries = [c for c in api.calls[before:] if c["path"] == "AdExtensionsAssociations/Query"
+                         and c["body"]["AssociationType"] == "AdGroup"]
+        assert len(group_queries) == 1 and sorted(group_queries[0]["body"]["EntityIds"]) == [11, 12, 21]
+        assert "ImageAdExtension" in group_queries[0]["body"]["AdExtensionType"]
+
+    def test_unlinking_an_image_extension(self, api, config):
+        self._image_link(api, "7003", "11", "AdGroup")
+        preview = manage.remove_microsoft_entity(config, entity_type="extension_association", entity_id="7003~11~AdGroup")
+        assert any("unlinks the extension only" in w for w in preview["warnings"])
+        _apply(config, preview)
+        assert _last(api, "AdExtensionsAssociations", "DELETE")["body"] == {
+            "AccountId": ACCOUNT, "AssociationType": "AdGroup",
+            "AdExtensionIdToEntityIdAssociations": [{"AdExtensionId": 7003, "EntityId": 11}]}
+        assert ("7003", "11", "AdGroup") not in api.ext_links and "7003" in api.extensions
+        bad = manage.remove_microsoft_entity(config, entity_type="extension_association", entity_id="7003~11~Keyword")
+        assert "Account|Campaign|AdGroup" in _text(bad)
+
+    def test_server_tool_and_hosted_paths(self, api, config, tmp_path, monkeypatch):
+        from adloop import runtime, server
+
+        runtime.set_default_config(config)
+        try:
+            preview = server.draft_microsoft_image_extension(
+                ad_group_id="11", alt_text="Van", image_paths=[_file(tmp_path, "van.png", _png(1200, 628))])
+            assert preview["status"] == "PENDING_CONFIRMATION" and preview["platform"] == "microsoft"
+            monkeypatch.setattr("adloop.runtime.deployment_mode", lambda: "server")
+            hosted = server.draft_microsoft_image_extension(ad_group_id="11", alt_text="Van", image_paths=["/etc/hosts"])
+            assert "hosted server" in hosted["error"]
+        finally:
+            runtime.set_default_config(None)
+
+    def test_uploaded_images_are_used_by_id(self, api, config, tmp_path):
+        import base64
+
+        from adloop import uploads
+
+        uploads.set_upload_store(uploads.LocalUploadStore(tmp_path / "uploads"))
+        try:
+            data = _png(1200, 628)
+            upload = uploads.get_upload_store().put(uploads.current_tenant(), "crew.png", data)
+            preview = manage.draft_microsoft_image_extension(config, campaign_id=CAMPAIGN, alt_text="Our crew",
+                                                             upload_ids=[upload.upload_id])
+            assert preview["changes"]["images"] == [f"upload {upload.upload_id}: PNG 1200x628 (1.91:1), 0.1 KB"]
+            _apply(config, preview)
+            assert base64.b64decode(_last(api, "Media", "POST")["body"]["Media"][0]["Data"]) == data
+            missing = manage.draft_microsoft_image_extension(config, campaign_id=CAMPAIGN, alt_text="Our crew",
+                                                             upload_ids=["up_missing0000"])
+            assert "Upload 1: upload up_missing0000 was not found" in _text(missing) and "plan_id" not in missing
+        finally:
+            uploads.set_upload_store(None)

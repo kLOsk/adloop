@@ -5528,7 +5528,8 @@ def approve_change(
 # ---------------------------------------------------------------------------
 # Images without a public URL reach AdLoop through the upload card (apps with
 # MCP Apps) or an upload link (hosted, every other app). Tools then take the
-# upload id: draft_image_assets(upload_ids=...), upload:<id> for Reddit.
+# upload id: draft_image_assets(upload_ids=...), draft_microsoft_image_extension(upload_ids=...),
+# upload:<id> for Reddit.
 
 
 @_tool(
@@ -5652,6 +5653,7 @@ def list_uploads() -> dict:
         "uploads": uploads,
         "usage": (
             "draft_image_assets(upload_ids=[...]) for Google Ads; "
+            "draft_microsoft_image_extension(upload_ids=[...]) for Microsoft Advertising; "
             "\"upload:<upload_id>\" as image_url, thumbnail_url or a carousel card's "
             "image_url in draft_reddit_ad (AdLoop Cloud only). CSV uploads: upload_id in "
             "draft_upload_call_conversions or draft_upload_enhanced_conversions_for_leads."
@@ -7973,11 +7975,13 @@ def get_microsoft_negative_keywords(ad_account_id: str = "", campaign_id: str = 
 @_tool(title="Microsoft Advertising ad extensions", annotations=_READONLY, tags={"microsoft_ads"})
 @_safe
 def get_microsoft_ad_extensions(ad_account_id: str = "", campaign_id: str = "") -> dict:
-    """List sitelinks, callouts, structured snippets and call extensions on Microsoft Advertising campaigns and the account.
+    """List sitelinks, callouts, structured snippets, call and image extensions on Microsoft Advertising ad groups, campaigns and the account.
 
-    Each row has the level (campaign or account), type, content, final URLs,
-    editorial status and the remove_id that unlinks it. Insights flag
-    campaigns without sitelinks and disapproved extensions.
+    Each row has the level (account, campaign or ad_group), type, content,
+    final URLs, editorial status and the remove_id that unlinks it. Image
+    rows add media_ids, alt_text, display_text and layouts when Microsoft
+    returns them. Insights flag campaigns without sitelinks, disapproved
+    extensions and accounts without image extensions.
 
     Args:
         ad_account_id: Microsoft ad account id. Empty uses the config default.
@@ -8474,6 +8478,58 @@ def draft_microsoft_call_extension(ad_account_id: str = "", campaign_id: str = "
                  country_code=country_code)
 
 
+@_tool(title="Draft Microsoft Advertising image extensions", annotations=_WRITE, tags={"microsoft_ads"})
+@_safe
+def draft_microsoft_image_extension(
+    ad_account_id: str = "",
+    campaign_id: str = "",
+    ad_group_id: str = "",
+    scope: str = "",
+    image_paths: _StrList = [],  # noqa: B006
+    image_urls: _StrList = [],  # noqa: B006
+    upload_ids: _StrList = [],  # noqa: B006
+    alt_text: str = "",
+    display_text: str = "",
+    final_url: str = "",
+) -> dict:
+    """Draft image extensions (photos shown with Microsoft search ads) for a campaign, an ad group or the account (preview only).
+
+    One image extension per image, up to 10 images. Each image is checked
+    now against Microsoft's requirements: JPEG, PNG or non-animated GIF, at
+    most 5 MB, a 1.91:1 aspect ratio (e.g. 1200x628), at least 703x368 and
+    at most 2592 wide and 2048 high; a bad image is refused with the reason.
+    Applying uploads the images to the account's media library, creates the
+    extensions and links them; the dry run reads every image again and
+    refuses one that changed. Image extensions can also take the ads into
+    native placements on the Microsoft Audience Network. The returned
+    plan_id is applied with confirm_and_apply.
+
+    Args:
+        ad_account_id: Microsoft ad account id. Empty uses the config default.
+        campaign_id: Campaign id (or ad_group_id, or scope="account").
+        ad_group_id: Ad group id (from get_microsoft_ad_groups).
+        scope: "account" links them to the whole account.
+        image_paths: Local image files on the machine running AdLoop (not on
+            a hosted server).
+        image_urls: Public http(s) image URLs; private or internal addresses
+            are refused.
+        upload_ids: Ids of uploaded images (up_..., from upload_images or
+            list_uploads), for images without a public URL.
+        alt_text: Required, at most 35 characters: describes the image for
+            screen readers and shows on hover. Used for every image.
+        display_text: Optional caption (at most 35 characters) shown under each
+            image in the multi-image layout; passing it makes the extensions
+            eligible for that layout too.
+        final_url: Optional landing page for clicks on the image (checked);
+            empty uses the ad's own final URL.
+    """
+    from adloop.microsoft_ads.manage import draft_microsoft_image_extension as _impl
+
+    return _impl(current_config(), ad_account_id=ad_account_id, campaign_id=campaign_id, ad_group_id=ad_group_id,
+                 scope=scope, image_paths=image_paths, image_urls=image_urls, upload_ids=upload_ids,
+                 alt_text=alt_text, display_text=display_text, final_url=final_url)
+
+
 @_tool(title="Draft removing a Microsoft Advertising entity", annotations=_DESTRUCTIVE, tags={"microsoft_ads"})
 @_safe
 def remove_microsoft_entity(ad_account_id: str = "", entity_type: str = "", entity_id: str = "") -> dict:
@@ -8481,7 +8537,8 @@ def remove_microsoft_entity(ad_account_id: str = "", entity_type: str = "", enti
 
     Removes a campaign, ad group, ad or keyword by id, or (by the remove_id
     the read tools return) a direct negative keyword, a negative list item,
-    a location or schedule criterion, or an extension link. Pausing keeps
+    a location or schedule criterion, or an extension link (account,
+    campaign or ad group, image extensions included). Pausing keeps
     history and can be undone. The returned plan_id is applied with
     confirm_and_apply.
 
