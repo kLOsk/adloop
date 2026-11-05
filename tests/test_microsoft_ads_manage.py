@@ -104,7 +104,7 @@ class FakeMicrosoft:
     def _pub(obj: dict) -> dict:
         return {k: copy.deepcopy(v) for k, v in obj.items() if not k.startswith("_")}
 
-    def __call__(self, config, service, path, body=None, *, method="POST", account_id="", customer_id=""):
+    def __call__(self, config, service, path, body=None, *, method="POST", account_id="", customer_id="", mutation=False):
         body = copy.deepcopy(body or {})
         self.calls.append({"service": service, "path": path, "method": method, "body": body})
         if (method, path) in self.fail:
@@ -176,7 +176,20 @@ class FakeMicrosoft:
             return {"PartialErrors": []}
         if path == "CampaignCriterions":
             if method == "POST":
-                # Microsoft refuses overlapping DayTime windows in a campaign.
+                # Microsoft refuses overlapping DayTime windows in a campaign,
+                # and more than seven on one day.
+                for c in body["CampaignCriterions"]:
+                    if c["Criterion"]["Type"] == "DayTimeCriterion":
+                        day = c["Criterion"]["Day"]
+                        on_day = sum(1 for e in self.criteria.get(str(c["CampaignId"]), [])
+                                     if e["Criterion"]["Type"] == "DayTime" and e["Criterion"]["Day"] == day)
+                        if on_day >= 7:
+                            raise MicrosoftAdsApiError("CampaignCriterionDayTimeLimit: at most seven per day",
+                                                       status=400, codes=["CampaignCriterionDayTimeLimit"])
+                        self.criteria.setdefault(str(c["CampaignId"]), []).append(
+                            {"Id": -1, "Criterion": {"Type": "DayTime", "Day": day}})  # counted, removed below
+                self.criteria[str(body["CampaignCriterions"][0]["CampaignId"])] = [
+                    e for e in self.criteria.get(str(body["CampaignCriterions"][0]["CampaignId"]), []) if e["Id"] != -1]
                 for c in body["CampaignCriterions"]:
                     if c["Criterion"]["Type"] == "DayTimeCriterion":
                         span = manage._block_span(c["Criterion"])
@@ -1148,3 +1161,55 @@ class TestKeywordStatusOnCreate:
         preview = manage.draft_microsoft_ad_group(config, campaign_id=CAMPAIGN, name="Sewer", cpc_bid=5,
                                                   keywords=["sewer line"])
         assert preview["changes"]["status_on_create"].startswith("Active")
+
+
+class TestScheduleDeltaFindings:
+    """Codex delta audit (adloop-audit-2026-11-04-delta.md): findings 2, 4 and 7."""
+
+    _window = staticmethod(TestUpstreamAuditFindings._window)
+    _schedule = TestUpstreamAuditFindings._schedule
+
+    def test_six_disjoint_windows_replaced_by_six_others_stay_within_seven_a_day(self, api, config):
+        # Finding 4: adding all six new windows first would ask for twelve on Monday.
+        for i, start in enumerate(range(0, 12, 2)):
+            self._window(api, 7100 + i, "Monday", start, start + 1)
+        new = [{"day_of_week": "Monday", "start_hour": h, "end_hour": h + 1} for h in range(12, 24, 2)]
+        preview = manage.update_microsoft_campaign_targeting(config, campaign_id=CAMPAIGN, ad_schedule=new)
+        ops = preview["changes"]["operations"]
+        assert len(ops["schedule_add_first"]) == 1 and len(ops["schedule_add_after"]) == 5
+        assert not any("serves at all hours" in w for w in preview["warnings"])
+        _apply(config, preview)
+        assert self._schedule(api) == [("Monday", h, h + 1) for h in range(12, 24, 2)]
+
+    def test_a_failure_names_the_windows_that_stay(self, api, config):
+        # Finding 7: Monday is kept, so the campaign is not unscheduled.
+        self._window(api, 7001, "Monday", 9, 17)
+        self._window(api, 7002, "Tuesday", 9, 17)
+        preview = manage.update_microsoft_campaign_targeting(config, campaign_id=CAMPAIGN, ad_schedule=[
+            {"day_of_week": "Monday", "start_hour": 9, "end_hour": 17},
+            {"day_of_week": "Tuesday", "start_hour": 10, "end_hour": 18}])
+        api.fail[("POST", "CampaignCriterions")] = MicrosoftAdsApiError("Internal error", status=400)
+        result = ads_write.confirm_and_apply(config, plan_id=preview["plan_id"], dry_run=False)
+        assert result["status"] == "PARTIAL_APPLY", result
+        assert "keeps Mon 09:00–17:00" in result["error"] and "serves at all hours" not in result["error"]
+        assert self._schedule(api) == [("Monday", 9, 17)]
+
+    @pytest.mark.parametrize("with_locations", [False, True])
+    def test_a_schedule_plan_from_before_the_fix_must_be_drafted_again(self, api, config, with_locations):
+        # Finding 2: the old plan shape put schedule windows in add/delete and
+        # carried no time zone mode; it is refused, never applied the old way.
+        self._window(api, 7001, "Monday", 9, 17)
+        preview = manage.update_microsoft_campaign_targeting(
+            config, campaign_id=CAMPAIGN, location_ids=["190", "200"] if with_locations else None,
+            ad_schedule=[{"day_of_week": "Monday", "start_hour": 10, "end_hour": 18}])
+        plan = preview_store.get_plan(preview["plan_id"])
+        ops = plan.changes["operations"]
+        ops["add"] += ops.pop("schedule_add_first") + ops.pop("schedule_add_after")
+        ops["delete"] += ops.pop("schedule_delete")
+        ops.pop("schedule_kept", None)
+        plan.changes["before"].pop("searcher_time_zone")
+        preview_store.store_plan(plan)
+        result = ads_write.confirm_and_apply(config, plan_id=preview["plan_id"], dry_run=False)
+        assert result.get("status") != "APPLIED" and "draft it again" in _text(result)
+        assert self._schedule(api) == [("Monday", 9, 17)]
+        assert not [c for c in api.calls if c["path"] == "CampaignCriterions" and c["method"] in ("POST", "DELETE")]

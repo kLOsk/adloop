@@ -152,7 +152,7 @@ def _call(config: AdLoopConfig, changes: dict, method: str, path: str, body: dic
     try:
         payload = campaign_request(
             config, path, body, account_id=changes["ad_account_id"], customer_id=changes.get("customer_id", ""),
-            method=method,
+            method=method, mutation=True,
         )
     except MicrosoftAdsApiError as exc:
         if method == "POST" and (exc.status == 0 or exc.status >= 500):
@@ -430,6 +430,11 @@ def _schedule_blocks(schedule: list, errors: list[str]) -> list[dict]:
     return blocks
 
 
+# Microsoft: "the maximum number of day and time criteria per day that you
+# can set is seven" (per campaign or ad group).
+_MAX_WINDOWS_PER_DAY = 7
+
+
 def _block_span(b: dict) -> tuple[str, int, int]:
     """(day, start minute, end minute) of a DayTime window."""
     rev = {v: k for k, v in _MINUTES.items()}
@@ -460,9 +465,21 @@ def _schedule_steps(current: list[dict], blocks: list[dict], campaign_id: str) -
                 "Criterion": {"Type": "DayTimeCriterion", **b},
                 "CriterionBid": {"Type": "BidMultiplier", "Multiplier": 0}}
 
-    first = [item(b) for b in to_add if not overlaps(_block_span(b))]
-    after = [item(b) for b in to_add if overlaps(_block_span(b))]
+    # Before the deletes, a day still holds all of today's windows, and
+    # Microsoft allows at most seven per day: add early only what fits.
+    room = {}
+    for span in old:
+        room[span[0]] = room.get(span[0], _MAX_WINDOWS_PER_DAY) - 1
+    first, after = [], []
+    for b in to_add:
+        span = _block_span(b)
+        if not overlaps(span) and room.get(span[0], _MAX_WINDOWS_PER_DAY) > 0:
+            room[span[0]] = room.get(span[0], _MAX_WINDOWS_PER_DAY) - 1
+            first.append(item(b))
+        else:
+            after.append(item(b))
     return {"schedule_add_first": first, "schedule_delete": remove, "schedule_add_after": after,
+            "schedule_kept": [_block_label(old[s]) for s in old if s in keep],
             "gap": bool(after) and not keep and not first}
 
 
@@ -579,7 +596,7 @@ def update_microsoft_campaign_targeting(
                             "the campaign has no schedule and serves at all hours. If adding the new windows then "
                             "fails, the apply reports it (PARTIAL_APPLY) and the campaign stays unscheduled until "
                             "the schedule is added again.")
-    if not any(plan_ops.values()):
+    if not any(v for k, v in plan_ops.items() if k != "schedule_kept"):
         return {"error": "Nothing to change: the targeting already matches."}
     return _plan(
         operation, "campaign", campaign_id, account,
@@ -1700,6 +1717,13 @@ def preflight(config: AdLoopConfig, plan: ChangePlan) -> dict:
                 raise ValueError("The campaign now has active broad-match keywords; manual bidding with broad match "
                                  "wastes spend. Change them to phrase or exact first.")
     elif op == "microsoft_update_targeting":
+        ops = c.get("operations") or {}
+        scheduled = {str(s.get("criterion_id")) for s in (c["before"].get("schedule") or [])}
+        if (any(((x.get("Criterion") or {}).get("Type")) == "DayTimeCriterion" for x in ops.get("add") or [])
+                or any(str(i) in scheduled for i in ops.get("delete") or [])):
+            raise ValueError("This plan changes the ad schedule and was drafted by an earlier AdLoop version, "
+                             "which did not check the schedule's time zone mode or order the windows Microsoft "
+                             "allows; draft it again.")
         campaign = entity("campaign", plan.entity_id)["entity"]
         now = _current_targeting(config, account, customer, plan.entity_id)
         if "searcher_time_zone" in c["before"]:
@@ -1860,10 +1884,14 @@ def apply_plan(config: AdLoopConfig, plan: ChangePlan) -> dict:
                 {"CampaignCriterionIds": [int(x) for x in chunk], "CampaignId": int(plan.entity_id), "CriterionType": "Targets"},
                 "ad schedule removal"))
             progress.done.append(f"removed {len(chunk)} schedule window(s)")
+        remaining = list(ops.get("schedule_kept") or [])
+        if ops.get("schedule_add_first"):
+            remaining.append(f"{len(ops['schedule_add_first'])} new window(s) added before the removal")
         for chunk in _chunks(ops.get("schedule_add_after") or []):
             progress.step(
-                "Adding the new ad schedule windows (the old ones are already removed; until this succeeds the "
-                "campaign has only the windows listed as added, or none, and then serves at all hours)",
+                "Adding the new ad schedule windows (the windows they replace are already removed; until this "
+                "succeeds the campaign keeps "
+                + (", ".join(remaining) if remaining else "no ad schedule and serves at all hours") + ")",
                 lambda chunk=chunk: _call(config, c, "POST", "CampaignCriterions",
                                           {"CampaignCriterions": chunk, "CriterionType": "Targets"}, "ad schedule"))
             progress.done.append(f"added {len(chunk)} schedule window(s)")
