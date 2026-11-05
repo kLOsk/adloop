@@ -1,5 +1,6 @@
 """Microsoft Advertising management: campaigns, targeting, ad groups, keywords,
-negatives, responsive search ads, ad extensions and removals.
+negatives, responsive search ads, ad extensions (image extensions included)
+and removals.
 
 Every function here drafts a :class:`ChangePlan` (platform ``microsoft``,
 operation ``microsoft_*``) and returns its preview; nothing changes until
@@ -25,7 +26,9 @@ it is and a list that is sent replaces the old one.
 
 from __future__ import annotations
 
+import base64
 import copy
+import hashlib
 import json
 from typing import TYPE_CHECKING, Any
 
@@ -64,7 +67,8 @@ _PINS = {
     "description_1": "Description1", "description_2": "Description2",
     "description1": "Description1", "description2": "Description2",
 }
-_EXTENSION_TYPES = "SitelinkAdExtension, CalloutAdExtension, StructuredSnippetAdExtension, CallAdExtension"
+_EXTENSION_TYPES = ("SitelinkAdExtension, CalloutAdExtension, StructuredSnippetAdExtension, CallAdExtension, "
+                    "ImageAdExtension")
 _LIST_TYPE = "NegativeKeywordList"
 _MAX_LISTS_PER_CAMPAIGN = 20
 _CHUNK = 100
@@ -104,7 +108,7 @@ def _check_url(url: str, errors: list[str], warnings: list[str], field: str = "f
     warnings.extend(inconclusive.values())
 
 
-_ID_FIELDS = ("CampaignIds", "AdGroupIds", "KeywordIds", "AdIds", "CampaignCriterionIds", "ListItemIds")
+_ID_FIELDS = ("CampaignIds", "AdGroupIds", "KeywordIds", "AdIds", "CampaignCriterionIds", "ListItemIds", "MediaIds")
 
 
 def _created_ids(payload: dict) -> list[str]:
@@ -181,6 +185,8 @@ class _Progress:
 
     def __init__(self) -> None:
         self.done: list[str] = []
+        # IDs of what the earlier steps created, by kind, for the error.
+        self.created: dict[str, list[str]] = {}
 
     def step(self, what: str, fn):
         from adloop.safety.outcomes import PartialApplyError
@@ -191,7 +197,7 @@ class _Progress:
             if self.done:
                 raise PartialApplyError(
                     f"{exc} (after: {'; '.join(self.done)})",
-                    created={**exc.created, "done": list(self.done)}, unknown=exc.unknown,
+                    created={**self.created, **exc.created, "done": list(self.done)}, unknown=exc.unknown,
                 ) from None
             raise
         except Exception as exc:
@@ -199,7 +205,7 @@ class _Progress:
                 raise PartialApplyError(
                     f"{what} failed after these steps succeeded: {'; '.join(self.done)}. "
                     f"Microsoft said: {exc}. Check the account before drafting again.",
-                    created={"done": list(self.done)},
+                    created={**self.created, "done": list(self.done)},
                 ) from None
             raise
 
@@ -1413,12 +1419,26 @@ def update_microsoft_responsive_search_ad(
 # Ad extensions: sitelinks, callouts, structured snippets, call
 # ---------------------------------------------------------------------------
 
+# The plan's entity_type for each Microsoft AssociationType.
+_ASSOCIATION_ENTITY = {"Account": "account", "Campaign": "campaign", "AdGroup": "ad_group"}
 
-def _extension_target(config, account, customer, campaign_id: str, scope: str) -> tuple[str, str, str] | dict:
+
+def _extension_target(config, account, customer, campaign_id: str, scope: str,
+                      ad_group_id: str = "") -> tuple[str, str, str] | dict:
+    """(AssociationType, entity id, label) of where an extension links; ad groups only when the caller allows them."""
     if scope == "account":
-        if campaign_id:
-            return _validation_error(["Pass campaign_id or scope='account', not both."])
+        if campaign_id or ad_group_id:
+            given = "ad_group_id" if ad_group_id else "campaign_id"
+            return _validation_error([f"Pass {given} or scope='account', not both."])
         return "Account", account, f"account {account}"
+    if ad_group_id:
+        if campaign_id:
+            return _validation_error(["Pass campaign_id or ad_group_id, not both."])
+        found = find_entity(config, account, customer, "ad_group", str(ad_group_id))
+        if not found:
+            return {"error": f"Microsoft ad group '{ad_group_id}' was not found in account {account}."}
+        return ("AdGroup", str(ad_group_id),
+                f"ad group '{found['entity'].get('Name')}' in campaign '{found['campaign'].get('Name')}'")
     if not campaign_id:
         return _validation_error(["campaign_id is required (or scope='account' for every campaign without its own)."])
     found = find_entity(config, account, customer, "campaign", str(campaign_id))
@@ -1427,15 +1447,18 @@ def _extension_target(config, account, customer, campaign_id: str, scope: str) -
     return "Campaign", str(campaign_id), f"campaign '{found['entity'].get('Name')}'"
 
 
-def _associated_extensions(config, account, customer, association_type: str, entity_id: str) -> list[dict]:
+def _associated_extensions(config, account, customer, association_type: str, entity_id: str | list[str]) -> list[dict]:
+    """Extension links of one entity or of up to 100 (Microsoft's EntityIds limit); each carries its EntityId."""
+    ids = [str(i) for i in (entity_id if isinstance(entity_id, list) else [entity_id])]
     body = {"AccountId": account, "AdExtensionType": _EXTENSION_TYPES, "AssociationType": association_type,
-            "EntityIds": [int(entity_id)]}
+            "EntityIds": [int(i) for i in ids]}
     payload = campaign_request(config, "AdExtensionsAssociations/Query", body, account_id=account, customer_id=customer)
     out = []
-    for collection in payload.get("AdExtensionAssociationCollection") or []:
+    # One collection per requested entity, in the request's order.
+    for owner, collection in zip(ids, payload.get("AdExtensionAssociationCollection") or [], strict=False):
         for assoc in (collection or {}).get("AdExtensionAssociations") or []:
             if isinstance(assoc, dict) and isinstance(assoc.get("AdExtension"), dict):
-                out.append(assoc)
+                out.append({**assoc, "EntityId": str(assoc.get("EntityId") or owner)})
     return out
 
 
@@ -1559,8 +1582,325 @@ def draft_microsoft_call_extension(config, *, ad_account_id="", campaign_id="", 
                              warnings=["Use the call-tracking number that should receive Microsoft calls."])
 
 
+# ---------------------------------------------------------------------------
+# Image extensions
+# ---------------------------------------------------------------------------
+# Microsoft's limits, from its documentation (checked 2026-11-05):
+#   [EXT]   ImageAdExtension: learn.microsoft.com/advertising/campaign-management-service/imageadextension
+#   [IMG]   Image (media):    learn.microsoft.com/advertising/campaign-management-service/image
+#   [ADD]   AddMedia:         learn.microsoft.com/advertising/campaign-management-service/addmedia
+#   [RSA]   ResponsiveAd Remarks (same media library):
+#                             learn.microsoft.com/advertising/campaign-management-service/responsivead#remarks
+#   [BULK]  Image Ad Extension record: learn.microsoft.com/advertising/bulk-service/image-ad-extension
+#   [HELP]  Add images to your ad with image extensions:
+#                             learn.microsoft.com/advertising/msa-help/hlp_ba_proc_addimageextension
+#   [GUIDE] Image guidelines and policies: learn.microsoft.com/advertising/msa-help/hlp_ba_conc_imageguidelines
+#   [AUD]   Audience ads guide: learn.microsoft.com/advertising/guides/audience-ads
+
+# GIF, JPEG and PNG, no animation [IMG Remarks, GUIDE].
+_IMAGE_FORMATS = {"image/jpeg": "JPEG", "image/png": "PNG", "image/gif": "GIF"}
+# "1.91:1 aspect ratio is required for the extension to be eligible to serve"
+# with a minimum of 703 x 368 pixels [GUIDE, HELP]; Microsoft crops the other
+# placements' ratios from it. The extension links the image as its
+# LandscapeImageMedia asset, which is 1.91:1 [BULK images.subType].
+_IMAGE_RATIO = 1.91
+_IMAGE_RATIO_TOLERANCE = 0.01  # 1200x628 is 1.911, 703x368 is 1.910
+_IMAGE_MIN_SIZE = (703, 368)
+# "The maximum width and height in pixels are 2592 and 2048 independently" [IMG, RSA].
+_IMAGE_MAX_SIZE = (2592, 2048)
+# "The maximum file size is 5 MB" [RSA Remarks]. [IMG] also caps Image.Data at
+# 102,400 base64 characters (about 75 KB); the two pages disagree, so the
+# draft refuses above 5 MB and warns above the smaller figure.
+_IMAGE_MAX_BYTES = 5 * 1024 * 1024
+_IMAGE_BASE64_NOTE = 102_400
+# "You can add a maximum of 10 media in a single call" [ADD].
+_IMAGES_PER_DRAFT = 10
+_ALT_TEXT_MAX = 35        # AlternativeText, required [EXT]
+_DISPLAY_TEXT_MAX = 35    # DisplayText, required for the SearchMultiple layout [EXT]
+_DESCRIPTION_MAX = 100    # Description, internal label, not shown [EXT]
+# Image extensions linked to one account, campaign or ad group: 25 in [BULK]
+# and [HELP], 6 in [EXT] and the "About ad extensions" association table.
+_IMAGE_LINKS_MAX = 25
+_IMAGE_LINKS_LOW = 6
+
+
+def _gif_frames(data: bytes) -> int:
+    """Image frames in a GIF (2 is enough to call it animated)."""
+    def skip_blocks(i: int) -> int:
+        while data[i]:
+            i += data[i] + 1
+        return i + 1
+
+    frames = 0
+    try:
+        flags = data[10]
+        i = 13 + (3 * 2 ** ((flags & 0x07) + 1) if flags & 0x80 else 0)
+        while i < len(data) and frames < 2:
+            block = data[i]
+            if block == 0x2C:  # image descriptor
+                frames += 1
+                flags = data[i + 9]
+                i += 10 + (3 * 2 ** ((flags & 0x07) + 1) if flags & 0x80 else 0)
+                i = skip_blocks(i + 1)  # LZW minimum code size, then the data
+            elif block == 0x21:  # extension
+                i = skip_blocks(i + 2)
+            else:
+                break
+    except IndexError:
+        pass
+    return frames
+
+
+def _is_animated(data: bytes, mime_type: str) -> bool:
+    if mime_type == "image/gif":
+        return _gif_frames(data) > 1
+    if mime_type == "image/png":
+        # An APNG declares its animation (acTL) before the first image data.
+        actl, idat = data.find(b"acTL"), data.find(b"IDAT")
+        return actl != -1 and (idat == -1 or actl < idat)
+    return False
+
+
+def _crop_hint(width: int, height: int) -> str:
+    if width / height > _IMAGE_RATIO:
+        return f"{round(height * _IMAGE_RATIO)}x{height}"
+    return f"{width}x{round(width / _IMAGE_RATIO)}"
+
+
+def _image_problems(label: str, data: bytes, mime_type: str, width: int, height: int) -> list[str]:
+    """Why Microsoft would refuse this image for an image extension (empty when it fits)."""
+    problems = []
+    if mime_type not in _IMAGE_FORMATS:
+        problems.append(f"{label}: {mime_type} is not accepted; use JPEG, PNG or GIF.")
+    elif _is_animated(data, mime_type):
+        problems.append(f"{label}: animated images are not accepted; use a still image.")
+    if len(data) > _IMAGE_MAX_BYTES:
+        problems.append(f"{label}: {len(data) / 1024 / 1024:.1f} MB is over Microsoft's 5 MB limit.")
+    if width < _IMAGE_MIN_SIZE[0] or height < _IMAGE_MIN_SIZE[1]:
+        problems.append(f"{label}: {width}x{height} is smaller than Microsoft's minimum of 703x368 for image extensions.")
+    if width > _IMAGE_MAX_SIZE[0] or height > _IMAGE_MAX_SIZE[1]:
+        problems.append(f"{label}: {width}x{height} is larger than Microsoft's maximum (width 2592, height 2048); "
+                        "scale it down, e.g. to 1200x628.")
+    ratio = width / height if height else 0
+    if abs(ratio - _IMAGE_RATIO) > _IMAGE_RATIO * _IMAGE_RATIO_TOLERANCE:
+        problems.append(f"{label}: the aspect ratio is {ratio:.2f}:1; image extensions need 1.91:1 (e.g. 1200x628). "
+                        f"Crop it to {_crop_hint(width, height)} first.")
+    return problems
+
+
+def _image_label(payload: dict) -> str:
+    return str(payload.get("url") or payload.get("path") or f"upload {payload.get('upload_id')}")
+
+
+def _draft_images(paths: list[str], urls: list[str], uploads: list[str]) -> tuple[list[dict], list[str]]:
+    """Load, validate and pin (sha256) every image; the bytes stay out of the plan.
+
+    Loading reuses the Google Ads image tools: image_payloads checks the files
+    and fetches URLs through the private-address-proof fetcher, and
+    load_image_bytes reads the approved bytes back.
+    """
+    from adloop.ads.write import image_payloads, load_image_bytes
+
+    payloads, errors = image_payloads(paths, urls, uploads)
+    images, seen = [], set()
+    for payload in payloads:
+        label = _image_label(payload)
+        try:
+            data, _name = load_image_bytes(payload)
+        except Exception as exc:  # noqa: BLE001 - a fetch or upload problem is the user's to fix
+            errors.append(f"{label}: {exc}")
+            continue
+        digest = hashlib.sha256(data).hexdigest()
+        if payload.get("sha256") and payload["sha256"] != digest:
+            errors.append(f"{label}: the image changed while it was being read; try again.")
+            continue
+        if digest in seen:
+            errors.append(f"{label}: the same image is in this draft twice.")
+            continue
+        seen.add(digest)
+        width, height = int(payload["width"]), int(payload["height"])
+        errors.extend(_image_problems(label, data, str(payload["mime_type"]), width, height))
+        images.append({**payload, "sha256": digest, "size_bytes": len(data),
+                       "base64_chars": 4 * ((len(data) + 2) // 3)})
+    return images, errors
+
+
+def _approved_image(payload: dict) -> bytes:
+    """The previewed bytes of an image, re-read now; refuses one that changed or no longer fits."""
+    from adloop.ads.write import load_image_bytes
+
+    label = _image_label(payload)
+    data, _name = load_image_bytes(payload)
+    if hashlib.sha256(data).hexdigest() != payload["sha256"]:
+        raise ValueError(f"{label} changed since the preview; draft again.")
+    problems = _image_problems(label, data, str(payload["mime_type"]), int(payload["width"]), int(payload["height"]))
+    if problems:
+        raise ValueError("; ".join(problems))
+    return data
+
+
+def _describe_ms_image(payload: dict) -> str:
+    width, height = int(payload["width"]), int(payload["height"])
+    return (f"{_image_label(payload)}: {_IMAGE_FORMATS.get(str(payload['mime_type']), payload['mime_type'])} "
+            f"{width}x{height} ({width / height:.2f}:1), {payload['size_bytes'] / 1024:.1f} KB")
+
+
+def _linked_images(config, account, customer, association: str, entity_id: str) -> list[dict]:
+    return [a["AdExtension"] for a in _associated_extensions(config, account, customer, association, entity_id)
+            if a["AdExtension"].get("Type") == "ImageAdExtension"]
+
+
+def draft_microsoft_image_extension(
+    config: AdLoopConfig,
+    *,
+    ad_account_id: str = "",
+    campaign_id: str = "",
+    ad_group_id: str = "",
+    scope: str = "",
+    image_paths: list[str] | None = None,
+    image_urls: list[str] | None = None,
+    upload_ids: list[str] | None = None,
+    alt_text: str = "",
+    display_text: str = "",
+    final_url: str = "",
+) -> dict:
+    """Draft image extensions (one per image) for a campaign, an ad group or the account.
+
+    Every image is loaded and checked now against Microsoft's limits; the
+    plan keeps its sha256, and the dry run and the apply read it again and
+    refuse one that changed. The apply uploads the images to the account's
+    media library (Media/Add), creates one ImageAdExtension per image and
+    links them (AdExtensionsAssociations/Set).
+    """
+    from adloop.runtime import deployment_mode
+
+    operation = "microsoft_add_image_extension"
+    blocked = _guard(operation, config)
+    if blocked:
+        return blocked
+    paths, urls, uploads = _clean(image_paths), _clean(image_urls), _clean(upload_ids)
+    if paths and deployment_mode() == "server":
+        return {"error": "image_paths can't be used here: local file paths aren't available on a hosted server; "
+                         "pass image_urls or upload_ids instead."}
+    alt, display, url = (alt_text or "").strip(), (display_text or "").strip(), (final_url or "").strip()
+    errors: list[str] = []
+    warnings: list[str] = []
+    if not alt:
+        errors.append("alt_text is required: it describes the image for screen readers and shows on hover "
+                      f"(at most {_ALT_TEXT_MAX} characters).")
+    elif len(alt) > _ALT_TEXT_MAX:
+        errors.append(f"alt_text is {len(alt)} characters; Microsoft allows {_ALT_TEXT_MAX}.")
+    if len(display) > _DISPLAY_TEXT_MAX:
+        errors.append(f"display_text is {len(display)} characters; Microsoft allows {_DISPLAY_TEXT_MAX}.")
+    count = len(paths) + len(urls) + len(uploads)
+    if not count:
+        errors.append("At least one image (image_paths, image_urls or upload_ids) is required.")
+    elif count > _IMAGES_PER_DRAFT:
+        errors.append(f"At most {_IMAGES_PER_DRAFT} images per draft (Microsoft uploads 10 per request); got {count}.")
+    if url:
+        _check_url(url, errors, warnings)
+    if errors:
+        return _validation_error(errors)
+    images, image_errors = _draft_images(paths, urls, uploads)
+    if image_errors:
+        return _validation_error(image_errors)
+
+    _meta, account, customer = _ctx(config, ad_account_id)
+    target = _extension_target(config, account, customer, str(campaign_id or ""), (scope or "").strip().lower(),
+                               ad_group_id=str(ad_group_id or "").strip())
+    if isinstance(target, dict):
+        return target
+    association, entity_id, where = target
+    existing = _linked_images(config, account, customer, association, entity_id)
+    total = len(existing) + len(images)
+    if total > _IMAGE_LINKS_MAX:
+        return _validation_error([(
+            f"{where} has {len(existing)} image extension(s); {len(images)} more would make {total}, over "
+            f"Microsoft's {_IMAGE_LINKS_MAX} per account, campaign or ad group. Unlink some first "
+            "(remove_microsoft_entity, entity_type extension_association).")])
+    if total > _IMAGE_LINKS_LOW:
+        warnings.append(f"{where} would have {total} image extensions. Microsoft's image extension reference "
+                        f"lists {_IMAGE_LINKS_LOW} per entity while its help and bulk pages say "
+                        f"{_IMAGE_LINKS_MAX}; if Microsoft refuses the link, the extensions stay in the "
+                        "library unlinked.")
+    layouts = ["SearchSingle"] + (["SearchMultiple"] if display else [])
+    # [AUD]: "you can also extend search into native via image ad extensions".
+    warnings.append("Image extensions can take these search ads beyond Bing results: Microsoft's audience ads "
+                    "guide says search ads are extended to native placements on the Microsoft Audience Network "
+                    "(Outlook, MSN) using their image extensions. Check the ad groups' Audience Network setting "
+                    "(get_microsoft_ad_groups) if they should stay on search.")
+    if display:
+        # [HELP]: at least five images and four image extensions; not with
+        # sitelink, enhanced sitelink, dynamic product, dynamic data or price cards.
+        warnings.append("display_text makes them eligible for the multi-image layout too. Microsoft shows that "
+                        "layout only with at least five images across at least four image extensions, and not "
+                        "next to sitelink, price, dynamic product or dynamic data extension cards.")
+    if any(p["mime_type"] == "image/png" for p in images):
+        warnings.append("Microsoft converts PNG images to JPEG; upload a JPEG if the quality matters.")
+    large = [_image_label(p) for p in images if p["base64_chars"] > _IMAGE_BASE64_NOTE]
+    if large:
+        warnings.append(f"{', '.join(large)} exceed(s) the 102,400 base64 characters (about 75 KB) that Microsoft's "
+                        "Image reference names, though its responsive-ad guidance allows 5 MB. If the upload is "
+                        "refused as too large, export a smaller JPEG and draft again.")
+    if existing:
+        warnings.append(f"{where} already has {len(existing)} image extension(s); Microsoft rotates them.")
+    shown: dict[str, Any] = {"images": [_describe_ms_image(p) for p in images], "alt_text": alt}
+    if display:
+        shown["display_text"] = display
+    shown["final_url"] = url or "the ad's own final URL"
+    shown["layouts"] = layouts
+    return _plan(
+        operation, _ASSOCIATION_ENTITY[association], entity_id, account,
+        _base_changes(account, customer, entity_name=where, association_type=association, entity_id=entity_id,
+                      **shown, image_payloads=images),
+        warnings=warnings,
+    )
+
+
+def _image_extension(c: dict, media_id: str, payload: dict) -> dict:
+    """The ImageAdExtension for one uploaded image [EXT]; the image is its 1.91:1 LandscapeImageMedia asset."""
+    ext: dict[str, Any] = {
+        "Type": "ImageAdExtension",
+        "AlternativeText": c["alt_text"],
+        "Description": str(payload.get("name") or "")[:_DESCRIPTION_MAX] or None,
+        "ImageMediaIds": [int(media_id)],
+        "Images": [{"Asset": {"Type": "ImageAsset", "Id": int(media_id), "SubType": "LandscapeImageMedia"}}],
+        "Layouts": list(c["layouts"]),
+    }
+    if c.get("display_text"):
+        ext["DisplayText"] = c["display_text"]
+    if c["final_url"].startswith(("http://", "https://")):
+        ext["FinalUrls"] = [c["final_url"]]
+    return {k: v for k, v in ext.items() if v is not None}
+
+
+def _extension_row(assoc: dict, association: str, label: str, campaign_name: str | None) -> dict:
+    ext = assoc["AdExtension"]
+    kind = str(ext.get("Type") or "")
+    entity_id = str(assoc["EntityId"])
+    row: dict[str, Any] = {
+        "level": _ASSOCIATION_ENTITY.get(association, association.lower()), "entity": label, "entity_id": entity_id,
+        "type": kind.replace("AdExtension", ""), "extension_id": str(ext.get("Id")),
+        "content": ext.get("Text") or ext.get("DisplayText") or ext.get("PhoneNumber")
+        or (f"{ext.get('Header')}: {', '.join(ext.get('Values') or [])}" if ext.get("Header") else None),
+        "final_urls": ext.get("FinalUrls"),
+        "editorial_status": assoc.get("EditorialStatus"),
+        "remove_id": f"{ext.get('Id')}~{entity_id}~{association}",
+    }
+    if association == "AdGroup":
+        row["campaign"] = campaign_name
+    if kind == "ImageAdExtension":
+        media = [str(i) for i in ext.get("ImageMediaIds") or [] if i is not None] or [
+            str(link["Asset"]["Id"]) for link in ext.get("Images") or []
+            if isinstance(link, dict) and isinstance(link.get("Asset"), dict) and link["Asset"].get("Id") is not None]
+        row.update(content=ext.get("AlternativeText"), alt_text=ext.get("AlternativeText"),
+                   display_text=ext.get("DisplayText"), media_ids=sorted(set(media)), layouts=ext.get("Layouts"),
+                   label=ext.get("Description"), source=ext.get("SourceType"))
+    return row
+
+
 def get_microsoft_ad_extensions(config: AdLoopConfig, *, ad_account_id: str = "", campaign_id: str = "") -> dict:
-    """Sitelinks, callouts, snippets and call extensions on campaigns and the account."""
+    """Sitelinks, callouts, snippets, call and image extensions on ad groups, campaigns and the account."""
     meta, account, customer = _ctx(config, ad_account_id)
     campaigns = [c for c in _campaigns(config, account, customer) if not campaign_id or str(c.get("Id")) == str(campaign_id)]
     rows = []
@@ -1569,25 +1909,25 @@ def get_microsoft_ad_extensions(config: AdLoopConfig, *, ad_account_id: str = ""
         targets.append(("Account", account, "account"))
     for association, entity_id, label in targets:
         for a in _associated_extensions(config, account, customer, association, entity_id):
-            ext = a["AdExtension"]
-            kind = str(ext.get("Type") or "")
-            rows.append({
-                "level": association.lower(), "entity": label, "type": kind.replace("AdExtension", ""),
-                "extension_id": str(ext.get("Id")),
-                "content": ext.get("Text") or ext.get("DisplayText") or ext.get("PhoneNumber")
-                or (f"{ext.get('Header')}: {', '.join(ext.get('Values') or [])}" if ext.get("Header") else None),
-                "final_urls": ext.get("FinalUrls"),
-                "editorial_status": a.get("EditorialStatus"),
-                "remove_id": f"{ext.get('Id')}~{entity_id}~{association}",
-            })
+            rows.append(_extension_row(a, association, label, None))
+    # Ad group links (image extensions often live there), up to 100 ad groups a request.
+    groups = {str(g.get("Id")): (g, c) for c in campaigns for g in _ad_groups(config, account, customer, str(c.get("Id")))
+              if g.get("Status") != "Deleted"}
+    for chunk in _chunks(list(groups)):
+        for a in _associated_extensions(config, account, customer, "AdGroup", chunk):
+            group, campaign = groups.get(a["EntityId"], ({}, {}))
+            rows.append(_extension_row(a, "AdGroup", group.get("Name") or a["EntityId"], campaign.get("Name")))
     insights = []
     for c in campaigns:
-        mine = [r for r in rows if r["entity"] == c.get("Name")]
+        mine = [r for r in rows if r["level"] == "campaign" and r["entity_id"] == str(c.get("Id"))]
         if not any(r["type"] == "Sitelink" for r in mine):
             insights.append(f"Campaign '{c.get('Name')}' has no sitelinks of its own.")
     rejected = [r for r in rows if r["editorial_status"] in ("Disapproved", "Inactive")]
     if rejected:
         insights.append(f"{len(rejected)} extension(s) are disapproved or inactive.")
+    if not any(r["type"] == "Image" for r in rows):
+        insights.append("No image extensions are linked. Microsoft may add autogenerated ones to ad groups "
+                        "without any; draft_microsoft_image_extension adds your own.")
     return {"ad_account_id": account, "extensions": rows, "total": len(rows), "insights": insights}
 
 
@@ -1647,7 +1987,7 @@ def remove_microsoft_entity(config: AdLoopConfig, *, ad_account_id: str = "", en
             request = {"path": "CampaignCriterions", "body": {"CampaignCriterionIds": [int(crit)], "CampaignId": int(cid),
                                                               "CriterionType": "Targets"}}
             shown = {"campaign_id": cid, "criterion_id": crit}
-        elif entity_type == "extension_association" and len(parts) == 3:
+        elif entity_type == "extension_association" and len(parts) == 3 and parts[2] in _ASSOCIATION_ENTITY:
             ext, owner, association = parts
             request = {"path": "AdExtensionsAssociations", "body": {"AccountId": account, "AssociationType": association,
                                                                      "AdExtensionIdToEntityIdAssociations": [
@@ -1657,10 +1997,14 @@ def remove_microsoft_entity(config: AdLoopConfig, *, ad_account_id: str = "", en
             return _validation_error([
                 "entity_id format: negative_keyword 'Campaign~<id>~<negativeId>' or 'AdGroup~<id>~<negativeId>', "
                 "negative_list_item '<listId>~<itemId>', campaign_criterion '<campaignId>~<criterionId>', "
-                "extension_association '<extensionId>~<entityId>~<Campaign|Account>' (the remove_id values the read tools return)."
+                "extension_association '<extensionId>~<entityId>~<Account|Campaign|AdGroup>' (the remove_id values the read "
+                "tools return)."
             ])
     warnings = ["Deleting cannot be undone; pausing keeps the history and lets it come back."] if entity_type in (
         "campaign", "ad_group", "ad", "keyword") else []
+    if entity_type == "extension_association":
+        warnings.append("This unlinks the extension only; the extension (and an image extension's images) "
+                        "stays in the account's library.")
     return _plan(operation, entity_type, entity_id, account,
                  _base_changes(account, customer, entity_name=shown.get("name") or entity_id, target=shown, request=request),
                  warnings=warnings, double=True)
@@ -1676,7 +2020,8 @@ OPERATIONS = {
     "microsoft_update_keyword_bids", "microsoft_add_negative_keywords", "microsoft_create_negative_list",
     "microsoft_add_to_negative_list", "microsoft_attach_negative_list", "microsoft_detach_negative_list",
     "microsoft_create_rsa", "microsoft_update_rsa", "microsoft_add_sitelinks", "microsoft_add_callouts",
-    "microsoft_add_structured_snippet", "microsoft_add_call_extension", "microsoft_remove_entity",
+    "microsoft_add_structured_snippet", "microsoft_add_call_extension", "microsoft_add_image_extension",
+    "microsoft_remove_entity",
 }
 
 
@@ -1831,6 +2176,22 @@ def preflight(config: AdLoopConfig, plan: ChangePlan) -> dict:
                 _check_url(ext["FinalUrls"][0], errors, [])
             if errors:
                 raise ValueError("; ".join(errors))
+    elif op == "microsoft_add_image_extension":
+        if c["association_type"] in ("Campaign", "AdGroup"):
+            entity(_ASSOCIATION_ENTITY[c["association_type"]], c["entity_id"])
+        images = c["image_payloads"]
+        for payload in images:
+            _approved_image(payload)  # re-reads (URLs re-fetched) and re-checks every image
+        linked = _linked_images(config, account, customer, c["association_type"], c["entity_id"])
+        if len(linked) + len(images) > _IMAGE_LINKS_MAX:
+            raise ValueError(f"{c['entity_name']} now has {len(linked)} image extension(s); {len(images)} more would "
+                             f"go over Microsoft's {_IMAGE_LINKS_MAX}.")
+        if c["final_url"].startswith(("http://", "https://")):
+            errors = []
+            _check_url(c["final_url"], errors, [])
+            if errors:
+                raise ValueError("; ".join(errors))
+        checks["images_verified"] = len(images)
     elif op == "microsoft_remove_entity":
         if plan.entity_type in ("campaign", "ad_group", "ad", "keyword"):
             entity(plan.entity_type, plan.entity_id)
@@ -1986,9 +2347,49 @@ def apply_plan(config: AdLoopConfig, plan: ChangePlan) -> dict:
         }, "extension links"))
         return {"extension_ids": ids, "linked_to": c["entity_name"]}
 
+    if op == "microsoft_add_image_extension":
+        return _apply_image_extensions(config, c, progress)
+
     if op == "microsoft_remove_entity":
         request = c["request"]
         _call(config, c, "DELETE", request["path"], request["body"], f"{plan.entity_type.replace('_', ' ')} removal")
         return {"removed": plan.entity_type, "entity_id": plan.entity_id}
 
     raise ValueError(f"Unknown Microsoft operation: {op}")
+
+
+def _apply_image_extensions(config: AdLoopConfig, c: dict, progress: _Progress) -> dict:
+    """Media/Add, then one ImageAdExtension per image, then the links; a later failure names what exists."""
+    from adloop.safety.outcomes import PartialApplyError
+
+    account = c["ad_account_id"]
+    payloads = c["image_payloads"]
+    # Every image is read and checked before anything is sent.
+    data = [_approved_image(p) for p in payloads]
+    # REST v13 AddMedia is POST .../CampaignManagement/v13/Media [ADD]; GenericImage
+    # is the MediaType Microsoft recommends for image extension media [IMG].
+    media = [{"Type": "Image", "MediaType": "GenericImage", "Data": base64.b64encode(d).decode("ascii")} for d in data]
+    payload = _call(config, c, "POST", "Media", {"AccountId": account, "Media": media}, "image upload")
+    media_ids = [str(i) for i in payload.get("MediaIds") or [] if i is not None]
+    if len(media_ids) != len(media):
+        raise PartialApplyError(
+            f"Microsoft stored {len(media_ids)} of {len(media)} images (media ids {media_ids}) without saying why; "
+            "check the account's image library before drafting again.",
+            created={"media_ids": media_ids},
+        )
+    progress.created["media_ids"] = media_ids
+    progress.done.append(f"uploaded {len(media_ids)} image(s) to the media library (media ids {', '.join(media_ids)})")
+
+    extensions = [_image_extension(c, mid, p) for mid, p in zip(media_ids, payloads, strict=True)]
+    payload = progress.step("Creating the image extensions", lambda: _call(
+        config, c, "POST", "AdExtensions", {"AccountId": account, "AdExtensions": extensions}, "image extensions"))
+    ids = [str((i or {}).get("Id")) for i in payload.get("AdExtensionIdentities") or [] if i and i.get("Id")]
+    progress.created["extension_ids"] = ids
+    progress.done.append(f"created image extension(s) {', '.join(ids)}")
+    progress.step("Linking the image extensions", lambda: _call(config, c, "POST", "AdExtensionsAssociations/Set", {
+        "AccountId": account, "AssociationType": c["association_type"],
+        "AdExtensionIdToEntityIdAssociations": [{"AdExtensionId": int(i), "EntityId": int(c["entity_id"])} for i in ids],
+    }, "image extension links"))
+    return {"media_ids": media_ids, "extension_ids": ids, "linked_to": c["entity_name"], "layouts": c["layouts"],
+            "next": "The images go through Microsoft's editorial review; get_microsoft_ad_extensions shows each "
+                    "extension's editorial_status."}

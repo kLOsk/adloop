@@ -296,7 +296,7 @@ def _platform_label(plan: ChangePlan) -> str:
 # preflight compares; they are for the code, not for the person approving.
 _INTERNAL_FIELDS = frozenset({
     "body", "before", "update", "operations", "criteria", "keyword_rows", "negative_rows",
-    "request", "image_source", "entity_kind", "update_audience_adjustment", "customer_id",
+    "request", "image_source", "image_payloads", "entity_kind", "update_audience_adjustment", "customer_id",
 })
 # Payload objects under names that other plans use for display text.
 _INTERNAL_IF_OBJECT = frozenset({"campaign", "ad", "ad_group", "image", "extensions"})
