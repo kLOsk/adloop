@@ -188,10 +188,67 @@ def test_switching_the_discount_and_clearing_the_code(config):
     client.ads.rows = [row]
     assets._apply_update_promotion(client, "1", changes)
     op = client.assets.operations[0]
-    assert set(op.update_mask.paths) == {"promotion_asset.money_amount_off", "promotion_asset.promotion_code"}
+    assert set(op.update_mask.paths) == {
+        "promotion_asset.money_amount_off.amount_micros",
+        "promotion_asset.money_amount_off.currency_code",
+        "promotion_asset.percent_off",
+        "promotion_asset.promotion_code",
+    }
     assert op.update.promotion_asset.money_amount_off.amount_micros == 25_000_000
     assert op.update.promotion_asset.promotion_code == ""  # masked and unset: removed
 
+
+
+# A Money that is given a value is masked by its leaves: Google answers
+# FIELD_HAS_SUBFIELDS to promotion_asset.money_amount_off itself. The member a
+# oneof switch replaces is masked unset, which clears it; Google does not drop
+# it on its own (PROMOTION_CANNOT_SET_PERCENT_OFF_AND_MONEY_AMOUNT_OFF).
+def _applied_mask(client, row, changes):
+    client.ads.rows = [row]
+    assets._apply_update_promotion(client, "1", changes)
+    op = client.assets.operations[0]
+    return op.update.promotion_asset, set(op.update_mask.paths)
+
+
+def test_a_new_money_amount_is_masked_by_its_leaves(config):
+    client = _Client()
+    row = _promo_row(client, money=500_000_000)
+    row.asset.promotion_asset.orders_over_amount.amount_micros = 5_000_000_000
+    row.asset.promotion_asset.orders_over_amount.currency_code = "EUR"
+    with patch("adloop.ads.gaql.execute_query", return_value=_as_gaql(row)):
+        preview = assets.update_promotion(config, customer_id="1", asset_id="7", money_off=75,
+                                          clear_fields=["orders_over_amount"])
+    p, paths = _applied_mask(client, row, preview["changes"])
+    assert paths == {
+        "promotion_asset.money_amount_off.amount_micros",
+        "promotion_asset.money_amount_off.currency_code",
+        "promotion_asset.orders_over_amount",  # unset, so masked whole: removed
+    }
+    assert p.money_amount_off.amount_micros == 75_000_000 and not p.orders_over_amount.amount_micros
+
+
+def test_money_to_percent_clears_the_money(config):
+    client = _Client()
+    row = _promo_row(client, money=50_000_000)
+    with patch("adloop.ads.gaql.execute_query", return_value=_as_gaql(row)):
+        preview = assets.update_promotion(config, customer_id="1", asset_id="7", percent_off=15)
+    p, paths = _applied_mask(client, row, preview["changes"])
+    assert paths == {"promotion_asset.percent_off", "promotion_asset.money_amount_off"}
+    assert p.percent_off == 150_000 and not p.money_amount_off.amount_micros
+
+
+def test_a_new_minimum_is_masked_by_its_leaves_and_clears_the_code(config):
+    client = _Client()
+    row = _promo_row(client, money=10_000_000, code="WINTER")
+    with patch("adloop.ads.gaql.execute_query", return_value=_as_gaql(row)):
+        preview = assets.update_promotion(config, customer_id="1", asset_id="7", orders_over_amount=100)
+    p, paths = _applied_mask(client, row, preview["changes"])
+    assert paths == {
+        "promotion_asset.orders_over_amount.amount_micros",
+        "promotion_asset.orders_over_amount.currency_code",
+        "promotion_asset.promotion_code",
+    }
+    assert p.orders_over_amount.amount_micros == 100_000_000 and not p.promotion_code
 
 def test_update_refusals_and_the_moved_asset_check(config):
     client = _Client()
