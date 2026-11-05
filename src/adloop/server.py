@@ -8767,8 +8767,8 @@ def get_roku_conversion_setup(
     """Audit Roku Ads conversion tracking: event groups, ad group goals and actions from delivery.
 
     Checks every event group (the Roku pixel / Conversions API container:
-    active, stale, inactive, archived, and which live ad groups use it),
-    every live ad group's optimization goal against its event group, and,
+    active, stale, inactive, archived, and which active or upcoming ad groups
+    use it), every such ad group's optimization goal against its event group, and,
     over the window, whether impressions produced the goal action. Returns a
     verdict (ok, needs attention, broken), checks sorted fail → warn →
     info → pass, per ad group activity with CPA, and insights. Configuration
