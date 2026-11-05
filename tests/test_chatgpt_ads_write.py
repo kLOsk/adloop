@@ -400,8 +400,8 @@ class TestCampaignUpdate:
 class TestAdGroupUpdate:
     def test_bid_change_sends_the_whole_bidding_config(self, api, config):
         preview = write.update_chatgpt_ad_group(config, ad_group_id="adgrp_1", max_bid=10)
-        assert preview["changes"]["changes"]["bid"]["from"] == "fixed 8.0 per click"
-        assert preview["changes"]["changes"]["bid"]["to"] == "fixed 10.0 per click"
+        assert preview["changes"]["changes"]["bid"]["from"] == "fixed 8.00 per click"
+        assert preview["changes"]["changes"]["bid"]["to"] == "fixed 10.00 per click"
         _apply(config, preview)
         assert api.writes()[-1]["body"]["bidding_config"] == {
             "billing_event_type": "click", "strategy": "fixed_bid", "max_bid_micros": 10_000_000,
@@ -427,7 +427,7 @@ class TestAdGroupUpdate:
 
     def test_conversion_campaign_bid_is_a_target_cpa(self, api, config):
         preview = write.update_chatgpt_ad_group(config, ad_group_id="adgrp_2", max_bid=100)
-        assert preview["changes"]["changes"]["bid"]["to"] == "fixed 100.0 target CPA"
+        assert preview["changes"]["changes"]["bid"]["to"] == "fixed 100.00 target CPA"
 
     def test_context_hints_add_remove_and_replace(self, api, config):
         preview = write.update_chatgpt_ad_group(config, ad_group_id="adgrp_1", add_context_hints=["hydro jetting", "Clogged Drain"],
@@ -547,7 +547,7 @@ class TestCreates:
         assert body["status"] == "paused" and body["bidding_config"] == {
             "billing_event_type": "click", "strategy": "maximize_clicks", "custom_audience_bid_multipliers": []}
         fixed = write.draft_chatgpt_ad_group(config, campaign_id="cmpn_2", name="Fixed", max_bid=80)
-        assert fixed["changes"]["bid"] == "fixed 80.0 target CPA"
+        assert fixed["changes"]["bid"] == "fixed 80.00 target CPA"
         assert "archived" in write.draft_chatgpt_ad_group(config, campaign_id="cmpn_3", name="Nope")["error"]
 
     def test_ad_uploads_the_image_then_creates_paused(self, api, config):
@@ -758,3 +758,34 @@ class TestRoundThreeFindings:
         assert creates[0]["body"] == creates[1]["body"]
         assert creates[0]["headers"]["Idempotency-Key"] == creates[1]["headers"]["Idempotency-Key"]
         assert sum(1 for a in api.ads.values() if a.get("name") == creates[0]["body"].get("name")) == 1
+
+
+class TestUpstreamAuditFindings:
+    """Codex audit of the upstream ports (adloop-audit-2026-11-04-upstream.md)."""
+
+    def _impressions(self, api, micros=4000):
+        api.campaigns["cmpn_1"]["bidding_type"] = "impressions"
+        api.ad_groups["adgrp_1"]["bidding_config"] = {"billing_event_type": "impression", "strategy": "fixed_bid",
+                                                      "max_bid_micros": micros, "custom_audience_bid_multipliers": []}
+
+    def test_sub_cent_bid_raise_is_capped_at_the_draft(self, api, config):
+        # Finding 1: $0.004 → $0.04 per impression is +900%, not "0.0 → 0.04".
+        self._impressions(api)
+        config.safety.max_bid_increase_pct = 50
+        result = write.update_chatgpt_ad_group(config, ad_group_id="adgrp_1", max_bid=0.04)
+        assert "plan_id" not in result and "Bid increase 900% exceeds maximum 50%" in _text(result)
+
+    def test_sub_cent_bids_are_shown_exactly(self, api, config):
+        self._impressions(api)
+        preview = write.update_chatgpt_ad_group(config, ad_group_id="adgrp_1", max_bid=0.005)
+        assert preview["changes"]["changes"]["bid"]["from"] == "fixed 0.004 per impression"
+        assert preview["changes"]["changes"]["bid"]["to"] == "fixed 0.005 per impression"
+
+    def test_sub_cent_bid_raise_is_capped_again_at_apply(self, api, config):
+        self._impressions(api)
+        preview = write.update_chatgpt_ad_group(config, ad_group_id="adgrp_1", max_bid=0.005)  # +25%
+        assert ads_write.confirm_and_apply(config, plan_id=preview["plan_id"], dry_run=True)["status"] == "DRY_RUN_SUCCESS"
+        config.safety.max_bid_increase_pct = 10
+        result = ads_write.confirm_and_apply(config, plan_id=preview["plan_id"], dry_run=False)
+        assert result.get("status") != "APPLIED" and "Bid increase 25% exceeds maximum 10%" in _text(result)
+        assert not api.writes()

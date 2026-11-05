@@ -44,7 +44,7 @@ _CAMPAIGNS = [
         "budget": {"daily_spend_limit_micros": 25_000_000},
         "conversion_event_setting_ids": ["ces_lead"],
         "targeting": {"locations": {"include": [
-            {"id": "95610", "name": "95610", "type": "postal_code", "country_code": "US", "region_code": None},
+            {"id": "62704", "name": "62704", "type": "postal_code", "country_code": "US", "region_code": None},
         ]}},
         "landing_page_configuration": {"query_string_template": "utm_campaign={campaign_id}"},
         "serving_issues": [{"code": "partial_serving_ad_in_review"}],
@@ -413,7 +413,7 @@ class TestAccountAndStructure:
         core = result["campaigns"][0]
         assert core["budget"] == {"daily": 25.0, "lifetime": None}
         assert core["conversion_events"] == ["Web Form Lead (lead_created)"]
-        assert core["targeting"]["locations"] == ["95610 (postal_code)"]
+        assert core["targeting"]["locations"] == ["62704 (postal_code)"]
         assert core["serving_state"].startswith("serving with limits")
         joined = " ".join(result["insights"])
         assert "'Water Heaters' has no conversion event" in joined
@@ -1162,3 +1162,43 @@ class TestReviewFindingsRoundTwo:
         assert merged[0]["order_created_attributed_sales"] == "0.032"
         assert merged[0]["attributed_events"][0]["attributed_event_value_amount"] == "0.032"
         assert merged[0]["attributed_events"][0]["attributed_event_count"] == 8
+
+
+class TestUpstreamAuditFindings:
+    """Codex audit of the upstream ports (adloop-audit-2026-11-04-upstream.md)."""
+
+    KEY = "sk-ads-default"
+
+    def test_an_error_echoing_the_key_is_redacted(self, config):
+        # Finding 10: an error body that repeats the request must not leak the key.
+        payload = {"error": {"message": f"Bad header Bearer {self.KEY}", "code": self.KEY}}
+        with patch("requests.request", return_value=_Resp(400, payload)):
+            with pytest.raises(ChatGPTAdsApiError) as err:
+                client.api_get(config, "campaigns")
+        assert self.KEY not in str(err.value) and self.KEY not in str(err.value.code)
+        assert "Bearer [redacted]" in str(err.value)
+
+    def test_a_rejected_key_is_not_echoed_back(self, config):
+        with patch("requests.request", return_value=_Resp(401, {"error": {"message": f"invalid key {self.KEY}"}})):
+            with pytest.raises(ChatGPTAdsAuthError) as err:
+                client.api_get(config, "ad_account")
+        assert self.KEY not in str(err.value)
+
+    def test_the_key_is_redacted_before_a_long_message_is_cut(self, config):
+        # Trimming first would cut the key and leave its prefix unmatched.
+        message = "x" * (client._MAX_MESSAGE - 6) + f" {self.KEY} tail"
+        with patch("requests.request", return_value=_Resp(400, {"error": {"message": message}})):
+            with pytest.raises(ChatGPTAdsApiError) as err:
+                client.api_get(config, "campaigns")
+        assert "sk-ad" not in str(err.value)
+
+    def test_tool_results_carry_no_key(self, config):
+        from adloop import runtime, server
+
+        runtime.set_default_config(config)
+        try:
+            with patch("requests.request", return_value=_Resp(400, {"error": {"message": f"echo {self.KEY}"}})):
+                result = server.get_chatgpt_campaigns()
+        finally:
+            runtime.set_default_config(None)
+        assert "error" in result and self.KEY not in json.dumps(result)

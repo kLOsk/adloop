@@ -7208,7 +7208,7 @@ def search_chatgpt_locations(ad_account_id: str = "", query: str = "", limit: in
 
     Args:
         ad_account_id: ChatGPT ad account id whose key to use; empty uses the default key.
-        query: Place name, e.g. "Sacramento" or "California".
+        query: Place name, e.g. "Chicago" or "Illinois".
         limit: Most results (1–100).
     """
     from adloop.chatgpt_ads.read import search_chatgpt_locations as _impl

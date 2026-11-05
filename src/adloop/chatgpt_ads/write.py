@@ -799,9 +799,26 @@ def _bidding_config(
     return new
 
 
+def _exact_amount(micros: Any) -> float | None:
+    """Micros → currency amount, unrounded: impression bids go below a cent,
+    so cap checks must not compare two-decimal amounts."""
+    try:
+        return int(micros) / 1_000_000 if micros not in (None, "") else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _amount_text(micros: Any) -> str:
+    """A bid for display: cents when whole, else every significant digit."""
+    exact = _exact_amount(micros)
+    if exact is None:
+        return "None"
+    return f"{exact:.2f}" if int(micros) % 10_000 == 0 else f"{exact:.6f}".rstrip("0")
+
+
 def _bid_label(config_: dict, bidding_type: str | None) -> str:
     strategy = config_.get("strategy") or "fixed_bid"
-    amount = from_micros(config_.get("max_bid_micros"))
+    amount = _amount_text(config_.get("max_bid_micros"))
     if strategy != "fixed_bid":
         return strategy
     unit = "per impression" if config_.get("billing_event_type") == "impression" else (
@@ -863,8 +880,8 @@ def update_chatgpt_ad_group(
         touched.append("bidding_config")
         shown["bid"] = {"from": _bid_label(current, campaign.get("bidding_type")),
                         "to": _bid_label(new, campaign.get("bidding_type")), "currency": meta["currency"]}
-        old_bid = from_micros(current.get("max_bid_micros"))
-        new_bid = from_micros(new.get("max_bid_micros"))
+        old_bid = _exact_amount(current.get("max_bid_micros"))
+        new_bid = _exact_amount(new.get("max_bid_micros"))
         if old_bid and new_bid and new.get("strategy") == "fixed_bid":
             try:
                 check_bid_increase(old_bid, new_bid, config.safety)
@@ -1303,8 +1320,8 @@ def preflight(config: AdLoopConfig, plan: ChangePlan) -> dict:
             )
             checks["budget_cap_ok"] = True
         if op == "chatgpt_update_ad_group" and "bidding_config" in body:
-            old = from_micros((entity.get("bidding_config") or {}).get("max_bid_micros"))
-            new = from_micros(body["bidding_config"].get("max_bid_micros"))
+            old = _exact_amount((entity.get("bidding_config") or {}).get("max_bid_micros"))
+            new = _exact_amount(body["bidding_config"].get("max_bid_micros"))
             if old and new:
                 check_bid_increase(old, new, config.safety)
             checks["bid_increase_ok"] = True

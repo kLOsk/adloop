@@ -72,6 +72,27 @@ class ChatGPTAdsApiError(Exception):
         self.retry_after = retry_after
 
 
+def redact(text: Any, secrets: list[str]) -> Any:
+    """``text`` with every secret (8+ characters) replaced by ``[redacted]``."""
+    if not isinstance(text, str):
+        return text
+    for secret in secrets:
+        if secret and len(secret) >= 8:
+            text = text.replace(secret, "[redacted]")
+    return text
+
+
+def scrub(value: Any, secrets: list[str]) -> Any:
+    """A parsed response with every secret redacted from every string in it."""
+    if isinstance(value, str):
+        return redact(value, secrets)
+    if isinstance(value, dict):
+        return {k: scrub(v, secrets) for k, v in value.items()}
+    if isinstance(value, list):
+        return [scrub(v, secrets) for v in value]
+    return value
+
+
 def from_micros(value: Any) -> float | None:
     """Micros → currency amount (2 dp); ``None`` stays ``None``."""
     if value is None or value == "":
@@ -204,8 +225,9 @@ def api_request(
 
     url = f"{API_BASE}/{path.lstrip('/')}"
     extra_headers = headers or {}
+    api_key = _api_key(config, ad_account_id)
     headers = {
-        "Authorization": f"Bearer {_api_key(config, ad_account_id)}",
+        "Authorization": f"Bearer {api_key}",
         "Accept": "application/json",
         "User-Agent": _user_agent(),
         **extra_headers,
@@ -248,7 +270,9 @@ def api_request(
         if 200 <= status < 300:
             return payload if isinstance(payload, dict) else {"data": payload}
 
-        detail, code = _error_detail(payload)
+        # An error body may echo the request; never let the key reach a tool
+        # result or the audit log (scrubbed before any trimming cuts it).
+        detail, code = _error_detail(scrub(payload, [api_key]))
         if status == 401:
             raise ChatGPTAdsAuthError(
                 "OpenAI rejected the ChatGPT Ads API key (401)"

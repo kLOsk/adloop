@@ -596,6 +596,8 @@ class TestDirectoryReadiness:
         # A sentence opening with "Call <tool>" (not "gtag call in ...").
         r"(\A|[.:;!]\s+|\n\s*\n)\s*call [a-z_]+",
         r"\bcall [a-z_]+ (to|with|for)\b",
+        # "Apply with confirm_and_apply." tells the model what to do next.
+        r"(\A|[.:;!]\s+)apply (it )?with [a-z_]+",
         r"\brun this first\b",
         r"\brun (it|this) before\b",
         r"\bdo not stop\b",
@@ -678,6 +680,7 @@ class TestDirectoryReadiness:
             "You MUST explicitly pass dry_run=false",
             "call this tool again with a much higher limit",
             "Call confirm_and_apply with the returned plan_id to execute.",
+            "safety cap. Apply with confirm_and_apply.",
             "Run this first if other tools are failing.",
             "do not stop at the truncated list",
             "Pass the remediation on to the user and stop retrying",
