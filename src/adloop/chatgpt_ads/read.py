@@ -32,6 +32,7 @@ from adloop.chatgpt_ads.client import (
     api_get,
     api_get_all,
     api_post,
+    exact_from_micros,
     from_micros,
 )
 
@@ -407,7 +408,8 @@ def campaign_summary(campaign: dict, settings_by_id: dict[str, dict] | None = No
 
 def _bid(group: dict, bidding_type: str | None) -> dict:
     config = group.get("bidding_config") or {}
-    amount = from_micros(config.get("max_bid_micros"))
+    # Unrounded: an impression bid of 4000 micros is 0.004, not 0.0.
+    amount = exact_from_micros(config.get("max_bid_micros"))
     billing = config.get("billing_event_type")
     if bidding_type == "conversions":
         meaning = "target cost per conversion (oCPC; billed per click)"

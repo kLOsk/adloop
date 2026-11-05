@@ -41,6 +41,7 @@ from adloop.chatgpt_ads.client import (
     api_get_all,
     api_post,
     api_upload,
+    exact_from_micros,
     from_micros,
 )
 from adloop.chatgpt_ads.read import (
@@ -800,12 +801,24 @@ def _bidding_config(
 
 
 def _exact_amount(micros: Any) -> float | None:
-    """Micros → currency amount, unrounded: impression bids go below a cent,
-    so cap checks must not compare two-decimal amounts."""
+    """Micros → currency amount, unrounded (see client.exact_from_micros)."""
+    return exact_from_micros(micros)
+
+
+def _check_bid_micros(old_micros: Any, new_micros: Any, config: AdLoopConfig) -> None:
+    """The bid-increase cap in whole micros, so an increase of exactly the cap
+    passes and one micro more does not (floats get the boundary wrong)."""
+    from adloop.safety.guards import SafetyViolation
+
     try:
-        return int(micros) / 1_000_000 if micros not in (None, "") else None
+        old, new = int(old_micros), int(new_micros)
     except (TypeError, ValueError):
-        return None
+        return
+    if old <= 0:
+        return
+    cap = config.safety.max_bid_increase_pct
+    if new * 100 > old * (100 + cap):
+        raise SafetyViolation(f"Bid increase {(new - old) * 100 / old:.0f}% exceeds maximum {cap}%")
 
 
 def _amount_text(micros: Any) -> str:
@@ -843,7 +856,7 @@ def update_chatgpt_ad_group(
     blocked = _guard(operation, config)
     if blocked:
         return blocked
-    from adloop.safety.guards import SafetyViolation, check_bid_increase
+    from adloop.safety.guards import SafetyViolation
 
     errors: list[str] = []
     ad_group_id = (ad_group_id or "").strip()
@@ -884,7 +897,7 @@ def update_chatgpt_ad_group(
         new_bid = _exact_amount(new.get("max_bid_micros"))
         if old_bid and new_bid and new.get("strategy") == "fixed_bid":
             try:
-                check_bid_increase(old_bid, new_bid, config.safety)
+                _check_bid_micros(current.get("max_bid_micros"), new.get("max_bid_micros"), config)
             except SafetyViolation as e:
                 return {"error": str(e)}
         if current.get("custom_audience_bid_multipliers") and new.get("strategy") != "fixed_bid":
@@ -1280,7 +1293,6 @@ def _require_unchanged(entity: dict, before: dict, what: str) -> None:
 
 def preflight(config: AdLoopConfig, plan: ChangePlan) -> dict:
     """Re-read the target and re-check the gates; sends nothing."""
-    from adloop.safety.guards import check_bid_increase
 
     changes = plan.changes or {}
     account = changes.get("ad_account_id") or ""
@@ -1320,10 +1332,10 @@ def preflight(config: AdLoopConfig, plan: ChangePlan) -> dict:
             )
             checks["budget_cap_ok"] = True
         if op == "chatgpt_update_ad_group" and "bidding_config" in body:
-            old = _exact_amount((entity.get("bidding_config") or {}).get("max_bid_micros"))
-            new = _exact_amount(body["bidding_config"].get("max_bid_micros"))
+            old = (entity.get("bidding_config") or {}).get("max_bid_micros")
+            new = body["bidding_config"].get("max_bid_micros")
             if old and new:
-                check_bid_increase(old, new, config.safety)
+                _check_bid_micros(old, new, config)
             checks["bid_increase_ok"] = True
         if op == "chatgpt_update_ad":
             url = ((body.get("creative") or {}).get("target_url")) if "target_url" in (changes.get("changes") or {}) else None

@@ -93,6 +93,16 @@ def scrub(value: Any, secrets: list[str]) -> Any:
     return value
 
 
+def exact_from_micros(value: Any) -> float | None:
+    """Micros → currency amount, unrounded: impression bids go below a cent."""
+    if value is None or value == "":
+        return None
+    try:
+        return int(value) / 1_000_000
+    except (TypeError, ValueError):
+        return None
+
+
 def from_micros(value: Any) -> float | None:
     """Micros → currency amount (2 dp); ``None`` stays ``None``."""
     if value is None or value == "":

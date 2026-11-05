@@ -789,3 +789,25 @@ class TestUpstreamAuditFindings:
         result = ads_write.confirm_and_apply(config, plan_id=preview["plan_id"], dry_run=False)
         assert result.get("status") != "APPLIED" and "Bid increase 25% exceeds maximum 10%" in _text(result)
         assert not api.writes()
+
+    # -- delta audit finding 6: the cap boundary in whole micros
+    def test_an_increase_of_exactly_the_cap_passes(self, api, config):
+        self._impressions(api, micros=1004)
+        config.safety.max_bid_increase_pct = 50
+        preview = write.update_chatgpt_ad_group(config, ad_group_id="adgrp_1", max_bid=0.001506)  # exactly +50%
+        assert "plan_id" in preview, preview
+        assert ads_write.confirm_and_apply(config, plan_id=preview["plan_id"], dry_run=True)["status"] == "DRY_RUN_SUCCESS"
+
+    def test_one_micro_over_the_cap_is_refused(self, api, config):
+        self._impressions(api, micros=1004)
+        config.safety.max_bid_increase_pct = 50
+        result = write.update_chatgpt_ad_group(config, ad_group_id="adgrp_1", max_bid=0.001507)
+        assert "plan_id" not in result and "exceeds maximum 50%" in _text(result)
+
+    def test_inventory_and_preview_show_the_same_sub_cent_bid(self, api, config):
+        self._impressions(api)
+        group = next(g for g in read.get_chatgpt_ad_groups(config, campaign_id="cmpn_1")["ad_groups"]
+                     if g["ad_group_id"] == "adgrp_1")
+        preview = write.update_chatgpt_ad_group(config, ad_group_id="adgrp_1", max_bid=0.005)
+        assert group["bidding"]["max_bid"] == 0.004
+        assert preview["changes"]["changes"]["bid"]["from"] == "fixed 0.004 per impression"
