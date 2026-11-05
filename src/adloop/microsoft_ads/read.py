@@ -18,6 +18,7 @@ from datetime import date, datetime, timedelta, timezone
 from typing import TYPE_CHECKING, Any
 
 from adloop.microsoft_ads import client as _client
+from adloop.microsoft_ads.auth import MicrosoftAdsApiError
 from adloop.microsoft_ads.client import campaign_request, customer_request, report_time
 
 if TYPE_CHECKING:
@@ -25,7 +26,11 @@ if TYPE_CHECKING:
 
 CAMPAIGN_TYPES = "Search, Shopping, DynamicSearchAds, Audience, PerformanceMax"
 AD_TYPES = ["ResponsiveSearch", "ExpandedText", "DynamicSearch", "ResponsiveAd"]
-CONVERSION_GOAL_TYPES = "Url, Duration, PagesViewedPerVisit, Event, AppInstall, OfflineConversion, InStoreTransaction"
+_GOAL_TYPES_WITHOUT_IN_STORE = "Url, Duration, PagesViewedPerVisit, Event, AppInstall, OfflineConversion"
+CONVERSION_GOAL_TYPES = _GOAL_TYPES_WITHOUT_IN_STORE + ", InStoreTransaction"
+# Asking for InStoreTransaction goals fails the whole query for accounts
+# outside Microsoft's in-store pilot, which is almost all of them.
+_IN_STORE_PILOT_CODES = {"InStoreTransactionPilotNotEnabledForCustomer", "5359"}
 
 # Microsoft time zone names → IANA, for "today" in the account's zone. Reports
 # take Microsoft's own name (ReportTimeZone) directly. From Microsoft's time
@@ -407,6 +412,23 @@ def _ads(config: AdLoopConfig, account: str, customer: str, ad_group_id: str) ->
         account_id=account, customer_id=customer,
     )
     return [a for a in payload.get("Ads") or [] if isinstance(a, dict)]
+
+
+def _conversion_goals(config: AdLoopConfig, account: str, customer: str) -> list[dict]:
+    """Every conversion goal; in-store ones only where the account is in Microsoft's pilot."""
+    def query(types: str) -> dict:
+        return campaign_request(
+            config, "ConversionGoals/QueryByIds", {"ConversionGoalIds": None, "ConversionGoalTypes": types},
+            account_id=account, customer_id=customer,
+        )
+
+    try:
+        payload = query(CONVERSION_GOAL_TYPES)
+    except MicrosoftAdsApiError as exc:
+        if not set(exc.codes) & _IN_STORE_PILOT_CODES:
+            raise
+        payload = query(_GOAL_TYPES_WITHOUT_IN_STORE)
+    return [g for g in payload.get("ConversionGoals") or [] if isinstance(g, dict)]
 
 
 def _bidding(scheme: dict | None) -> dict:
@@ -993,12 +1015,7 @@ def get_microsoft_conversion_setup(
 
     tags = campaign_request(config, "UetTags/QueryByIds", {"TagIds": None},
                             account_id=account, customer_id=customer).get("UetTags") or []
-    goals = campaign_request(
-        config, "ConversionGoals/QueryByIds",
-        {"ConversionGoalIds": None, "ConversionGoalTypes": CONVERSION_GOAL_TYPES},
-        account_id=account, customer_id=customer,
-    ).get("ConversionGoals") or []
-    goals = [g for g in goals if isinstance(g, dict)]
+    goals = _conversion_goals(config, account, customer)
     campaigns = _campaigns(config, account, customer, with_goals=True)
 
     # 1. UET tag: required only by goals the tag reports (URL, duration,

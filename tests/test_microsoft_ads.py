@@ -1142,3 +1142,64 @@ class TestUpstreamAuditFindings:
         self._at(monkeypatch, "2026-11-03T20:30:00")  # Karachi (UTC+5) is already Nov 4
         start, end = read.report_window("", "", "IslamabadKarachiTashkent")
         assert end.isoformat() == "2026-11-03"
+
+
+_SITE_AND_OFFLINE_GOALS = {"ConversionGoals": [
+    {"Id": "31", "Name": "Quote form", "Type": "Event", "Status": "Active", "TagId": "400500600",
+     "TrackingStatus": "RecordingConversions", "ExcludeFromBidding": False},
+    {"Id": "32", "Name": "Booked jobs", "Type": "OfflineConversion", "Status": "Active",
+     "TrackingStatus": "RecordingConversions", "ExcludeFromBidding": False},
+]}
+
+
+class TestInStoreGoalPilot:
+    """Asking for InStoreTransaction goals fails for accounts outside Microsoft's in-store pilot."""
+
+    def _without_pilot(self, body):
+        if "InStoreTransaction" in body["ConversionGoalTypes"]:
+            raise MicrosoftAdsApiError(
+                "Microsoft Advertising API returned 400 for ConversionGoals/QueryByIds",
+                status=400, codes=["InStoreTransactionPilotNotEnabledForCustomer", "5359"],
+            )
+        return _SITE_AND_OFFLINE_GOALS
+
+    def test_setup_works_without_the_pilot(self):
+        calls, _, ctx = _fake_api({("campaign", "ConversionGoals/QueryByIds"): self._without_pilot})
+        with ctx:
+            result = read.get_microsoft_conversion_setup(_config())
+        by_check = {c["check"]: c for c in result["checks"]}
+        assert by_check["goal 'Quote form'"]["status"] == "pass"
+        assert by_check["goal 'Booked jobs'"]["status"] == "pass"
+        asked = [c[2]["ConversionGoalTypes"] for c in calls if c[1] == "ConversionGoals/QueryByIds"]
+        assert asked == [read.CONVERSION_GOAL_TYPES,
+                         "Url, Duration, PagesViewedPerVisit, Event, AppInstall, OfflineConversion"]
+
+    def test_pilot_accounts_keep_in_store_goals(self):
+        in_store = {"ConversionGoals": [
+            {"Id": "33", "Name": "Store visits", "Type": "InStoreTransaction", "Status": "Active",
+             "TrackingStatus": "RecordingConversions", "ExcludeFromBidding": False},
+        ]}
+        calls, _, ctx = _fake_api({("campaign", "ConversionGoals/QueryByIds"): in_store})
+        with ctx:
+            result = read.get_microsoft_conversion_setup(_config())
+        assert any(c["check"] == "goal 'Store visits'" for c in result["checks"])
+        asked = [c[2]["ConversionGoalTypes"] for c in calls if c[1] == "ConversionGoals/QueryByIds"]
+        assert asked == [read.CONVERSION_GOAL_TYPES] and "InStoreTransaction" in asked[0]
+
+    def test_other_goal_errors_are_not_retried(self):
+        refused = MicrosoftAdsApiError("Microsoft Advertising API returned 400", status=400,
+                                       codes=["CampaignServiceInvalidAccountId", "1100"])
+        calls, _, ctx = _fake_api({("campaign", "ConversionGoals/QueryByIds"): refused})
+        with ctx, pytest.raises(MicrosoftAdsApiError):
+            read.get_microsoft_conversion_setup(_config())
+        assert len([c for c in calls if c[1] == "ConversionGoals/QueryByIds"]) == 1
+
+    def test_pilot_fault_from_the_api_is_matched_by_code(self, creds):
+        fault = {"Type": "ApiFaultDetail", "TrackingId": "trk-9", "BatchErrors": [],
+                 "OperationErrors": [{"Code": 5359, "ErrorCode": "InStoreTransactionPilotNotEnabledForCustomer",
+                                      "Message": "In-Store Transaction pilot not enabled for current customer."}]}
+        with patch("requests.request", side_effect=[_Resp(400, fault), _Resp(200, _SITE_AND_OFFLINE_GOALS)]) as req:
+            goals = read._conversion_goals(_config(), ACCOUNT, CUSTOMER)
+        assert [g["Name"] for g in goals] == ["Quote form", "Booked jobs"]
+        sent = [c.kwargs["json"]["ConversionGoalTypes"] for c in req.call_args_list]
+        assert "InStoreTransaction" in sent[0] and "InStoreTransaction" not in sent[1]
