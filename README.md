@@ -244,6 +244,26 @@ A second ad platform, same safety model. Reddit is a separate connection: its ow
 
 > **Setup for Reddit Ads tools** — In Reddit Ads Manager open **Business Manager → Developer Application → Create app** (business admins only; no approval wait). Register the redirect URL exactly as `http://localhost:8765/callback`, then run `adloop init` and complete the Reddit Ads step: it opens Reddit's consent page (scopes `adsread` + `adsedit`, permanent grant), stores the refresh token at `~/.adloop/reddit_token.json`, and lets you pick the default ad account. Reddit rate-limits per user (reporting: 60 requests/min) and requires a descriptive User-Agent, which AdLoop builds from your app id and Reddit username. Reddit has no validate-only mode, so `confirm_and_apply(dry_run=true)` re-reads the target and re-checks the safety caps instead.
 
+### ChatGPT Ads Tools
+
+ChatGPT Ads (OpenAI Ads Manager) through the OpenAI Advertiser API, with the same safety model. The connection is an Advertiser API key: no OAuth, no developer token. Each key belongs to one ad account, so a tool's `ad_account_id` only picks which configured key to use.
+
+| Tool | What It Does |
+|------|-------------|
+| `get_chatgpt_ads_account` | Account name, currency, time zone, brand and integrity reviews, spending limits, and account-level blockers (payment, identity verification) |
+| `get_chatgpt_campaigns` / `get_chatgpt_ad_groups` / `get_chatgpt_ads` | Structure with status and serving state (OpenAI's `serving_issues`), budgets, bids and what they mean per bidding type, context hints, targeting, ad copy, review status, and the UTM parameters a click carries |
+| `get_chatgpt_performance` | Spend, impressions, clicks, CTR, CPC, CPM, conversions, CPA, ROAS per account/campaign/ad group/ad, optional breakdown (date, country, device, platform), compact mode with insights |
+| `get_chatgpt_conversions` | Goal conversions split into click-through and view-through, plus every attributed event, including events that are not a campaign goal |
+| `get_chatgpt_conversion_setup` | Audit of the conversion chain (pixel, events, attached goals, recent fires) with a verdict and pass/warn/fail checks |
+| `get_chatgpt_change_history` | Who changed what and when, with before/after values |
+| `chatgpt_attribution_check` | ChatGPT Ads clicks and conversions against GA4 sessions and key events, separating paid clicks from unpaid ChatGPT referrals |
+| `search_chatgpt_locations` | Location ids by name for targeting |
+| `pause_chatgpt_entity` / `enable_chatgpt_entity` / `archive_chatgpt_entity` | Status changes through the preview gate (archive is permanent and double-confirmed; OpenAI has no delete) |
+| `update_chatgpt_campaign` / `update_chatgpt_ad_group` / `update_chatgpt_ad` | Budget (daily or lifetime), dates, locations, platforms, tracking, conversion events, bid strategy and max bid, context hints, ad copy, landing page and image, with old → new previews, the budget cap and the bid-increase cap |
+| `draft_chatgpt_campaign` / `draft_chatgpt_ad_group` / `draft_chatgpt_ad` | Create campaign → ad group → chat-card ad. Everything is created **paused**, each with an idempotency key, so a retried apply cannot create a duplicate. |
+
+> **Setup for ChatGPT Ads tools** — In OpenAI Ads Manager open **Settings → API keys** ([ads.openai.com/settings](https://ads.openai.com/settings)) and create an Advertiser API key (a platform.openai.com key does not work). Put it in `chatgpt_ads.api_key` in `~/.adloop/config.yaml`, or set `OPENAI_ADS_API_KEY`; agencies add further accounts under `chatgpt_ads.accounts`. OpenAI has no validate-only mode for single resources, so `confirm_and_apply(dry_run=true)` re-reads the target, refuses when a field the plan changes was edited since the preview, and re-checks the budget cap, the bid-increase cap, the landing page and that the key still belongs to the previewed account.
+
 ### Image Uploads
 
 An image on your computer, or one you attached in the chat, has no public URL, and an AI app cannot hand the file to a tool. `upload_images` gives it a way in.
@@ -540,6 +560,9 @@ All configuration lives in `~/.adloop/config.yaml`. See [`config.yaml.example`](
 | `reddit` | `ad_account_id` | *(empty)* | Default Reddit ad account for every Reddit tool (picked by `adloop init`) |
 | `reddit` | `username` | *(empty)* | Your Reddit username, used only in the User-Agent Reddit requires |
 | `reddit` | `token_path` | `~/.adloop/reddit_token.json` | Where the Reddit refresh token is stored |
+| `chatgpt_ads` | `api_key` | *(empty)* | Advertiser API key from OpenAI Ads Manager → Settings → API keys; empty reads `OPENAI_ADS_API_KEY` |
+| `chatgpt_ads` | `ad_account_id` | *(empty)* | Optional: the default key's ad account id; a call for another account id is then refused instead of reading this one |
+| `chatgpt_ads` | `accounts` | `{}` | Further ad accounts, one key per `adacct_...` id; a tool's `ad_account_id` picks the key |
 | `safety` | `max_daily_budget` | `50.00` | Maximum allowed daily budget per campaign |
 | `safety` | `require_dry_run` | `true` | Force all writes to dry-run mode |
 | `safety` | `two_phase_apply` | `false` | Refuse real applies until the plan had a dry-run pass |
@@ -563,6 +586,7 @@ Most MCP clients (claude.ai, ChatGPT, Cursor, …) load **every tool schema into
 | `web` | PageSpeed / Core Web Vitals |
 | `merchant` | Merchant Center feed health |
 | `reddit` | Reddit Ads reads, writes, and planning |
+| `chatgpt_ads` | ChatGPT Ads reads, campaign management and conversion diagnostics |
 
 Google Ads can be narrowed further. Use one of these instead of `ads`:
 
@@ -606,6 +630,10 @@ src/adloop/
 │   ├── client.py      # Reddit Ads API v3 REST client — bearer refresh, per-user rate limits, pagination
 │   ├── read.py        # Accounts, campaigns, ad groups, ads, performance reports, pixels, targeting lookups
 │   └── write.py       # Draft/preflight/apply for status, budget, bid, targeting, and PAUSED creation
+├── chatgpt_ads/
+│   ├── client.py      # OpenAI Advertiser API REST client — per-account keys, pagination, rate limits
+│   ├── read.py        # Account, campaigns, ad groups, ads, performance, conversions, setup audit, GA4 cross-check
+│   └── write.py       # Draft/preflight/apply for status, campaign, ad group and ad changes, paused creation
 └── safety/
     ├── guards.py      # Budget caps, bid limits, blocked operations, Broad Match safety
     ├── preview.py     # Change plans and previews

@@ -1,5 +1,5 @@
 ---
-description: AdLoop MCP orchestration — Google Ads + Reddit Ads + GA4 + codebase intelligence
+description: AdLoop MCP orchestration — Google Ads + Reddit Ads + ChatGPT Ads + GA4 + codebase intelligence
 globs:
 alwaysApply: true
 ---
@@ -14,7 +14,7 @@ You have access to AdLoop MCP tools that connect Google Ads, Reddit Ads and Goog
 
 | Tool | When to Use | Key Parameters |
 |------|-------------|----------------|
-| `health_check` | First thing to run when tools are failing — tests OAuth token, GA4, Ads, and (when configured) Reddit Ads connectivity | (none) |
+| `health_check` | First thing to run when tools are failing — tests OAuth token, GA4, Ads, and (when configured) Reddit Ads and ChatGPT Ads connectivity | (none) |
 
 **A tool you expect is missing?** Apps such as claude.ai, ChatGPT and Perplexity cache AdLoop's tool list from when the connection was made. `health_check` returns `adloop_version` and `tools_offered`, the tools this server offers to you. If the user asks for something a tool in `tools_offered` does and that tool isn't in your own tool list, don't improvise with other tools: tell the user their app shows an older list and to refresh the AdLoop connection (claude.ai: Settings → Connectors → AdLoop; ChatGPT: the AdLoop plugin's settings; Perplexity: remove and add the connector again; coding agents: reconnect the MCP server or start a new session).
 
@@ -222,6 +222,64 @@ Reddit is a second ad platform with its own connection (own OAuth app, no develo
 4. Cross-check `get_reddit_ads` for `REJECTED` ads (`rejection_reason`) and `PENDING_APPROVAL` — they explain missing spend
 5. Present spend, clicks, CTR, CPC, conversions, CPA in account currency; compare against Google Ads only on CPA/ROAS, never on CTR (feed placements behave differently from search)
 
+### ChatGPT Ads Tools
+
+ChatGPT Ads (OpenAI Ads Manager, ads.openai.com) through the OpenAI Advertiser API. Toolset `chatgpt_ads`; needs `chatgpt_ads.api_key` in the config (or `OPENAI_ADS_API_KEY`), an Advertiser key from Ads Manager → Settings → API keys. Each key belongs to one ad account; `ad_account_id` only picks which configured key to use (`chatgpt_ads.accounts` for more accounts). The hierarchy is ad account → campaign (objective, budget, location/platform targeting, conversion events) → ad group (bid, context hints) → ad (chat card: title, body, image, destination). There are no keywords: context hints steer which conversations an ad group fits.
+
+| Tool | When to Use | Key Parameters |
+|------|-------------|----------------|
+| `get_chatgpt_ads_account` | Account name, currency, time zone, brand and integrity reviews, spending limits, account-level blockers (payment, identity verification). First stop when nothing serves | `ad_account_id` |
+| `get_chatgpt_campaigns` | Campaign inventory: status, `serving_state` + `serving_issues`, bidding type (impressions / clicks / conversions = oCPC), budget, targeting, attached conversion events, tracking template | `include_archived` |
+| `get_chatgpt_ad_groups` | Bids with their meaning (per click, per impression, or oCPC target CPA), context hints, serving state, campaign status | `campaign_id` (optional) |
+| `get_chatgpt_ads` | Copy, destination, `review_status` + `review_reason`, serving state, parent statuses, `click_parameters` (the utm_* a click carries after templates) | `campaign_id`, `ad_group_id` (optional) |
+| `get_chatgpt_performance` | Spend, impressions, clicks, CTR, CPC, CPM, conversions, CPA, ROAS per level, with statuses at every level and `insights[]` | `level` (account/campaign/ad_group/ad), date range, `breakdown` (date/country/device/platform), `compact`, `click_window_days` (7/14/30), `view_window_days` (0/1) |
+| `get_chatgpt_conversions` | Goal conversions split click-through / view-through, purchase value, and `events[]`: every attributed event (goal or not) | `level`, date range, `breakdown` (date/country/device), `include_events`, `event_names`, windows, `time_basis` |
+| `get_chatgpt_conversion_setup` | Audit of the whole conversion chain with a `verdict` and `checks[]` (fail/warn/info/pass) | date range, `check_recent_events`, `min_clicks` |
+| `get_chatgpt_change_history` | Who changed what (audit log), before/after values, counts by type/actor/day | date range, `campaign_id` / `ad_group_id` / `ad_id` |
+| `chatgpt_attribution_check` | ChatGPT Ads clicks + conversions vs GA4 sessions + key events, split into paid (a utm_source with a paid utm_medium on the ads), unpaid ChatGPT referrals, and ambiguous sessions that could be either | `property_id`, date range |
+
+- **Status has two layers.** `status` is what was set (active/paused/archived); `serving_state` comes from OpenAI's `serving_issues` (payment missing, brand review, campaign paused, ad in review, landing page crawl failed, budget spent). Report the serving state and its cause, never "active" alone. The issues already reflect parents: an ad under a paused campaign carries `campaign_not_active`.
+- **A campaign counts only the conversion events attached to it.** Pixel events that are not attached show up in `get_chatgpt_conversions` `events[]` but never in `conversions`. Zero conversions on a campaign without an attached event is guaranteed, not measured; the tools say so.
+- **Conversions include view-through by default** (30-day click + 1-day view, by ad-event date). Before judging CPA, compare with `view_window_days=0`. OpenAI's numbers will exceed GA4's last-click key events; that is attribution, not a bug.
+- **Windows are whole days in the account's time zone and end yesterday.** Conversion data needs whole days and settles over about a day; a window reaching today is moved back with a note.
+- **Money**: spend, CPC, CPM, CPA are currency units; budgets and bids are converted from micros already.
+- **Rate limits** (600/min per endpoint, 1,200/min overall): a `CHATGPT_ADS_RATE_LIMITED` error carries `retry_after`; wait, never loop.
+- **Writes** (same draft → preview → `confirm_and_apply` gate, platform `chatgpt`). OpenAI has no validate-only mode for single resources: the dry run re-reads the target and refuses when a field the plan changes was edited since the preview, and re-checks the budget cap, the bid-increase cap and the landing page. The real apply runs the same checks again first. New campaigns, ad groups and ads are created **paused**, each with an idempotency key, so a retried apply cannot create a duplicate.
+
+| Tool | What It Does | Key Parameters |
+|------|-------------|----------------|
+| `search_chatgpt_locations` | Location ids by name for targeting | `query` |
+| `pause_chatgpt_entity` / `enable_chatgpt_entity` | Pause or activate a campaign, ad group or ad; enabling warns about paused parents and ads in review | `entity_type`, `entity_id` |
+| `archive_chatgpt_entity` | Archive (permanent, double confirmation; OpenAI has no delete) | `entity_type`, `entity_id` |
+| `update_chatgpt_campaign` | Name, daily or lifetime budget, dates, locations / excluded / countries, platforms, tracking template, attached conversion events | `campaign_id` + fields; `clear_fields` |
+| `update_chatgpt_ad_group` | Name, strategy (fixed_bid / maximize_clicks / maximize_conversions), max bid, context hints (replace, or add/remove) | `ad_group_id` + fields |
+| `update_chatgpt_ad` | Name, title (3–50), body (≤100), landing page, image; copy edits go back to review | `ad_id` + fields |
+| `draft_chatgpt_campaign` | New campaign, paused; needs a budget and locations | `name`, `bidding_type`, `daily_budget` or `lifetime_budget` + `end_date`, `location_ids` or `countries` |
+| `draft_chatgpt_ad_group` | New ad group, paused | `campaign_id`, `name`, `context_hints`, `strategy`, `max_bid` |
+| `draft_chatgpt_ad` | New chat-card ad, paused; image uploaded at apply | `ad_group_id`, `title`, `body`, `target_url`, `image_url` / `image_path` / `file_id` |
+
+- **Budgets:** daily budgets (and a lifetime budget's daily equivalent over its dates) are capped by `max_daily_budget`; raising one by more than half needs a double confirmation. OpenAI allows lifetime → daily but not daily → lifetime, and `bidding_type` never changes after creation.
+- **Bids** follow the campaign's bidding type: impressions take a fixed bid per impression, clicks a fixed CPC or maximize_clicks, conversions a target CPA (fixed) or maximize_conversions. Automatic strategies need a daily campaign budget and drop audience bid multipliers. Fixed-bid raises are capped by `max_bid_increase_pct`.
+- **Targeting** is replaced as a whole: pass the full location list. Custom audiences are kept. Never leave a campaign without locations.
+- **Tracking:** keep `utm_source=chatgpt&utm_medium=cpc` (the default for new campaigns) so `chatgpt_attribution_check` can separate ad clicks from unpaid ChatGPT referrals.
+
+### When user wants to change or build ChatGPT Ads campaigns
+
+1. Read first: `get_chatgpt_campaigns`, `get_chatgpt_ad_groups`, `get_chatgpt_ads` for ids, statuses and current values; `get_chatgpt_performance` before budget or bid moves
+2. One change per draft; show the preview (from → to, warnings); `confirm_and_apply(dry_run=true)`, then the real apply after the user's go-ahead
+3. New campaign: `search_chatgpt_locations` → `draft_chatgpt_campaign` → `draft_chatgpt_ad_group` → `draft_chatgpt_ad` (verify the landing page exists) → `enable_chatgpt_entity` for the ad, ad group and campaign once all exist
+4. A conversions campaign needs an active standard conversion event; check `get_chatgpt_conversion_setup` before relying on it
+
+### When user asks about ChatGPT Ads, or whether ChatGPT Ads conversions work
+
+1. `get_chatgpt_performance` (level `campaign`, `compact=true`) for the overview; drill into `ad_group` / `ad`
+2. If conversions are zero or look wrong, run `get_chatgpt_conversion_setup` BEFORE judging the channel: a missing link (no attached event, goal event never fires, pixel not on the landing page) explains most "ChatGPT doesn't convert" cases. Present its `verdict` and every `fail`/`warn` check
+3. `get_chatgpt_conversions` shows which events clicks actually produce: page views without leads means the lead event does not fire or is not attributed
+4. `chatgpt_attribution_check` closes the loop with GA4: key events from paid ChatGPT sessions while ChatGPT Ads reports 0 conversions point at the OpenAI setup when the GA4 key event is the same action as the campaign's goal event (a form lead); a call click in GA4 is not something OpenAI sees. Paid needs distinctive tagging (`utm_medium=cpc` or similar): with untagged or medium-less ads the sessions land in `ga4_ambiguous_chatgpt`, so tag the ads before drawing conclusions. Unpaid ChatGPT referral traffic exists without ads
+5. Check `get_chatgpt_ads` for rejected ads, ads in review, and ads without `utm_source` (GA4 then mixes them with unpaid ChatGPT traffic)
+6. If performance moved suddenly, `get_chatgpt_change_history` for the days before
+7. Phone calls reach OpenAI only when call tracking sends them through the Conversions API (`action_source: phone_call`); the browser pixel never sees them. For call-driven businesses without that, compare against call-tracking or CRM data before concluding
+
 ### When user asks about organic traffic, SEO, or paid/organic overlap
 
 1. Call `list_gsc_sites` if no site is configured; confirm the property with the user
@@ -384,6 +442,7 @@ Same draft → preview → `confirm_and_apply` gate; the plan carries `platform:
 - `require_dry_run: true` in config overrides `dry_run=false` — the user must change the config to allow real mutations.
 - `two_phase_apply: true` in config (always on for AdLoop Cloud) refuses `dry_run=false` with status `DRY_RUN_REQUIRED` until that plan_id has completed one `dry_run=true` pass. Run the dry run, show the user, then apply — do not retry `dry_run=false` in a loop.
 - All operations (including dry runs) are logged to `~/.adloop/audit.log`.
+- `blocked_operations` is checked again by `confirm_and_apply`: a plan whose operation was blocked after it was drafted is refused with status `BLOCKED`, dry run and apply alike.
 
 ## Safety Rules (CRITICAL — always follow)
 
