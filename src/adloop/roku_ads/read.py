@@ -481,7 +481,12 @@ def get_roku_campaigns(config: AdLoopConfig, *, account_uid: str = "", include_a
         if c["is_enabled"] is False and c["status"] in _IN_PLAY:
             insights.append(f"Campaign '{name}' is switched off (is_enabled false) while its status reads {c['status']}.")
         for g in c["ad_groups"]:
-            live = g["serving"]
+            # Setup warnings matter before an ad group starts too: check every
+            # one that serves or is about to (scheduled, waiting for or
+            # reviewing a creative), not only those serving now.
+            live = (not c["is_archived"] and c["is_enabled"] is not False
+                    and c["status"] in _IN_PLAY and g["status"] in _IN_PLAY)
+            serves = "serves" if g["serving"] else "will serve"
             if g["status"] == "creative_needed":
                 insights.append(f"Campaign '{name}': its ad group has no approved creative, so it cannot serve.")
             elif g["status"] == "reviewing_creative":
@@ -494,7 +499,7 @@ def get_roku_campaigns(config: AdLoopConfig, *, account_uid: str = "", include_a
             if end and end < now:
                 insights.append(f"Campaign '{name}': the ad group's end date {g['end_at']} has passed.")
             if not g["locations_included"]:
-                insights.append(f"Campaign '{name}' targets no location, so it serves wherever Roku sells.")
+                insights.append(f"Campaign '{name}' targets no location, so it {serves} wherever Roku sells.")
             goal = g["optimization_goal"]
             if goal in GOAL_ACTIONS and not g["event_group_uid"]:
                 insights.append(
@@ -629,15 +634,23 @@ def _series(
         if name not in keyed:
             arrays.setdefault(name, None)
     days = (end - start).days + 1
+    # The row's own dates, as sent (before any set or position map hides a
+    # duplicate), and every date a keyed field names, must be real days in
+    # the window, totals included.
+    if row_dates is not None:
+        _check_days(row_dates, start, end)
+    for d in keyed.values():
+        _check_days(list(d), start, end)
     if granularity == "total":
-        lengths = {len(a) for a in arrays.values() if a is not None} | {len(d) for d in keyed.values()}
+        lengths = {len(a) for a in arrays.values() if a is not None} | {len(d) for d in keyed.values() if d}
         if lengths and not (lengths <= {1} or lengths == {days}):
             raise MetricsLayoutError(
                 f"Roku returned value arrays of lengths {sorted(lengths)} for a total over {days} day(s); "
                 "the layout is ambiguous. include_raw=true shows the response."
             )
         totals = {n: None if a is None else _known_sum(a) for n, a in arrays.items()}
-        totals.update({n: _known_sum(list(d.values())) for n, d in keyed.items()})
+        # An empty date map measured nothing: unknown, not zero.
+        totals.update({n: _known_sum(list(d.values())) if d else None for n, d in keyed.items()})
         return [(uid, None, totals)]
 
     present = {n: a for n, a in arrays.items() if a is not None}
@@ -645,6 +658,11 @@ def _series(
     if len(lengths) > 1:
         raise MetricsLayoutError(f"Roku's daily arrays disagree in length ({sorted(lengths)}); include_raw=true shows them.")
     if keyed:
+        if any(not d for d in keyed.values()):
+            raise MetricsLayoutError(
+                "Roku returned an empty date map for a metric, so it is unknown which days it covers; "
+                "include_raw=true shows the response."
+            )
         key_sets = {frozenset(d) for d in keyed.values()}
         if len(key_sets) > 1:
             raise MetricsLayoutError("Roku's date-keyed metrics name different days per field; include_raw=true shows them.")

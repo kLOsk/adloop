@@ -1310,7 +1310,7 @@ class TestUpstreamAuditFindings:
         ({"date": ["2026-10-01", "2026-10-01"]}, {"impressions": [10, 20]}, "same date twice"),
         ({"date": ["1793606400", "1793692800"]}, {"impressions": [10, 20]}, "not an ISO date"),
         ({}, {"impressions": {"2026-10-01": 1}, "billed_local_micro_spend": {"2026-10-02": 5}}, "different days"),
-        ({"date": ["2026-10-01", "2026-10-02"]}, {"impressions": {"2026-10-01": 1, "2026-10-03": 2}}, "contradict"),
+        ({"date": ["2026-10-01"]}, {"impressions": {"2026-10-01": 1, "2026-10-02": 2}}, "contradict"),
     ])
     def test_contradictory_dates_are_refused(self, dims, fields, message):
         rows = [{"dimensions": {"campaign_uid": "Pcmp1", **dims}, "fields": fields}]
@@ -1367,3 +1367,42 @@ class TestUpstreamAuditFindings:
     def test_report_totals_count_real_zeros(self):
         rows = [{"impressions": "100", "spend": "5.00"}, {"impressions": "0", "spend": "0"}]
         assert read.summarize_report(rows)["totals"] == {"impressions": 100, "spend": 5.0}
+
+    # -- delta audit finding 3: no branch loses or misplaces a value silently
+    def test_duplicate_row_dates_with_date_keyed_fields_are_refused(self):
+        rows = [{"dimensions": {"campaign_uid": "Pcmp1", "date": ["2026-10-01", "2026-10-01"]},
+                 "fields": {"impressions": {"2026-10-01": 10}, "billed_local_micro_spend": [1_000_000, 9_000_000]}}]
+        with pytest.raises(read.MetricsLayoutError, match="same date twice"):
+            self._daily(rows)
+
+    def test_a_total_row_dated_outside_the_window_is_refused(self):
+        rows = [{"dimensions": {"campaign_uid": "Pcmp1", "date": ["2026-09-01", "2026-09-02"]},
+                 "fields": {"impressions": [40, 60]}}]
+        _, ctx = _fake_api({("GET", "metrics"): _metrics_reply(rows)})
+        with ctx, pytest.raises(read.MetricsLayoutError, match="outside the requested"):
+            read.get_roku_performance(_config(), campaign_uid="Pcmp1", date_range_start="2026-10-01",
+                                      date_range_end="2026-10-02")
+
+    def test_an_empty_date_map_is_not_zero_delivery(self):
+        rows = [{"dimensions": {"campaign_uid": "Pcmp1"}, "fields": {"impressions": {}}}]
+        with pytest.raises(read.MetricsLayoutError, match="empty date map"):
+            self._daily(rows)
+        _, ctx = _fake_api({("GET", "metrics"): _metrics_reply(rows)})
+        with ctx:
+            total = read.get_roku_performance(_config(), campaign_uid="Pcmp1", date_range_start="2026-10-01",
+                                              date_range_end="2026-10-02")
+        assert total["rows"][0]["impressions"] is None
+        assert not any("No delivery" in i for i in total["insights"])
+
+    # -- delta audit finding 5: a scheduled ad group still gets its setup warnings
+    def test_scheduled_ad_group_keeps_its_readiness_warnings(self):
+        group = dict(_LIVE_GROUP, status="scheduled", location_targeting={}, frequency_caps=[],
+                     frequency_cap=None, optimization_goal="Leads", event_group_uid=None)
+        campaigns = [{"type": "campaign", "uid": "Pcmp1", "attributes": dict(_CAMPAIGNS[0]["attributes"], ad_groups=[group])}]
+        _, ctx = _fake_api({("GET", "campaigns"): lambda p, b: _list_page(campaigns, p)})
+        with ctx:
+            result = read.get_roku_campaigns(_config())
+        assert result["campaigns"][0]["ad_groups"][0]["serving"] is False
+        joined = " ".join(result["insights"])
+        assert "targets no location, so it will serve wherever Roku sells" in joined
+        assert "without an event group" in joined
