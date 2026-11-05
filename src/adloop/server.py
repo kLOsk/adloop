@@ -7979,9 +7979,11 @@ def get_microsoft_ad_extensions(ad_account_id: str = "", campaign_id: str = "") 
 
     Each row has the level (account, campaign or ad_group), type, content,
     final URLs, editorial status and the remove_id that unlinks it. Image
-    rows add media_ids, alt_text, display_text and layouts when Microsoft
-    returns them. Insights flag campaigns without sitelinks, disapproved
-    extensions and accounts without image extensions.
+    rows add alt_text, display_text, layouts, media_ids and images: each
+    image's media type, size and a url that opens the picture, so a photo
+    can be checked before its link is removed. Insights flag campaigns
+    without sitelinks, disapproved extensions and accounts without image
+    extensions.
 
     Args:
         ad_account_id: Microsoft ad account id. Empty uses the config default.
