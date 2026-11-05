@@ -145,9 +145,9 @@ async def test_stable_keys_still_seal_the_round_trip(fake_apply):
 def test_the_message_names_the_change_and_truncates_long_values():
     plan = ChangePlan(
         operation="reddit_update_ad_group", entity_type="ad_group", entity_id="9",
-        changes={"name": "x" * 400, **{f"field_{i}": i for i in range(12)}},
+        changes={"name": "x" * 400, **{f"field_{i}": i for i in range(16)}},
     )
-    message = confirmation_message(plan)
+    message = confirmation_message(plan)  # 17 fields, 14 shown
     assert message.startswith("AdLoop: apply this change in Reddit Ads?")
     assert "Update ad group (ad group 9)" in message
     assert "x" * 157 + "..." in message
