@@ -107,6 +107,16 @@ class FakeMicrosoft:
     def _pub(obj: dict) -> dict:
         return {k: copy.deepcopy(v) for k, v in obj.items() if not k.startswith("_")}
 
+    def _listed_extension(self, ext_id: str) -> dict:
+        """An extension as the association query returns it: image extensions come
+        without ImageMediaIds, Images, DisplayText and Layouts (checked live)."""
+        ext = copy.deepcopy(self.extensions[ext_id])
+        if ext.get("Type") == "ImageAdExtension":
+            for field in ("Images", "DisplayText", "Layouts"):
+                ext.pop(field, None)
+            ext["ImageMediaIds"] = None
+        return ext
+
     def __call__(self, config, service, path, body=None, *, method="POST", account_id="", customer_id="", mutation=False):
         body = copy.deepcopy(body or {})
         self.calls.append({"service": service, "path": path, "method": method, "body": body})
@@ -165,9 +175,36 @@ class FakeMicrosoft:
                 links = [l for l in self.ext_links if l[1] == str(entity) and l[2] == body["AssociationType"]
                          and self.extensions[l[0]]["Type"] in wanted]
                 collections.append({"AdExtensionAssociations": [
-                    {"AdExtension": copy.deepcopy(self.extensions[e]), "AssociationType": a, "EntityId": int(o),
+                    {"AdExtension": self._listed_extension(e), "AssociationType": a, "EntityId": int(o),
                      "EditorialStatus": "Active"} for e, o, a in links]} if links else None)
             return {"AdExtensionAssociationCollection": collections}
+        if path == "AdExtensions/QueryByIds":
+            # Like Microsoft: Images, DisplayText and Layouts only when asked for,
+            # and an unknown additional field fails the whole request.
+            extra = {x.strip() for x in (body.get("ReturnAdditionalFields") or "").split(",") if x.strip()}
+            if extra - {"Images", "DisplayText", "Layouts", "LogoImages"}:
+                raise MicrosoftAdsApiError("NullRequest: The request message is null.", status=400)
+            out = []
+            for i in body["AdExtensionIds"]:
+                ext = self.extensions.get(str(i))
+                if ext is None:
+                    out.append(None)
+                    continue
+                shown = self._listed_extension(str(i))
+                if "Images" in extra and ext["Type"] == "ImageAdExtension":
+                    shown["Images"] = [{"Asset": {"Type": "ImageAsset", "Id": str(m), "SubType": "LandscapeImageMedia"}}
+                                       for m in ext.get("ImageMediaIds") or []]
+                for field in ("DisplayText", "Layouts"):
+                    if field in extra and field in ext:
+                        shown[field] = ext[field]
+                out.append(shown)
+            return {"AdExtensions": out, "PartialErrors": []}
+        if path == "MediaMetaData/QueryByIds":
+            width, height = 1200, 628
+            return {"MediaMetaData": [
+                {"Id": str(m), "Type": "Image", "MediaType": "GenericImage", "Representations": [
+                    {"Type": "ImageMediaRepresentation", "Name": "Original", "Width": width, "Height": height,
+                     "Url": f"https://www.bing.com/th?id=OADD2.{m}"}]} for m in body["MediaIds"]]}
         if path == "GeoLocationsFileUrl/Query":
             return {"FileUrl": "https://geo.example/locations.csv.gz?sig=SECRET", "LastModifiedTimeUtc": "2026-10-01T00:00:00"}
         # -------- writes
@@ -1508,6 +1545,45 @@ class TestImageExtensions:
                          and c["body"]["AssociationType"] == "AdGroup"]
         assert len(group_queries) == 1 and sorted(group_queries[0]["body"]["EntityIds"]) == [11, 12, 21]
         assert "ImageAdExtension" in group_queries[0]["body"]["AdExtensionType"]
+
+    def test_read_shows_which_picture_each_image_extension_holds(self, api, config, tmp_path):
+        # The association query leaves the images out (as Microsoft does live), so
+        # the read asks for them by id and then looks up each picture.
+        preview = manage.draft_microsoft_image_extension(
+            config, campaign_id=CAMPAIGN, alt_text="Technician at a drain", display_text="Drain cleaning",
+            image_paths=[_file(tmp_path, f"d{i}.png", _png(1200, 628, pad=i)) for i in range(3)])
+        result = _apply(config, preview)
+        before = len(api.calls)
+        rows = {r["extension_id"]: r for r in manage.get_microsoft_ad_extensions(config, campaign_id=CAMPAIGN)["extensions"]
+                if r["type"] == "Image"}
+        assert sorted(rows) == sorted(result["extension_ids"])
+        for ext_id, media_id in zip(result["extension_ids"], result["media_ids"], strict=True):
+            row = rows[ext_id]
+            assert row["media_ids"] == [media_id]
+            assert row["display_text"] == "Drain cleaning" and row["layouts"] == ["SearchSingle", "SearchMultiple"]
+            assert row["images"] == [{"media_id": media_id, "media_type": "GenericImage", "width": 1200, "height": 628,
+                                      "url": f"https://www.bing.com/th?id=OADD2.{media_id}"}]
+        by_id = [c for c in api.calls[before:] if c["path"] == "AdExtensions/QueryByIds"]
+        assert len(by_id) == 1 and by_id[0]["body"]["ReturnAdditionalFields"] == "Images,DisplayText,Layouts"
+        assert sorted(map(str, by_id[0]["body"]["AdExtensionIds"])) == sorted(result["extension_ids"])
+        media = [c for c in api.calls[before:] if c["path"] == "MediaMetaData/QueryByIds"]
+        assert len(media) == 1 and sorted(map(str, media[0]["body"]["MediaIds"])) == sorted(result["media_ids"])
+
+    def test_read_keeps_the_rows_when_image_details_fail(self, api, config):
+        self._image_link(api, "7003", "11", "AdGroup")
+        api.fail[("POST", "MediaMetaData/QueryByIds")] = MicrosoftAdsApiError("Internal error", status=500)
+        result = manage.get_microsoft_ad_extensions(config)
+        row = next(r for r in result["extensions"] if r["extension_id"] == "7003")
+        assert row["remove_id"] == "7003~11~AdGroup" and "images" not in row
+        assert any("Image details could not be read" in i for i in result["insights"])
+
+    def test_large_images_get_no_size_warning(self, api, config, tmp_path):
+        # Microsoft's Image reference names a 75 KB cap that it does not enforce:
+        # 125-300 KB JPEGs uploaded on a live account. Only 5 MB is a limit.
+        big = _file(tmp_path, "big.png", _png(1200, 628, pad=300_000))
+        preview = manage.draft_microsoft_image_extension(config, campaign_id=CAMPAIGN, alt_text="Van", image_paths=[big])
+        assert "plan_id" in preview
+        assert not [w for w in preview["warnings"] if "KB" in w or "base64" in w]
 
     def test_unlinking_an_image_extension(self, api, config):
         self._image_link(api, "7003", "11", "AdGroup")

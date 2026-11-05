@@ -1608,11 +1608,11 @@ _IMAGE_RATIO_TOLERANCE = 0.01  # 1200x628 is 1.911, 703x368 is 1.910
 _IMAGE_MIN_SIZE = (703, 368)
 # "The maximum width and height in pixels are 2592 and 2048 independently" [IMG, RSA].
 _IMAGE_MAX_SIZE = (2592, 2048)
-# "The maximum file size is 5 MB" [RSA Remarks]. [IMG] also caps Image.Data at
-# 102,400 base64 characters (about 75 KB); the two pages disagree, so the
-# draft refuses above 5 MB and warns above the smaller figure.
+# "The maximum file size is 5 MB" [RSA Remarks]. [IMG] also names a cap of
+# 102,400 base64 characters (about 75 KB) for Image.Data, but Microsoft does
+# not enforce it on upload: JPEGs of 125-300 KB went through on a live
+# account. The draft enforces the 5 MB limit only.
 _IMAGE_MAX_BYTES = 5 * 1024 * 1024
-_IMAGE_BASE64_NOTE = 102_400
 # "You can add a maximum of 10 media in a single call" [ADD].
 _IMAGES_PER_DRAFT = 10
 _ALT_TEXT_MAX = 35        # AlternativeText, required [EXT]
@@ -1837,11 +1837,6 @@ def draft_microsoft_image_extension(
                         "next to sitelink, price, dynamic product or dynamic data extension cards.")
     if any(p["mime_type"] == "image/png" for p in images):
         warnings.append("Microsoft converts PNG images to JPEG; upload a JPEG if the quality matters.")
-    large = [_image_label(p) for p in images if p["base64_chars"] > _IMAGE_BASE64_NOTE]
-    if large:
-        warnings.append(f"{', '.join(large)} exceed(s) the 102,400 base64 characters (about 75 KB) that Microsoft's "
-                        "Image reference names, though its responsive-ad guidance allows 5 MB. If the upload is "
-                        "refused as too large, export a smaller JPEG and draft again.")
     if existing:
         warnings.append(f"{where} already has {len(existing)} image extension(s); Microsoft rotates them.")
     shown: dict[str, Any] = {"images": [_describe_ms_image(p) for p in images], "alt_text": alt}
@@ -1890,13 +1885,66 @@ def _extension_row(assoc: dict, association: str, label: str, campaign_name: str
     if association == "AdGroup":
         row["campaign"] = campaign_name
     if kind == "ImageAdExtension":
-        media = [str(i) for i in ext.get("ImageMediaIds") or [] if i is not None] or [
-            str(link["Asset"]["Id"]) for link in ext.get("Images") or []
-            if isinstance(link, dict) and isinstance(link.get("Asset"), dict) and link["Asset"].get("Id") is not None]
         row.update(content=ext.get("AlternativeText"), alt_text=ext.get("AlternativeText"),
-                   display_text=ext.get("DisplayText"), media_ids=sorted(set(media)), layouts=ext.get("Layouts"),
+                   display_text=ext.get("DisplayText"), media_ids=_image_media_ids(ext), layouts=ext.get("Layouts"),
                    label=ext.get("Description"), source=ext.get("SourceType"))
     return row
+
+
+def _image_media_ids(ext: dict) -> list[str]:
+    """The media an image extension shows: its ImageMediaIds, or the assets of its Images links."""
+    media = [str(i) for i in ext.get("ImageMediaIds") or [] if i is not None] or [
+        str(link["Asset"]["Id"]) for link in ext.get("Images") or []
+        if isinstance(link, dict) and isinstance(link.get("Asset"), dict) and link["Asset"].get("Id") is not None]
+    return sorted(set(media), key=lambda m: (len(m), m))
+
+
+# The association query returns image extensions without their Images,
+# DisplayText and Layouts; those come only from GetAdExtensionsByIds when
+# ReturnAdditionalFields asks for them (an unknown field name fails the whole
+# request). Media metadata then gives each image's size and a viewable URL.
+_IMAGE_EXTRA_FIELDS = "Images,DisplayText,Layouts"
+
+
+def _image_details(config: AdLoopConfig, account: str, customer: str, rows: list[dict]) -> list[str]:
+    """Fill image rows with their media, display text, layouts and image links; insights on failure."""
+    image_rows = [r for r in rows if r["type"] == "Image"]
+    if not image_rows:
+        return []
+    try:
+        extensions: dict[str, dict] = {}
+        for chunk in _chunks(sorted({r["extension_id"] for r in image_rows})):
+            payload = campaign_request(
+                config, "AdExtensions/QueryByIds",
+                {"AccountId": account, "AdExtensionIds": [int(i) for i in chunk],
+                 "AdExtensionType": "ImageAdExtension", "ReturnAdditionalFields": _IMAGE_EXTRA_FIELDS},
+                account_id=account, customer_id=customer,
+            )
+            extensions.update({str(e.get("Id")): e for e in payload.get("AdExtensions") or [] if isinstance(e, dict)})
+        for row in image_rows:
+            ext = extensions.get(row["extension_id"])
+            if ext:
+                row.update(media_ids=_image_media_ids(ext) or row["media_ids"],
+                           display_text=ext.get("DisplayText") or row["display_text"],
+                           layouts=ext.get("Layouts") or row["layouts"])
+        media: dict[str, dict] = {}
+        for chunk in _chunks(sorted({m for r in image_rows for m in r["media_ids"]})):
+            payload = campaign_request(config, "MediaMetaData/QueryByIds",
+                                       {"AccountId": account, "MediaIds": [int(m) for m in chunk]},
+                                       account_id=account, customer_id=customer)
+            for item in payload.get("MediaMetaData") or []:
+                if not isinstance(item, dict):
+                    continue
+                reps = [r for r in item.get("Representations") or [] if isinstance(r, dict)]
+                best = max(reps, key=lambda r: (r.get("Width") or 0) * (r.get("Height") or 0), default={})
+                media[str(item.get("Id"))] = {"media_id": str(item.get("Id")), "media_type": item.get("MediaType"),
+                                              "width": best.get("Width"), "height": best.get("Height"),
+                                              "url": best.get("Url")}
+    except MicrosoftAdsApiError as exc:
+        return [f"Image details could not be read, so image rows lack their images and display text: {exc}"]
+    for row in image_rows:
+        row["images"] = [media.get(m) or {"media_id": m} for m in row["media_ids"]]
+    return []
 
 
 def get_microsoft_ad_extensions(config: AdLoopConfig, *, ad_account_id: str = "", campaign_id: str = "") -> dict:
@@ -1917,7 +1965,7 @@ def get_microsoft_ad_extensions(config: AdLoopConfig, *, ad_account_id: str = ""
         for a in _associated_extensions(config, account, customer, "AdGroup", chunk):
             group, campaign = groups.get(a["EntityId"], ({}, {}))
             rows.append(_extension_row(a, "AdGroup", group.get("Name") or a["EntityId"], campaign.get("Name")))
-    insights = []
+    insights = _image_details(config, account, customer, rows)
     for c in campaigns:
         mine = [r for r in rows if r["level"] == "campaign" and r["entity_id"] == str(c.get("Id"))]
         if not any(r["type"] == "Sitelink" for r in mine):
