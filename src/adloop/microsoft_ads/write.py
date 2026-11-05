@@ -310,7 +310,7 @@ def apply_plan(config: AdLoopConfig, plan: ChangePlan) -> dict:
     changes = plan.changes or {}
     account = changes.get("ad_account_id") or plan.customer_id
     customer = changes.get("customer_id") or ""
-    kwargs = {"account_id": account, "customer_id": customer, "method": "PUT"}
+    kwargs = {"account_id": account, "customer_id": customer, "method": "PUT", "mutation": True}
 
     if plan.operation == "microsoft_update_campaign_budget":
         payload = campaign_request(

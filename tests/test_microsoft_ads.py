@@ -184,7 +184,7 @@ def _fake_api(extra: dict | None = None, reports: dict | None = None):
     submitted: dict[str, dict] = {}
     reports = {**_REPORTS, **(reports or {})}
 
-    def handle(config, service, path, body=None, *, method="POST", account_id="", customer_id=""):
+    def handle(config, service, path, body=None, *, method="POST", account_id="", customer_id="", mutation=False):
         calls.append((service, path, body, method, account_id, customer_id))
         key = (service, path)
         if extra and key in extra:
@@ -1054,8 +1054,44 @@ class TestUpstreamAuditFindings:
 
         with patch("requests.request", side_effect=requests.Timeout("read timed out")), \
                 pytest.raises(MicrosoftAdsApiError) as err:
-            client.campaign_request(_config(), "AdExtensions", {}, account_id=ACCOUNT)
+            client.campaign_request(_config(), "AdExtensions", {}, account_id=ACCOUNT, mutation=True)
         assert "may or may not have been made" in str(err.value) and "try again" not in str(err.value)
+
+    @pytest.mark.parametrize("service,path", [
+        ("customer", "Accounts/Search"), ("reporting", "GenerateReport/Submit"),
+        ("reporting", "GenerateReport/Poll"), ("campaign", "Campaigns/QueryByAccountId"),
+    ])
+    def test_a_lost_read_says_try_again(self, creds, service, path):
+        # Delta finding 9: reads are reads, whatever their path is called.
+        import requests
+
+        with patch("requests.request", side_effect=requests.Timeout("read timed out")), \
+                pytest.raises(MicrosoftAdsApiError) as err:
+            client.ms_request(_config(), service, path, {}, account_id=ACCOUNT)
+        assert "try again" in str(err.value) and "may or may not" not in str(err.value)
+
+    def test_item_errors_in_a_successful_answer_carry_no_credentials(self):
+        # Delta finding 1: HTTP 200 with PartialErrors / NestedPartialErrors.
+        cfg = AdLoopConfig(microsoft_ads=MicrosoftAdsConfig(
+            developer_token="developer-token-123456", client_id="app-id", customer_id=CUSTOMER, ad_account_id=ACCOUNT))
+        creds = _Creds()
+        creds.access_token = "access-token-555555"
+        reply = {"AdExtensionIdentities": [{"Id": 5001}, None],
+                 "NestedPartialErrors": [{"Index": 1, "BatchErrors": [
+                     {"Index": 0, "ErrorCode": "InvalidCallout", "Message": "echo access-token-555555"}]}],
+                 "PartialErrors": [{"Index": 1, "Message": "echo developer-token-123456"}]}
+        with patch("adloop.microsoft_ads.client._credentials", return_value=creds), \
+                patch("requests.request", return_value=_Resp(200, reply)):
+            payload = client.campaign_request(cfg, "AdExtensions", {}, account_id=ACCOUNT, mutation=True)
+        text = json.dumps(payload)
+        assert "access-token-555555" not in text and "developer-token-123456" not in text
+        assert payload["AdExtensionIdentities"][0] == {"Id": 5001} and "[redacted]" in text
+        from adloop.microsoft_ads import manage
+        from adloop.safety.outcomes import PartialApplyError
+
+        with pytest.raises(PartialApplyError) as err:
+            manage._raise_partial(payload, "callouts")
+        assert "access-token-555555" not in str(err.value) and err.value.created == {"callouts": ["5001"]}
 
     # -- finding 6: every Microsoft time zone has its own "today"
     @staticmethod
@@ -1094,3 +1130,15 @@ class TestUpstreamAuditFindings:
     def test_an_unknown_zone_is_said_out_loud(self):
         assert read.zone_note("PacificTimeUSCanadaTijuana") is None
         assert "not in AdLoop's Microsoft time zone table" in read.zone_note("MarsStandardTime")
+
+    # -- delta finding 8: every value of Microsoft's TimeZoneType enum
+    TIME_ZONE_TYPE = ['AbuDhabiMuscat', 'Adelaide', 'Alaska', 'AlmatyNovosibirsk', 'AmsterdamBerlinBernRomeStockholmVienna', 'Arizona', 'AstanaDhaka', 'AthensBuckarestIstanbul', 'AtlanticTimeCanada', 'AucklandWellington', 'Azores', 'Baghdad', 'BakuTbilisiYerevan', 'BangkokHanoiJakarta', 'BeijingChongqingHongKongUrumqi', 'BelgradeBratislavaBudapestLjubljanaPrague', 'BogotaLimaQuito', 'Brasilia', 'Brisbane', 'BrusselsCopenhagenMadridParis', 'Bucharest', 'BuenosAiresGeorgetown', 'Cairo', 'CanberraMelbourneSydney', 'CapeVerdeIsland', 'CaracasLaPaz', 'CasablancaMonrovia', 'CentralAmerica', 'CentralTimeUSCanada', 'ChennaiKolkataMumbaiNewDelhi', 'ChihuahuaLaPazMazatlan', 'Darwin', 'EasternTimeUSCanada', 'Ekaterinburg', 'FijiKamchatkaMarshallIsland', 'Greenland', 'GreenwichMeanTimeDublinEdinburghLisbonLondon', 'GuadalajaraMexicoCityMonterrey', 'GuamPortMoresby', 'HararePretoria', 'Hawaii', 'HelsinkiKyivRigaSofiaTallinnVilnius', 'Hobart', 'IndianaEast', 'InternationalDateLineWest', 'IrkutskUlaanBataar', 'IslamabadKarachiTashkent', 'Jerusalem', 'Kabul', 'Kathmandu', 'Krasnoyarsk', 'KualaLumpurSingapore', 'KuwaitRiyadh', 'SolomonIslandNewCaledonia', 'MidAtlantic', 'MidwayIslandAndSamoa', 'MoscowStPetersburgVolgograd', 'MountainTimeUSCanada', 'Nairobi', 'Newfoundland', 'Nukualofa', 'OsakaSapporoTokyo', 'PacificTimeUSCanadaTijuana', 'Perth', 'Rangoon', 'Santiago', 'SarajevoSkopjeWarsawZagreb', 'Saskatchewan', 'Seoul', 'SriJayawardenepura', 'Taipei', 'Tehran', 'Vladivostok', 'WestCentralAfrica', 'Yakutsk']
+
+    def test_every_api_time_zone_is_mapped(self):
+        assert len(self.TIME_ZONE_TYPE) == 75
+        assert [v for v in self.TIME_ZONE_TYPE if v not in read._TIME_ZONES] == []
+
+    def test_karachi_accounts_get_their_own_yesterday(self, monkeypatch):
+        self._at(monkeypatch, "2026-11-03T20:30:00")  # Karachi (UTC+5) is already Nov 4
+        start, end = read.report_window("", "", "IslamabadKarachiTashkent")
+        assert end.isoformat() == "2026-11-03"

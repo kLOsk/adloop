@@ -108,8 +108,13 @@ def ms_request(
     method: str = "POST",
     account_id: str = "",
     customer_id: str = "",
+    mutation: bool = False,
 ) -> dict:
-    """One authenticated call to a Microsoft Advertising REST service."""
+    """One authenticated call to a Microsoft Advertising REST service.
+
+    ``mutation`` marks a call that changes the account (an apply); it only
+    changes what a lost connection is said to mean.
+    """
     import requests
 
     cfg = config.microsoft_ads
@@ -143,9 +148,9 @@ def ms_request(
                 timeout=_TIMEOUT_SECONDS,
             )
         except requests.RequestException as exc:
-            # A query can simply be repeated; a change may already have been
+            # A read can simply be repeated; a change may already have been
             # made before the connection broke.
-            after = "try again" if "Query" in path else "the change may or may not have been made"
+            after = "the change may or may not have been made" if mutation else "try again"
             raise MicrosoftAdsApiError(
                 f"Could not reach Microsoft Advertising for {path} ({type(exc).__name__}); {after}."
             ) from None
@@ -154,14 +159,21 @@ def ms_request(
             payload = response.json() if response.content else {}
         except ValueError:
             payload = {}
-        if 200 <= status < 300:
-            return payload if isinstance(payload, dict) else {"data": payload}
-
         # A fault may echo the request; keep every credential out of errors,
-        # tool results and the audit log.
-        payload = _scrub(payload, [headers["Authorization"][len("Bearer "):], cfg.developer_token,
-                                   cfg.client_secret, getattr(creds, "refresh_token", ""),
-                                   getattr(creds, "access_token", "")])
+        # tool results and the audit log. A successful batch can carry item
+        # errors too (PartialErrors, NestedPartialErrors), so those are
+        # scrubbed as well; the rest of a successful answer is left alone.
+        secrets = [headers["Authorization"][len("Bearer "):], cfg.developer_token, cfg.client_secret,
+                   getattr(creds, "refresh_token", ""), getattr(creds, "access_token", "")]
+        if 200 <= status < 300:
+            if not isinstance(payload, dict):
+                return {"data": payload}
+            for key in _ERROR_KEYS:
+                if payload.get(key):
+                    payload[key] = _scrub(payload[key], secrets)
+            return payload
+
+        payload = _scrub(payload, secrets)
         codes, message, tracking = fault_details(payload)
         if (status == 401 or set(codes) & _AUTH_CODES) and not refreshed:
             refreshed = True
@@ -195,6 +207,10 @@ def ms_request(
         )
 
 
+# Response fields that carry errors, also inside a successful (2xx) answer.
+_ERROR_KEYS = ("PartialErrors", "NestedPartialErrors", "Errors", "OperationErrors", "BatchErrors")
+
+
 def _scrub(value: Any, secrets: list[str]) -> Any:
     """A parsed response with every secret (8+ characters) redacted from its strings."""
     if isinstance(value, str):
@@ -210,9 +226,9 @@ def _scrub(value: Any, secrets: list[str]) -> Any:
 
 
 def campaign_request(config: AdLoopConfig, path: str, body: dict, *, account_id: str,
-                     customer_id: str = "", method: str = "POST") -> dict:
+                     customer_id: str = "", method: str = "POST", mutation: bool = False) -> dict:
     return ms_request(config, "campaign", path, body, method=method, account_id=account_id,
-                      customer_id=customer_id)
+                      customer_id=customer_id, mutation=mutation)
 
 
 def customer_request(config: AdLoopConfig, path: str, body: dict, *, account_id: str = "") -> dict:

@@ -33,16 +33,18 @@ CONVERSION_GOAL_TYPES = "Url, Duration, PagesViewedPerVisit, Event, AppInstall, 
 # spellings its time zones guide uses for the same zones. Where the two
 # disagree on the zone itself, the offset the guide states wins: Midway
 # Island and Samoa is UTC-11 (the table's Pacific/Apia is UTC+13), the
-# guide's Athens zone UTC+2, and International Date Line West UTC-12.
+# guide's Athens zone UTC+2, International Date Line West UTC-12, and
+# Astana/Dhaka and Almaty/Novosibirsk UTC+6. Every value of the API's
+# TimeZoneType enum (customer-management-service/timezonetype) is covered.
 _TIME_ZONES = {
     "AbuDhabiMuscat": "Asia/Dubai",
     "Adelaide": "Australia/Adelaide",
     "Alaska": "America/Anchorage",
-    "AlmatyNovosibirsk": "Asia/Novosibirsk",
-    "Almaty_Novosibirsk": "Asia/Novosibirsk",
+    "AlmatyNovosibirsk": "Asia/Omsk",
+    "Almaty_Novosibirsk": "Asia/Omsk",
     "AmsterdamBerlinBernRomeStockholmVienna": "Europe/Berlin",
     "Arizona": "America/Phoenix",
-    "AstanaDhaka": "Asia/Almaty",
+    "AstanaDhaka": "Asia/Dhaka",
     "AthensBuchartestIstanbul": "Europe/Athens",
     "AthensBuckarestIstanbul": "Europe/Athens",
     "AthensIslandanbulMinsk": "Europe/Minsk",
@@ -84,7 +86,8 @@ _TIME_ZONES = {
     "IndianaEast": "America/Indianapolis",
     "InternationalDateLineWest": "Etc/GMT+12",
     "IrkutskUlaanBataar": "Asia/Irkutsk",
-    "IslandamabadKarachiTashkent": "Asia/Tashkent",
+    "IslamabadKarachiTashkent": "Asia/Karachi",
+    "IslandamabadKarachiTashkent": "Asia/Karachi",
     "Jerusalem": "Asia/Jerusalem",
     "Kabul": "Asia/Kabul",
     "Kathmandu": "Asia/Kathmandu",
