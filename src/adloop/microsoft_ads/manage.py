@@ -36,6 +36,7 @@ from adloop.microsoft_ads.read import (
     _ads,
     _bidding,
     _campaigns,
+    _conversion_goals,
     _criterions,
     _customer,
     _keywords,
@@ -239,17 +240,11 @@ def _strategy_name(scheme: dict | None) -> str:
 
 
 def _counted_goals(config: AdLoopConfig, account: str, customer: str) -> int:
-    from adloop.microsoft_ads.read import CONVERSION_GOAL_TYPES
-
     try:
-        goals = campaign_request(
-            config, "ConversionGoals/QueryByIds",
-            {"ConversionGoalIds": None, "ConversionGoalTypes": CONVERSION_GOAL_TYPES},
-            account_id=account, customer_id=customer,
-        ).get("ConversionGoals") or []
+        goals = _conversion_goals(config, account, customer)
     except MicrosoftAdsApiError:
         return -1
-    return sum(1 for g in goals if isinstance(g, dict) and g.get("Status") == "Active" and not g.get("ExcludeFromBidding"))
+    return sum(1 for g in goals if g.get("Status") == "Active" and not g.get("ExcludeFromBidding"))
 
 
 # ---------------------------------------------------------------------------

@@ -85,6 +85,8 @@ class FakeMicrosoft:
         }
         self.ext_links = [("7001", CAMPAIGN, "Campaign"), ("7002", CAMPAIGN, "Campaign")]
         self.goals = [{"Id": 9, "Name": "Lead", "Type": "Event", "Status": "Active", "ExcludeFromBidding": False}]
+        # Accounts outside Microsoft's in-store pilot cannot ask for InStoreTransaction goals.
+        self.in_store_pilot = True
         self.calls: list[dict] = []
         self.fail: dict[tuple, Exception] = {}
         self._next = 5000
@@ -136,6 +138,10 @@ class FakeMicrosoft:
         if path == "Ads/QueryByAdGroupId":
             return {"Ads": [self._pub(a) for a in self.ads.values() if a["_group"] == str(body["AdGroupId"])]}
         if path == "ConversionGoals/QueryByIds":
+            if not self.in_store_pilot and "InStoreTransaction" in body["ConversionGoalTypes"]:
+                raise MicrosoftAdsApiError(
+                    "InStoreTransactionPilotNotEnabledForCustomer: In-Store Transaction pilot not enabled",
+                    status=400, codes=["InStoreTransactionPilotNotEnabledForCustomer", "5359"])
             return {"ConversionGoals": copy.deepcopy(self.goals)}
         if path == "NegativeKeywords/QueryByEntityIds":
             key = (body["EntityType"], str(body["EntityIds"][0]))
@@ -1213,3 +1219,26 @@ class TestScheduleDeltaFindings:
         assert result.get("status") != "APPLIED" and "draft it again" in _text(result)
         assert self._schedule(api) == [("Monday", 9, 17)]
         assert not [c for c in api.calls if c["path"] == "CampaignCriterions" and c["method"] in ("POST", "DELETE")]
+
+
+class TestGoalsWithoutInStorePilot:
+    """The MaxConversions goal check must work for accounts outside Microsoft's in-store pilot."""
+
+    def test_counted_goals_are_counted(self, api, config):
+        api.in_store_pilot = False
+        assert manage._counted_goals(config, ACCOUNT, CUSTOMER) == 1
+        api.goals = []
+        assert manage._counted_goals(config, ACCOUNT, CUSTOMER) == 0
+
+    def test_max_conversions_without_goals_still_warns(self, api, config):
+        api.in_store_pilot = False
+        api.goals = []
+        update = manage.update_microsoft_campaign(config, campaign_id="600", target_cpa=25)
+        assert any("nothing to optimize" in w for w in update["warnings"])
+        new = manage.draft_microsoft_campaign(config, name="New", daily_budget=10, languages=["English"],
+                                              location_ids=["190"])
+        assert any("nothing to optimize" in w for w in new["warnings"])
+
+    def test_an_unreadable_goal_list_is_unknown(self, api, config):
+        api.fail[("POST", "ConversionGoals/QueryByIds")] = MicrosoftAdsApiError("Internal error", status=500)
+        assert manage._counted_goals(config, ACCOUNT, CUSTOMER) == -1
