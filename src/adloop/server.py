@@ -46,6 +46,9 @@ TOOLSETS: dict[str, str] = {
     "web": "PageSpeed / web performance",
     "merchant": "Merchant Center reads",
     "reddit": "Reddit Ads reads, writes, and planning",
+    "chatgpt_ads": "ChatGPT Ads (OpenAI) reads, campaign management and conversion diagnostics",
+    "microsoft_ads": "Microsoft Advertising (Bing) reads and campaign management",
+    "roku_ads": "Roku Ads (connected TV) reads, reports, conversion diagnostics and event audiences",
 }
 
 # Finer selections inside "ads" (issue #56): every ads tool also carries
@@ -366,6 +369,9 @@ _API_DOCS: dict[str, str] = {
     "web": "PageSpeed Insights API: https://developers.google.com/speed/docs/insights/v5/about",
     "merchant": "Merchant API: https://developers.google.com/merchant/api/overview",
     "reddit": "Reddit Ads API: https://ads-api.reddit.com/docs/v3/",
+    "chatgpt_ads": "OpenAI Advertiser API: https://developers.openai.com/ads/api-overview",
+    "microsoft_ads": "Microsoft Advertising API: https://learn.microsoft.com/advertising/guides/",
+    "roku_ads": "Roku Ads API: https://developer.ads.roku.com/ads/reference/introduction",
     # health_check and confirm_and_apply act on whichever platform is set up.
     "core": (
         "Google Ads API: https://developers.google.com/google-ads/api/docs/start, "
@@ -519,12 +525,157 @@ def _reddit_structured_error(exc: Exception) -> dict | None:
     return None
 
 
+def _chatgpt_ads_structured_error(exc: Exception) -> dict | None:
+    """ChatGPT Ads translations, keyed on exception type like Reddit's."""
+    from adloop.chatgpt_ads.client import (
+        SETTINGS_URL,
+        ChatGPTAdsApiError,
+        ChatGPTAdsAuthError,
+    )
+
+    if isinstance(exc, ChatGPTAdsAuthError):
+        code = {
+            "missing_key": "CHATGPT_ADS_NOT_CONNECTED",
+            "invalid_key": "CHATGPT_ADS_INVALID_KEY",
+        }.get(exc.error_code, "CHATGPT_ADS_ACCOUNT_KEY")
+        return {
+            "error": str(exc),
+            "hint": (
+                f"Create an Advertiser API key in OpenAI Ads Manager → Settings → API "
+                f"keys ({SETTINGS_URL}) and put it in chatgpt_ads.api_key (or "
+                "chatgpt_ads.accounts for more accounts), then restart the MCP server."
+            ),
+            "auth_error": code,
+        }
+    if isinstance(exc, ChatGPTAdsApiError):
+        if exc.status == 429:
+            return {
+                "error": str(exc),
+                "hint": "Wait for the reset before calling again; do not retry in a loop.",
+                "auth_error": "CHATGPT_ADS_RATE_LIMITED",
+                "retry_after": exc.retry_after,
+            }
+        if exc.status == 403:
+            return {
+                "error": str(exc),
+                "hint": (
+                    "The key's account lacks this feature or permission (some endpoints, "
+                    "such as spending limits, need billing access; pixel and event-stream "
+                    "endpoints must be enabled by OpenAI for the account)."
+                ),
+                "auth_error": "CHATGPT_ADS_FORBIDDEN",
+            }
+        if exc.status == 404:
+            return {
+                "error": str(exc),
+                "hint": (
+                    "The id does not exist in this key's ad account, or the endpoint is "
+                    "not enabled for the account."
+                ),
+            }
+        return {"error": str(exc), "chatgpt_ads_status": exc.status}
+    return None
+
+
+def _microsoft_ads_structured_error(exc: Exception) -> dict | None:
+    """Microsoft Advertising translations, keyed on exception type."""
+    from adloop.microsoft_ads.auth import MicrosoftAdsApiError, MicrosoftAdsAuthError
+
+    if isinstance(exc, MicrosoftAdsAuthError):
+        hints = {
+            "missing_developer_token": (
+                "Request a developer token in Microsoft Advertising (Settings → Developer "
+                "settings, or https://developers.ads.microsoft.com/Account) and set "
+                "microsoft_ads.developer_token."
+            ),
+            "missing_client": "Set microsoft_ads.client_id to the Entra app id, then run `adloop microsoft-login`.",
+        }
+        return {
+            "error": str(exc),
+            "hint": hints.get(
+                exc.error_code,
+                "Run `adloop microsoft-login` and sign in with the account that has access "
+                "to the Microsoft Advertising accounts, then restart the MCP server.",
+            ),
+            "auth_error": "MICROSOFT_ADS_" + (exc.error_code or "auth").upper(),
+        }
+    if isinstance(exc, MicrosoftAdsApiError):
+        if exc.status == 429:
+            return {
+                "error": str(exc),
+                "hint": "Wait for the reset before calling again; do not retry in a loop.",
+                "auth_error": "MICROSOFT_ADS_RATE_LIMITED",
+                "retry_after": exc.retry_after,
+            }
+        result = {"error": str(exc), "microsoft_ads_codes": exc.codes or None}
+        if exc.tracking_id:
+            result["tracking_id"] = exc.tracking_id
+        if set(exc.codes) & {"106", "UserIsNotAuthorized", "1102", "CampaignServiceInvalidAccountId"}:
+            result["hint"] = (
+                "The signed-in user has no access to this account, or the account or customer id "
+                "is wrong. Check list_microsoft_ads_accounts."
+            )
+        return result
+    return None
+
+
+def _roku_ads_structured_error(exc: Exception) -> dict | None:
+    """Roku Ads translations, keyed on exception type."""
+    from adloop.roku_ads.auth import RokuAdsApiError, RokuAdsAuthError
+
+    if isinstance(exc, RokuAdsAuthError):
+        hints = {
+            "missing_client": (
+                "An organization admin adds a developer app in Roku Ads Manager → Organization → "
+                "Ads API; set roku_ads.client_id, client_secret, authorization_url and redirect_uri "
+                "from it, then run `adloop roku-login`."
+            ),
+        }
+        return {
+            "error": str(exc),
+            "hint": hints.get(
+                exc.error_code,
+                "Run `adloop roku-login` and approve access with a user who can see the ad "
+                "accounts, then restart the MCP server.",
+            ),
+            "auth_error": "ROKU_ADS_" + (exc.error_code or "auth").upper(),
+        }
+    if isinstance(exc, RokuAdsApiError):
+        if exc.status == 429:
+            return {
+                "error": str(exc),
+                "hint": "Wait for the reset before calling again; do not retry in a loop.",
+                "auth_error": "ROKU_ADS_RATE_LIMITED",
+                "retry_after": exc.retry_after,
+            }
+        result = {"error": str(exc), "roku_ads_status": exc.status}
+        if exc.status == 403:
+            result["hint"] = (
+                "Roku answers 403 when the signed-in user has no role on that account or the uid "
+                "does not exist. Check list_roku_accounts."
+            )
+        return result
+    return None
+
+
 def _structured_error(fn_name: str, exc: Exception) -> dict:
     """Translate common auth failures into actionable structured errors."""
     reddit = _reddit_structured_error(exc)
     if reddit is not None:
         reddit.setdefault("tool", fn_name)
         return reddit
+    chatgpt = _chatgpt_ads_structured_error(exc)
+    if chatgpt is not None:
+        chatgpt.setdefault("tool", fn_name)
+        return chatgpt
+    microsoft = _microsoft_ads_structured_error(exc)
+    if microsoft is not None:
+        microsoft.setdefault("tool", fn_name)
+        return microsoft
+    roku = _roku_ads_structured_error(exc)
+    if roku is not None:
+        roku.setdefault("tool", fn_name)
+        return roku
 
     err = str(exc)
     err_lower = err.lower()
@@ -675,7 +826,7 @@ def _safe(fn: Callable) -> Callable:
 @_safe
 def health_check() -> dict:
     """Test AdLoop connectivity — checks OAuth token, GA4 API, Google Ads API,
-    and (when configured) the Reddit Ads API.
+    and (when configured) the Reddit Ads, ChatGPT Ads, Microsoft Advertising and Roku Ads APIs.
 
     Returns the status of each service and actionable guidance when something
     is broken, which makes it the diagnostic for failures in other tools.
@@ -785,6 +936,82 @@ def health_check() -> dict:
                 status["reddit_auth_error"] = parsed["auth_error"]
     else:
         status["reddit"] = "not_configured"
+
+    if _chatgpt_ads_configured():
+        try:
+            from adloop.chatgpt_ads.read import account_meta
+
+            meta = account_meta(current_config(), "", fresh=True)
+            status["chatgpt_ads"] = "ok"
+            status["chatgpt_ads_account"] = meta["ad_account_id"]
+            status["chatgpt_ads_account_name"] = meta["name"]
+        except Exception as e:
+            parsed = _structured_error("health_check", e)
+            status["chatgpt_ads"] = "error"
+            status["chatgpt_ads_error"] = parsed["error"]
+            if "hint" in parsed:
+                status["chatgpt_ads_hint"] = parsed["hint"]
+            if "auth_error" in parsed:
+                status["chatgpt_ads_auth_error"] = parsed["auth_error"]
+    else:
+        status["chatgpt_ads"] = "not_configured"
+
+    ms_cfg = current_config().microsoft_ads
+    if _microsoft_ads_configured():
+        try:
+            from adloop.microsoft_ads.read import account_meta as ms_account_meta
+
+            if ms_cfg.ad_account_id:
+                meta = ms_account_meta(current_config(), "", fresh=True)
+                status["microsoft_ads"] = "ok"
+                status["microsoft_ads_account"] = meta["ad_account_id"]
+                status["microsoft_ads_account_name"] = meta["name"]
+                status["microsoft_ads_account_status"] = meta["status"]
+            else:
+                from adloop.microsoft_ads.client import ms_request
+
+                ms_request(current_config(), "customer", "User/Query", {"UserId": None})
+                status["microsoft_ads"] = "ok"
+                status["microsoft_ads_note"] = (
+                    "Signed in; set microsoft_ads.ad_account_id (see list_microsoft_ads_accounts)."
+                )
+        except Exception as e:
+            parsed = _structured_error("health_check", e)
+            status["microsoft_ads"] = "error"
+            status["microsoft_ads_error"] = parsed["error"]
+            if "hint" in parsed:
+                status["microsoft_ads_hint"] = parsed["hint"]
+            if "auth_error" in parsed:
+                status["microsoft_ads_auth_error"] = parsed["auth_error"]
+    else:
+        status["microsoft_ads"] = "not_configured"
+
+    roku_cfg = current_config().roku_ads
+    if _roku_ads_configured():
+        try:
+            if roku_cfg.account_uid:
+                from adloop.roku_ads.read import account_meta as roku_account_meta
+
+                meta = roku_account_meta(current_config(), "", fresh=True)
+                status["roku_ads"] = "ok"
+                status["roku_ads_account"] = meta["account_uid"]
+                status["roku_ads_account_name"] = meta["name"]
+            else:
+                from adloop.roku_ads.client import api_get as roku_get
+
+                roku_get(current_config(), "permissions", {"limit": 1})
+                status["roku_ads"] = "ok"
+                status["roku_ads_note"] = "Signed in; set roku_ads.account_uid (see list_roku_accounts)."
+        except Exception as e:
+            parsed = _structured_error("health_check", e)
+            status["roku_ads"] = "error"
+            status["roku_ads_error"] = parsed["error"]
+            if "hint" in parsed:
+                status["roku_ads_hint"] = parsed["hint"]
+            if "auth_error" in parsed:
+                status["roku_ads_auth_error"] = parsed["auth_error"]
+    else:
+        status["roku_ads"] = "not_configured"
 
     if status["ga4"] == "error" or status["ads"] == "error":
         if status.get("ads_hint"):
@@ -5373,7 +5600,8 @@ def approve_change(
 # ---------------------------------------------------------------------------
 # Images without a public URL reach AdLoop through the upload card (apps with
 # MCP Apps) or an upload link (hosted, every other app). Tools then take the
-# upload id: draft_image_assets(upload_ids=...), upload:<id> for Reddit.
+# upload id: draft_image_assets(upload_ids=...), draft_microsoft_image_extension(upload_ids=...),
+# upload:<id> for Reddit.
 
 
 @_tool(
@@ -5497,6 +5725,7 @@ def list_uploads() -> dict:
         "uploads": uploads,
         "usage": (
             "draft_image_assets(upload_ids=[...]) for Google Ads; "
+            "draft_microsoft_image_extension(upload_ids=[...]) for Microsoft Advertising; "
             "\"upload:<upload_id>\" as image_url, thumbnail_url or a carousel card's "
             "image_url in draft_reddit_ad (AdLoop Cloud only). CSV uploads: upload_id in "
             "draft_upload_call_conversions or draft_upload_enhanced_conversions_for_leads."
@@ -6732,6 +6961,1942 @@ def draft_reddit_ad(
         thumbnail_url=thumbnail_url,
         carousel_cards=carousel_cards,
     )
+
+
+# ---------------------------------------------------------------------------
+# ChatGPT Ads Tools
+# ---------------------------------------------------------------------------
+# Third ad platform (OpenAI Advertiser API). Each API key belongs to one ad
+# account, so ``ad_account_id`` only selects which configured key to use;
+# empty means the default key (chatgpt_ads.api_key / OPENAI_ADS_API_KEY).
+
+
+def _microsoft_ads_configured() -> bool:
+    """Set up here: hosted, the credentials provider must support Microsoft;
+    self-hosted, the config names a developer token or an app."""
+    from adloop.auth import get_credentials_provider
+    from adloop.runtime import deployment_mode
+
+    if deployment_mode() == "server":
+        return hasattr(get_credentials_provider(), "microsoft_ads_credentials")
+    cfg = current_config().microsoft_ads
+    return bool(cfg.developer_token or cfg.client_id)
+
+
+def _roku_ads_configured() -> bool:
+    """Set up here: hosted, the credentials provider must support Roku;
+    self-hosted, the config names an app or an ad account."""
+    from adloop.auth import get_credentials_provider
+    from adloop.runtime import deployment_mode
+
+    if deployment_mode() == "server":
+        return hasattr(get_credentials_provider(), "roku_ads_credentials")
+    cfg = current_config().roku_ads
+    return bool(cfg.client_id or cfg.account_uid)
+
+
+def _chatgpt_ads_configured() -> bool:
+    import os
+
+    from adloop.chatgpt_ads.client import API_KEY_ENV
+    from adloop.runtime import deployment_mode
+
+    from adloop.auth import get_credentials_provider
+
+    if deployment_mode() == "server":
+        # Hosted: the provider supplies keys; one without ChatGPT support
+        # means the integration is simply not offered there.
+        return hasattr(get_credentials_provider(), "chatgpt_ads_api_key")
+    cfg = current_config().chatgpt_ads
+    return bool(cfg.api_key or cfg.accounts or os.environ.get(API_KEY_ENV))
+
+
+@_tool(title="ChatGPT Ads account", annotations=_READONLY, tags={"chatgpt_ads"})
+@_safe
+def get_chatgpt_ads_account(ad_account_id: str = "") -> dict:
+    """ChatGPT Ads account details: name, currency, time zone, brand and integrity reviews, spending limits.
+
+    Returns the account's status and reviews (an account cannot serve until
+    its brand review is approved), campaign counts by status, account-level
+    blockers reported on campaigns (payment method, identity verification,
+    spending limit reached), the daily and date-range spending limits when
+    the key may read billing, and insights. Account-level problems are the
+    usual reason no ChatGPT ad serves at all.
+
+    Args:
+        ad_account_id: ChatGPT ad account id (adacct_...) whose API key to
+            use; empty uses the default key (chatgpt_ads.api_key).
+    """
+    from adloop.chatgpt_ads.read import get_chatgpt_ads_account as _impl
+
+    return _impl(current_config(), ad_account_id=ad_account_id)
+
+
+@_tool(title="ChatGPT Ads campaigns", annotations=_READONLY, tags={"chatgpt_ads"})
+@_safe
+def get_chatgpt_campaigns(ad_account_id: str = "", include_archived: bool = False) -> dict:
+    """List ChatGPT Ads campaigns with status, serving state, budget, bidding, targeting and conversion events.
+
+    Each campaign carries status (what was set: active, paused, archived),
+    serving_state and serving_issues (what OpenAI reports as blocking
+    delivery: payment, reviews, no ad groups, budget spent, ...), bidding_type
+    (impressions, clicks, or conversions = oCPC), budget in account currency,
+    location and platform targeting, the conversion events attached, and the
+    tracking template. Insights flag active campaigns that cannot serve,
+    campaigns without a conversion event (they always report 0 conversions)
+    and campaigns without location targeting.
+
+    Args:
+        ad_account_id: ChatGPT ad account id (adacct_...) whose API key to
+            use; empty uses the default key (chatgpt_ads.api_key).
+        include_archived: Include archived campaigns, which are left out by
+            default.
+    """
+    from adloop.chatgpt_ads.read import get_chatgpt_campaigns as _impl
+
+    return _impl(current_config(), ad_account_id=ad_account_id, include_archived=include_archived)
+
+
+@_tool(title="ChatGPT Ads ad groups", annotations=_READONLY, tags={"chatgpt_ads"})
+@_safe
+def get_chatgpt_ad_groups(
+    ad_account_id: str = "", campaign_id: str = "", include_archived: bool = False
+) -> dict:
+    """List ChatGPT Ads ad groups with bids, context hints and serving state, plus their campaign's status.
+
+    Bids are in account currency with their meaning: maximum per click,
+    per impression, or the target cost per conversion of an oCPC campaign.
+    Context hints are the free-text descriptions that steer which
+    conversations an ad group appears in. Insights flag ad groups without
+    ads, active ad groups that cannot serve and ad groups without hints.
+
+    Args:
+        ad_account_id: ChatGPT ad account id (adacct_...) whose API key to
+            use; empty uses the default key (chatgpt_ads.api_key).
+        campaign_id: Campaign id (cmpn_..., from get_chatgpt_campaigns) to
+            limit the list to; empty lists every campaign's ad groups.
+        include_archived: Include archived ad groups and campaigns.
+    """
+    from adloop.chatgpt_ads.read import get_chatgpt_ad_groups as _impl
+
+    return _impl(
+        current_config(),
+        ad_account_id=ad_account_id,
+        campaign_id=campaign_id,
+        include_archived=include_archived,
+    )
+
+
+@_tool(title="ChatGPT Ads ads", annotations=_READONLY, tags={"chatgpt_ads"})
+@_safe
+def get_chatgpt_ads(
+    ad_account_id: str = "",
+    campaign_id: str = "",
+    ad_group_id: str = "",
+    include_archived: bool = False,
+) -> dict:
+    """List ChatGPT Ads ads with copy, destination URL, review status, serving state and click parameters.
+
+    Each ad carries its title and body, target_url, image, review_status
+    (in_review, approved, rejected) with the rejection reason, serving_state,
+    the status of its ad group and campaign, and click_parameters: the utm_*
+    values a click carries after the campaign, ad group and ad tracking
+    templates are applied. Insights flag rejected ads, ads still in review,
+    approved ads that cannot serve and ads without utm_source.
+
+    Args:
+        ad_account_id: ChatGPT ad account id (adacct_...) whose API key to
+            use; empty uses the default key (chatgpt_ads.api_key).
+        campaign_id: Campaign id (cmpn_...) to limit the list to; empty
+            means every campaign.
+        ad_group_id: Ad group id (adgrp_...) to limit the list to; empty
+            means every ad group.
+        include_archived: Include archived ads, ad groups and campaigns.
+    """
+    from adloop.chatgpt_ads.read import get_chatgpt_ads as _impl
+
+    return _impl(
+        current_config(),
+        ad_account_id=ad_account_id,
+        campaign_id=campaign_id,
+        ad_group_id=ad_group_id,
+        include_archived=include_archived,
+    )
+
+
+@_tool(title="ChatGPT Ads performance", annotations=_READONLY, tags={"chatgpt_ads"})
+@_safe
+def get_chatgpt_performance(
+    ad_account_id: str = "",
+    level: str = "campaign",
+    date_range_start: str = "",
+    date_range_end: str = "",
+    breakdown: str = "",
+    compact: bool = False,
+    click_window_days: int = 30,
+    view_window_days: int = 1,
+) -> dict:
+    """ChatGPT Ads performance: spend, impressions, clicks, CTR, CPC, CPM, conversions, CPA, ROAS.
+
+    Returns rows per entity for the chosen level with names and the status
+    of every level above it, totals and insights[] (zero-conversion
+    spenders, spenders whose campaign has no conversion event, entities
+    paused since they spent). Money is in account currency. Conversions are
+    goal conversions from clicks and views within the attribution windows.
+    Windows are whole days in the account's time zone and end yesterday at
+    the latest, because conversion data needs whole days.
+
+    Args:
+        ad_account_id: ChatGPT ad account id (adacct_...) whose API key to
+            use; empty uses the default key (chatgpt_ads.api_key).
+        level: Row granularity: "account", "campaign" (default), "ad_group"
+            or "ad".
+        date_range_start: First day, YYYY-MM-DD, account time zone. Empty
+            means 29 days before date_range_end (a 30-day window).
+        date_range_end: Last day (inclusive), YYYY-MM-DD. Empty means
+            yesterday; today is moved back to yesterday.
+        breakdown: Optional extra dimension: "date", "country", "device" or
+            "platform" (ChatGPT app or web browser). Country, device and
+            platform rows carry delivery metrics only.
+        compact: When true, returns totals, the top 10 rows by spend and the
+            zero-conversion spenders instead of every row.
+        click_window_days: Click attribution window: 7, 14 or 30 (default).
+        view_window_days: View attribution window: 1 (default) or 0 to count
+            clicks only.
+    """
+    from adloop.chatgpt_ads.read import get_chatgpt_performance as _impl
+
+    return _impl(
+        current_config(),
+        ad_account_id=ad_account_id,
+        level=level,
+        date_range_start=date_range_start,
+        date_range_end=date_range_end,
+        breakdown=breakdown,
+        compact=compact,
+        click_window_days=click_window_days,
+        view_window_days=view_window_days,
+    )
+
+
+@_tool(title="ChatGPT Ads conversions", annotations=_READONLY, tags={"chatgpt_ads"})
+@_safe
+def get_chatgpt_conversions(
+    ad_account_id: str = "",
+    level: str = "campaign",
+    date_range_start: str = "",
+    date_range_end: str = "",
+    breakdown: str = "",
+    include_events: bool = True,
+    event_names: _StrListOpt = None,
+    click_window_days: int = 30,
+    view_window_days: int = 1,
+    time_basis: str = "ad_event_time",
+) -> dict:
+    """ChatGPT Ads conversions: goal conversions split into click-through and view-through, purchase value, and every attributed event.
+
+    Per entity: goal conversions (only the events attached to the campaign),
+    click_through and view_through counts, purchase value, the conversion
+    events attached, and events[]: every attributed event (lead_created,
+    page_viewed, order_created, custom events) whether or not it is a goal,
+    with counts, value and which goal setting counted it. That is how to see
+    a campaign whose site sends leads that the campaign does not count.
+
+    Args:
+        ad_account_id: ChatGPT ad account id (adacct_...) whose API key to
+            use; empty uses the default key (chatgpt_ads.api_key).
+        level: "account", "campaign" (default), "ad_group" or "ad".
+        date_range_start: First day, YYYY-MM-DD, account time zone. Empty
+            means 29 days before date_range_end.
+        date_range_end: Last day (inclusive), YYYY-MM-DD. Empty means
+            yesterday.
+        breakdown: Optional: "date", "country" or "device". Empty means none.
+        include_events: Add the attributed events per row (default true).
+        event_names: Limit events[] to these exact event names (standard
+            names like "lead_created" or custom event names). Needs
+            include_events.
+        click_window_days: Click attribution window: 7, 14 or 30 (default).
+        view_window_days: View attribution window: 1 (default) or 0.
+        time_basis: "ad_event_time" (default: date of the ad click or view)
+            or "conversion_time" (date of the conversion).
+    """
+    from adloop.chatgpt_ads.read import get_chatgpt_conversions as _impl
+
+    return _impl(
+        current_config(),
+        ad_account_id=ad_account_id,
+        level=level,
+        date_range_start=date_range_start,
+        date_range_end=date_range_end,
+        breakdown=breakdown,
+        include_events=include_events,
+        event_names=event_names,
+        click_window_days=click_window_days,
+        view_window_days=view_window_days,
+        time_basis=time_basis,
+    )
+
+
+@_tool(title="ChatGPT Ads conversion setup audit", annotations=_READONLY, tags={"chatgpt_ads"})
+@_safe
+def get_chatgpt_conversion_setup(
+    ad_account_id: str = "",
+    date_range_start: str = "",
+    date_range_end: str = "",
+    check_recent_events: bool = True,
+    min_clicks: int = 30,
+) -> dict:
+    """Audit ChatGPT Ads conversion tracking link by link and return a verdict.
+
+    Checks the whole chain: a conversion source exists (pixel or Conversions
+    API); conversion events are defined, are real outcomes rather than page
+    views, and have a source; every campaign has an event attached (without
+    one it reports 0 conversions whatever fires); oCPC campaigns optimize for
+    an active standard event; ad clicks lead to attributed events at all;
+    the goal event itself fires; events arrived in the last 15 minutes and
+    through which channel (browser pixel or server API); and ads carry
+    utm_source for Google Analytics. Returns verdict (ok, needs attention,
+    broken), checks[] (fail/warn/info/pass with details), the pixels, event
+    settings, per-campaign clicks, goal conversions and attributed events,
+    and insights. ChatGPT conversion numbers are only meaningful when this
+    audit passes.
+
+    Args:
+        ad_account_id: ChatGPT ad account id (adacct_...) whose API key to
+            use; empty uses the default key (chatgpt_ads.api_key).
+        date_range_start: First day of the activity window, YYYY-MM-DD.
+            Empty means 29 days before date_range_end.
+        date_range_end: Last day (inclusive), YYYY-MM-DD. Empty means
+            yesterday.
+        check_recent_events: Also sample the events received in the last
+            15 minutes per pixel (default true).
+        min_clicks: Clicks below which "no events" is a warning rather than
+            a failure (default 30).
+    """
+    from adloop.chatgpt_ads.read import get_chatgpt_conversion_setup as _impl
+
+    return _impl(
+        current_config(),
+        ad_account_id=ad_account_id,
+        date_range_start=date_range_start,
+        date_range_end=date_range_end,
+        check_recent_events=check_recent_events,
+        min_clicks=min_clicks,
+    )
+
+
+@_tool(title="ChatGPT Ads change history", annotations=_READONLY, tags={"chatgpt_ads"})
+@_safe
+def get_chatgpt_change_history(
+    ad_account_id: str = "",
+    date_range_start: str = "",
+    date_range_end: str = "",
+    campaign_id: str = "",
+    ad_group_id: str = "",
+    ad_id: str = "",
+    limit: int = 200,
+) -> dict:
+    """ChatGPT Ads change history: who changed which campaign, ad group or ad, and when.
+
+    Returns changes newest first with time (account time zone), change type,
+    object, actor and the before/after values, plus counts by type, actor
+    and day, and insights that flag budget, bid, status, targeting and
+    conversion-event changes, which explain most sudden performance moves.
+
+    Args:
+        ad_account_id: ChatGPT ad account id (adacct_...) whose API key to
+            use; empty uses the default key (chatgpt_ads.api_key).
+        date_range_start: First day, YYYY-MM-DD. Empty means 29 days before
+            date_range_end.
+        date_range_end: Last day (inclusive), YYYY-MM-DD. Empty means today.
+        campaign_id: Only this campaign and its ad groups and ads.
+        ad_group_id: Only this ad group and its ads.
+        ad_id: Only this ad.
+        limit: Maximum changes to return (default 200, max 2000).
+    """
+    from adloop.chatgpt_ads.read import get_chatgpt_change_history as _impl
+
+    return _impl(
+        current_config(),
+        ad_account_id=ad_account_id,
+        date_range_start=date_range_start,
+        date_range_end=date_range_end,
+        campaign_id=campaign_id,
+        ad_group_id=ad_group_id,
+        ad_id=ad_id,
+        limit=limit,
+    )
+
+
+@_tool(title="ChatGPT Ads vs Analytics check", annotations=_READONLY, tags={"chatgpt_ads"})
+@_safe
+def chatgpt_attribution_check(
+    ad_account_id: str = "",
+    property_id: str = "",
+    date_range_start: str = "",
+    date_range_end: str = "",
+) -> dict:
+    """Compare ChatGPT Ads clicks and conversions with Google Analytics sessions and key events.
+
+    Finds the utm_source/utm_medium the ads send, then splits GA4's ChatGPT
+    traffic into paid (a utm_source with a paid medium such as cpc), unpaid
+    (people following links in ChatGPT answers) and ambiguous (sessions that
+    could be either, because an ad that got clicks is untagged or its tag has
+    no paid medium). Returns ChatGPT Ads clicks, spend and conversions, GA4
+    paid sessions, engaged sessions and key events by event name, the unpaid
+    and ambiguous ChatGPT sessions, and insights: untagged ads, clicks that
+    never became sessions, GA4 key events from paid ChatGPT visits while
+    ChatGPT Ads reports none (the OpenAI setup may miss that action), and
+    large gaps.
+
+    Queries the OpenAI Advertiser API: https://developers.openai.com/ads/api-overview
+    and the Google Analytics Data API: https://developers.google.com/analytics/devguides/reporting/data/v1
+
+    Args:
+        ad_account_id: ChatGPT ad account id (adacct_...) whose API key to
+            use; empty uses the default key (chatgpt_ads.api_key).
+        property_id: GA4 property as "properties/123456789". Empty uses
+            ga4.property_id from the config.
+        date_range_start: First day, YYYY-MM-DD. Empty means 29 days before
+            date_range_end.
+        date_range_end: Last day (inclusive), YYYY-MM-DD. Empty means
+            yesterday.
+    """
+    from adloop.chatgpt_ads.read import chatgpt_attribution_check as _impl
+
+    return _impl(
+        current_config(),
+        ad_account_id=ad_account_id,
+        property_id=property_id or current_config().ga4.property_id,
+        date_range_start=date_range_start,
+        date_range_end=date_range_end,
+    )
+
+
+@_tool(title="Search ChatGPT Ads locations", annotations=_READONLY, tags={"chatgpt_ads"})
+@_safe
+def search_chatgpt_locations(ad_account_id: str = "", query: str = "", limit: int = 20) -> dict:
+    """Find ChatGPT Ads location ids (countries, regions, markets, cities) by name for campaign targeting.
+
+    Returns location_id, name, canonical name, type, country and region
+    codes and the parent id, the values update_chatgpt_campaign and
+    draft_chatgpt_campaign take as location_ids.
+
+    Args:
+        ad_account_id: ChatGPT ad account id whose key to use; empty uses the default key.
+        query: Place name, e.g. "Chicago" or "Illinois".
+        limit: Most results (1–100).
+    """
+    from adloop.chatgpt_ads.read import search_chatgpt_locations as _impl
+
+    return _impl(current_config(), ad_account_id=ad_account_id, query=query, limit=limit)
+
+
+@_tool(title="Draft pausing a ChatGPT Ads entity", annotations=_WRITE, tags={"chatgpt_ads"})
+@_safe
+def pause_chatgpt_entity(ad_account_id: str = "", entity_type: str = "", entity_id: str = "") -> dict:
+    """Draft pausing a ChatGPT Ads campaign, ad group or ad (preview only; nothing changes yet).
+
+    The preview names the entity, its campaign and ad group, and its current
+    status. The returned plan_id is applied with confirm_and_apply, which
+    refuses if the status changed since the preview.
+
+    Args:
+        ad_account_id: ChatGPT ad account id whose key to use; empty uses the default key.
+        entity_type: "campaign", "ad_group" or "ad".
+        entity_id: The entity's id (cmpn_..., adgrp_..., ad_...).
+    """
+    from adloop.chatgpt_ads.write import pause_chatgpt_entity as _impl
+
+    return _impl(current_config(), ad_account_id=ad_account_id, entity_type=entity_type, entity_id=entity_id)
+
+
+@_tool(title="Draft enabling a ChatGPT Ads entity", annotations=_WRITE, tags={"chatgpt_ads"})
+@_safe
+def enable_chatgpt_entity(ad_account_id: str = "", entity_type: str = "", entity_id: str = "") -> dict:
+    """Draft activating a paused ChatGPT Ads campaign, ad group or ad (preview only).
+
+    Warnings name a paused parent, an ad still in review or rejected, and
+    other serving issues that would keep it from serving. The returned
+    plan_id is applied with confirm_and_apply.
+
+    Args:
+        ad_account_id: ChatGPT ad account id whose key to use; empty uses the default key.
+        entity_type: "campaign", "ad_group" or "ad".
+        entity_id: The entity's id.
+    """
+    from adloop.chatgpt_ads.write import enable_chatgpt_entity as _impl
+
+    return _impl(current_config(), ad_account_id=ad_account_id, entity_type=entity_type, entity_id=entity_id)
+
+
+@_tool(title="Draft archiving a ChatGPT Ads entity", annotations=_DESTRUCTIVE, tags={"chatgpt_ads"})
+@_safe
+def archive_chatgpt_entity(ad_account_id: str = "", entity_type: str = "", entity_id: str = "") -> dict:
+    """Draft archiving a ChatGPT Ads campaign, ad group or ad: permanent, it can never serve again.
+
+    OpenAI has no delete; archive is the end state and cannot be undone, so
+    the plan needs a double confirmation. Pausing keeps an entity reusable.
+
+    Args:
+        ad_account_id: ChatGPT ad account id whose key to use; empty uses the default key.
+        entity_type: "campaign", "ad_group" or "ad".
+        entity_id: The entity's id.
+    """
+    from adloop.chatgpt_ads.write import archive_chatgpt_entity as _impl
+
+    return _impl(current_config(), ad_account_id=ad_account_id, entity_type=entity_type, entity_id=entity_id)
+
+
+@_tool(title="Draft ChatGPT Ads campaign changes", annotations=_WRITE, tags={"chatgpt_ads"})
+@_safe
+def update_chatgpt_campaign(
+    ad_account_id: str = "",
+    campaign_id: str = "",
+    name: str = "",
+    daily_budget: float | None = None,
+    lifetime_budget: float | None = None,
+    start_date: str = "",
+    end_date: str = "",
+    location_ids: _StrListOpt = None,
+    countries: _StrListOpt = None,
+    excluded_location_ids: _StrListOpt = None,
+    excluded_countries: _StrListOpt = None,
+    platforms: _StrListOpt = None,
+    query_string_template: str = "",
+    conversion_event_setting_ids: _StrListOpt = None,
+    clear_fields: _StrListOpt = None,
+) -> dict:
+    """Draft changes to a ChatGPT Ads campaign: name, budget, dates, locations, platforms, tracking, conversion events.
+
+    Only the fields passed change. The preview shows each field from → to in
+    the account currency. Location and audience targeting is replaced as a
+    whole (the preview lists the full new set; custom audiences are kept).
+    The daily budget (or a lifetime budget's daily equivalent) is capped by
+    max_daily_budget; raising it by more than half needs a double
+    confirmation. OpenAI allows lifetime → daily budgets but not the
+    reverse, and never changes bidding_type. The returned plan_id is applied
+    with confirm_and_apply, which refuses if any changed field was edited in
+    Ads Manager after the preview.
+
+    Args:
+        ad_account_id: ChatGPT ad account id whose key to use; empty uses the default key.
+        campaign_id: Campaign id (cmpn_...).
+        name: New name (3–1000 characters).
+        daily_budget: New daily budget in the account currency.
+        lifetime_budget: New lifetime budget (only for campaigns that already have one).
+        start_date: New first day, YYYY-MM-DD (account time zone).
+        end_date: New last day, YYYY-MM-DD; the campaign stops at the end of that day.
+        location_ids: Full new list of included location ids (search_chatgpt_locations).
+        countries: Full new list of included countries as ISO codes, instead of location_ids.
+        excluded_location_ids: Full new list of excluded location ids.
+        excluded_countries: Full new list of excluded countries.
+        platforms: Full new list among android_app, android_web, desktop_web, ios_app, ios_web, web.
+        query_string_template: Click tracking appended to landing pages, e.g.
+            "utm_source=chatgpt&utm_medium=cpc&utm_campaign={campaign_id}&utm_content={ad_id}".
+        conversion_event_setting_ids: Full new list of attached conversion events (ces_...);
+            not for conversion-optimized campaigns.
+        clear_fields: Fields to remove: start_date, end_date, platforms,
+            excluded_locations, query_string_template.
+    """
+    from adloop.chatgpt_ads.write import update_chatgpt_campaign as _impl
+
+    return _impl(
+        current_config(), ad_account_id=ad_account_id, campaign_id=campaign_id, name=name,
+        daily_budget=daily_budget, lifetime_budget=lifetime_budget, start_date=start_date,
+        end_date=end_date, location_ids=location_ids, countries=countries,
+        excluded_location_ids=excluded_location_ids, excluded_countries=excluded_countries,
+        platforms=platforms, query_string_template=query_string_template,
+        conversion_event_setting_ids=conversion_event_setting_ids, clear_fields=clear_fields,
+    )
+
+
+@_tool(title="Draft ChatGPT Ads ad group changes", annotations=_WRITE, tags={"chatgpt_ads"})
+@_safe
+def update_chatgpt_ad_group(
+    ad_account_id: str = "",
+    ad_group_id: str = "",
+    name: str = "",
+    strategy: str = "",
+    max_bid: float | None = None,
+    context_hints: _StrListOpt = None,
+    add_context_hints: _StrListOpt = None,
+    remove_context_hints: _StrListOpt = None,
+) -> dict:
+    """Draft changes to a ChatGPT Ads ad group: name, bid strategy and max bid, context hints.
+
+    Strategies follow the campaign's bidding type: impressions → fixed_bid;
+    clicks → fixed_bid or maximize_clicks; conversions → fixed_bid or
+    maximize_conversions (automatic strategies need a daily campaign budget
+    and drop audience bid multipliers). A fixed-bid raise is capped by
+    max_bid_increase_pct. Context hints are replaced as a whole, or changed
+    with add/remove lists; the preview lists what is added and removed.
+    The returned plan_id is applied with confirm_and_apply, which refuses
+    if a changed field was edited after the preview.
+
+    Args:
+        ad_account_id: ChatGPT ad account id whose key to use; empty uses the default key.
+        ad_group_id: Ad group id (adgrp_...).
+        name: New name (3–1000 characters).
+        strategy: fixed_bid, maximize_clicks or maximize_conversions.
+        max_bid: Fixed bid in the account currency: per click, per impression,
+            or the target cost per conversion on conversion campaigns.
+        context_hints: Full new list of context hints (up to 2,000).
+        add_context_hints: Hints to add to the current list.
+        remove_context_hints: Hints to remove from the current list.
+    """
+    from adloop.chatgpt_ads.write import update_chatgpt_ad_group as _impl
+
+    return _impl(
+        current_config(), ad_account_id=ad_account_id, ad_group_id=ad_group_id, name=name,
+        strategy=strategy, max_bid=max_bid, context_hints=context_hints,
+        add_context_hints=add_context_hints, remove_context_hints=remove_context_hints,
+    )
+
+
+@_tool(title="Draft ChatGPT Ads ad changes", annotations=_WRITE, tags={"chatgpt_ads"})
+@_safe
+def update_chatgpt_ad(
+    ad_account_id: str = "",
+    ad_id: str = "",
+    name: str = "",
+    title: str = "",
+    body: str = "",
+    target_url: str = "",
+    image_url: str = "",
+    image_path: str = "",
+) -> dict:
+    """Draft changes to a ChatGPT Ads chat-card ad: internal name, title, body, landing page or image.
+
+    Copy, landing page or image edits submit a new version for OpenAI's
+    review; the ad serves again once approved. The landing page is checked
+    for reachability; a new image is uploaded at apply. Multi-image ads keep
+    their images. The returned plan_id is applied with confirm_and_apply.
+
+    Args:
+        ad_account_id: ChatGPT ad account id whose key to use; empty uses the default key.
+        ad_id: Ad id (ad_...).
+        name: New internal name (not shown to users).
+        title: New title (3–50 characters).
+        body: New body text (up to 100 characters).
+        target_url: New landing page (http/https, reachable).
+        image_url: Public JPEG/PNG/WebP link for a new image (at least 640×640).
+        image_path: Local image file instead of image_url (self-hosted only).
+    """
+    from adloop.chatgpt_ads.write import update_chatgpt_ad as _impl
+
+    return _impl(
+        current_config(), ad_account_id=ad_account_id, ad_id=ad_id, name=name, title=title,
+        body=body, target_url=target_url, image_url=image_url, image_path=image_path,
+    )
+
+
+@_tool(title="Draft a ChatGPT Ads campaign", annotations=_WRITE, tags={"chatgpt_ads"})
+@_safe
+def draft_chatgpt_campaign(
+    ad_account_id: str = "",
+    name: str = "",
+    bidding_type: str = "clicks",
+    daily_budget: float = 0.0,
+    lifetime_budget: float = 0.0,
+    location_ids: _StrListOpt = None,
+    countries: _StrListOpt = None,
+    excluded_location_ids: _StrListOpt = None,
+    platforms: _StrListOpt = None,
+    start_date: str = "",
+    end_date: str = "",
+    query_string_template: str = "",
+    conversion_event_setting_ids: _StrListOpt = None,
+    description: str = "",
+) -> dict:
+    """Draft a new ChatGPT Ads campaign, created PAUSED (preview only; nothing is created yet).
+
+    Requires a budget (daily, or lifetime with an end date; capped by
+    max_daily_budget) and location targeting. Without a tracking template
+    the campaign gets utm_source=chatgpt&utm_medium=cpc plus campaign and
+    ad ids, so Google Analytics can tell its clicks from unpaid ChatGPT
+    referrals. Conversion bidding needs exactly one active standard event
+    setting. The returned plan_id is applied with confirm_and_apply; the
+    apply sends an idempotency key, so a retry cannot create a duplicate.
+
+    Args:
+        ad_account_id: ChatGPT ad account id whose key to use; empty uses the default key.
+        name: Campaign name (3–1000 characters).
+        bidding_type: clicks (default), conversions or impressions. Cannot change later.
+        daily_budget: Daily budget in the account currency.
+        lifetime_budget: Lifetime budget instead of daily (needs end_date).
+        location_ids: Included location ids (search_chatgpt_locations).
+        countries: Included countries as ISO codes, instead of location_ids.
+        excluded_location_ids: Excluded location ids.
+        platforms: Limit to android_app, android_web, desktop_web, ios_app, ios_web or web.
+        start_date: First day, YYYY-MM-DD; empty starts when enabled.
+        end_date: Last day, YYYY-MM-DD.
+        query_string_template: Click tracking template; empty uses the default above.
+        conversion_event_setting_ids: Conversion events to attach (ces_...).
+        description: Optional internal description.
+    """
+    from adloop.chatgpt_ads.write import draft_chatgpt_campaign as _impl
+
+    return _impl(
+        current_config(), ad_account_id=ad_account_id, name=name, bidding_type=bidding_type,
+        daily_budget=daily_budget, lifetime_budget=lifetime_budget, location_ids=location_ids,
+        countries=countries, excluded_location_ids=excluded_location_ids, platforms=platforms,
+        start_date=start_date, end_date=end_date, query_string_template=query_string_template,
+        conversion_event_setting_ids=conversion_event_setting_ids, description=description,
+    )
+
+
+@_tool(title="Draft a ChatGPT Ads ad group", annotations=_WRITE, tags={"chatgpt_ads"})
+@_safe
+def draft_chatgpt_ad_group(
+    ad_account_id: str = "",
+    campaign_id: str = "",
+    name: str = "",
+    context_hints: _StrListOpt = None,
+    strategy: str = "",
+    max_bid: float | None = None,
+) -> dict:
+    """Draft a new ad group in a ChatGPT Ads campaign, created PAUSED (preview only).
+
+    Without a strategy, a clicks or conversions campaign with a daily budget
+    gets automatic bidding (maximize_clicks / maximize_conversions) unless
+    max_bid is given; impression campaigns need a fixed max_bid. The
+    returned plan_id is applied with confirm_and_apply.
+
+    Args:
+        ad_account_id: ChatGPT ad account id whose key to use; empty uses the default key.
+        campaign_id: Parent campaign id (cmpn_...).
+        name: Ad group name (3–1000 characters).
+        context_hints: Phrases describing conversations the ads fit (up to 2,000); not keywords.
+        strategy: fixed_bid, maximize_clicks or maximize_conversions.
+        max_bid: Fixed bid in the account currency.
+    """
+    from adloop.chatgpt_ads.write import draft_chatgpt_ad_group as _impl
+
+    return _impl(
+        current_config(), ad_account_id=ad_account_id, campaign_id=campaign_id, name=name,
+        context_hints=context_hints, strategy=strategy, max_bid=max_bid,
+    )
+
+
+@_tool(title="Draft a ChatGPT Ads ad", annotations=_WRITE, tags={"chatgpt_ads"})
+@_safe
+def draft_chatgpt_ad(
+    ad_account_id: str = "",
+    ad_group_id: str = "",
+    name: str = "",
+    title: str = "",
+    body: str = "",
+    target_url: str = "",
+    image_url: str = "",
+    image_path: str = "",
+    file_id: str = "",
+) -> dict:
+    """Draft a new ChatGPT Ads chat-card ad, created PAUSED (preview only).
+
+    Checks the copy limits (title 3–50, body up to 100 characters), that the
+    landing page is reachable and that the image is a JPEG, PNG or WebP.
+    The image is uploaded at apply; file_id reuses an image already in the
+    account. Every new ad goes through OpenAI's review. The returned plan_id
+    is applied with confirm_and_apply.
+
+    Args:
+        ad_account_id: ChatGPT ad account id whose key to use; empty uses the default key.
+        ad_group_id: Parent ad group id (adgrp_...).
+        name: Internal name; empty uses the title.
+        title: Card title (3–50 characters).
+        body: Card text (up to 100 characters).
+        target_url: Landing page (http/https, reachable).
+        image_url: Public JPEG/PNG/WebP link (at least 640×640).
+        image_path: Local image file instead (self-hosted only).
+        file_id: An image already uploaded to the account (file_...).
+    """
+    from adloop.chatgpt_ads.write import draft_chatgpt_ad as _impl
+
+    return _impl(
+        current_config(), ad_account_id=ad_account_id, ad_group_id=ad_group_id, name=name,
+        title=title, body=body, target_url=target_url, image_url=image_url,
+        image_path=image_path, file_id=file_id,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Microsoft Advertising Tools
+# ---------------------------------------------------------------------------
+# Fourth ad platform (REST API v13). ``ad_account_id`` falls back to
+# microsoft_ads.ad_account_id; the CustomerId header comes from
+# microsoft_ads.customer_id or the account's manager.
+
+
+@_tool(title="List Microsoft Advertising accounts", annotations=_READONLY, tags={"microsoft_ads"})
+@_safe
+def list_microsoft_ads_accounts() -> dict:
+    """List the Microsoft Advertising (Bing) ad accounts the signed-in user can reach.
+
+    Returns the user, their customers (manager accounts) with roles, and per
+    ad account the ad_account_id, customer_id, name, number, currency, time
+    zone and status that the other Microsoft tools take.
+    """
+    from adloop.microsoft_ads.read import list_microsoft_ads_accounts as _impl
+
+    return _impl(current_config())
+
+
+@_tool(title="Microsoft Advertising campaigns", annotations=_READONLY, tags={"microsoft_ads"})
+@_safe
+def get_microsoft_campaigns(ad_account_id: str = "", include_targeting: bool = True) -> dict:
+    """List Microsoft Advertising campaigns with status, daily budget, bidding, languages and location targeting.
+
+    Location targeting lists the included and excluded locations and the
+    location intent (people in the area, or also people searching about it).
+    Insights flag an inactive account, budget-paused or suspended campaigns,
+    campaigns without locations, intent that reaches beyond the area, and
+    shared budgets.
+
+    Args:
+        ad_account_id: Microsoft ad account id (from list_microsoft_ads_accounts).
+            Empty uses microsoft_ads.ad_account_id from the config.
+        include_targeting: Read each campaign's location criteria (three
+            calls per campaign); default true.
+    """
+    from adloop.microsoft_ads.read import get_microsoft_campaigns as _impl
+
+    return _impl(current_config(), ad_account_id=ad_account_id, include_targeting=include_targeting)
+
+
+@_tool(title="Microsoft Advertising ad groups", annotations=_READONLY, tags={"microsoft_ads"})
+@_safe
+def get_microsoft_ad_groups(ad_account_id: str = "", campaign_id: str = "") -> dict:
+    """List Microsoft Advertising ad groups with bid, network, language, dates and campaign status.
+
+    Insights flag ad groups that also run on syndicated search partners,
+    ad groups that can show on the Microsoft Audience Network, and expired
+    ad groups.
+
+    Args:
+        ad_account_id: Microsoft ad account id. Empty uses the config default.
+        campaign_id: Campaign id (from get_microsoft_campaigns); empty means
+            every campaign.
+    """
+    from adloop.microsoft_ads.read import get_microsoft_ad_groups as _impl
+
+    return _impl(current_config(), ad_account_id=ad_account_id, campaign_id=campaign_id)
+
+
+@_tool(title="Microsoft Advertising keywords", annotations=_READONLY, tags={"microsoft_ads"})
+@_safe
+def get_microsoft_keywords(ad_account_id: str = "", campaign_id: str = "", ad_group_id: str = "") -> dict:
+    """List Microsoft Advertising keywords with match type, bid, status and editorial review, plus the status of their ad group and campaign.
+
+    Insights flag disapproved keywords and active broad-match keywords in
+    manual-bid campaigns.
+
+    Args:
+        ad_account_id: Microsoft ad account id. Empty uses the config default.
+        campaign_id: Limit to one campaign; empty means every campaign.
+        ad_group_id: Limit to one ad group; empty means every ad group.
+    """
+    from adloop.microsoft_ads.read import get_microsoft_keywords as _impl
+
+    return _impl(current_config(), ad_account_id=ad_account_id, campaign_id=campaign_id,
+                 ad_group_id=ad_group_id)
+
+
+@_tool(title="Microsoft Advertising ads", annotations=_READONLY, tags={"microsoft_ads"})
+@_safe
+def get_microsoft_ads(ad_account_id: str = "", campaign_id: str = "", ad_group_id: str = "") -> dict:
+    """List Microsoft Advertising ads with headlines, descriptions, paths, final URLs, status and editorial review.
+
+    Insights flag disapproved ads and ad groups without an active ad.
+
+    Args:
+        ad_account_id: Microsoft ad account id. Empty uses the config default.
+        campaign_id: Limit to one campaign; empty means every campaign.
+        ad_group_id: Limit to one ad group; empty means every ad group.
+    """
+    from adloop.microsoft_ads.read import get_microsoft_ads as _impl
+
+    return _impl(current_config(), ad_account_id=ad_account_id, campaign_id=campaign_id,
+                 ad_group_id=ad_group_id)
+
+
+@_tool(title="Microsoft Advertising performance", annotations=_READONLY, tags={"microsoft_ads"})
+@_safe
+def get_microsoft_performance(
+    ad_account_id: str = "",
+    level: str = "campaign",
+    date_range_start: str = "",
+    date_range_end: str = "",
+    breakdown: str = "",
+    campaign_id: str = "",
+    compact: bool = False,
+) -> dict:
+    """Microsoft Advertising performance: spend, impressions, clicks, CTR, CPC, conversions, CPA, revenue, impression share.
+
+    Rows per entity for the chosen level with the status of each level,
+    totals and insights (zero-conversion spenders, converters losing
+    impressions to budget, spend under paused levels). Campaign and ad
+    group rows without a breakdown include impression share and the share
+    lost to budget and to rank. Built from a Microsoft report, which takes a
+    few seconds.
+
+    Args:
+        ad_account_id: Microsoft ad account id. Empty uses the config default.
+        level: "account", "campaign" (default), "ad_group", "keyword" or "ad".
+        date_range_start: First day, YYYY-MM-DD, account time zone. Empty
+            means 29 days before date_range_end.
+        date_range_end: Last day (inclusive). Empty means yesterday.
+        breakdown: Optional "date" (daily rows) or "device".
+        campaign_id: Limit to one campaign; empty means the whole account.
+        compact: Totals, top 10 rows by spend and zero-conversion spenders
+            instead of every row.
+    """
+    from adloop.microsoft_ads.read import get_microsoft_performance as _impl
+
+    return _impl(current_config(), ad_account_id=ad_account_id, level=level,
+                 date_range_start=date_range_start, date_range_end=date_range_end,
+                 breakdown=breakdown, campaign_id=campaign_id, compact=compact)
+
+
+@_tool(title="Microsoft Advertising search terms", annotations=_READONLY, tags={"microsoft_ads"})
+@_safe
+def get_microsoft_search_terms(
+    ad_account_id: str = "",
+    date_range_start: str = "",
+    date_range_end: str = "",
+    campaign_id: str = "",
+    min_clicks: int = 2,
+    compact: bool = False,
+) -> dict:
+    """Microsoft Advertising search terms: what people typed, the keyword and match type it matched, clicks, spend and conversions.
+
+    Insights name terms with clicks and no conversion (negative keyword
+    candidates) and exact/phrase keywords matching broadly as close
+    variants. compact returns the top 25 terms by spend, the waste
+    candidates and the top converters.
+
+    Args:
+        ad_account_id: Microsoft ad account id. Empty uses the config default.
+        date_range_start: First day, YYYY-MM-DD. Empty means 29 days before
+            date_range_end.
+        date_range_end: Last day (inclusive). Empty means yesterday.
+        campaign_id: Limit to one campaign; empty means the whole account.
+        min_clicks: Clicks from which a term without conversions counts as a
+            waste candidate (default 2).
+        compact: Summary instead of every term.
+    """
+    from adloop.microsoft_ads.read import get_microsoft_search_terms as _impl
+
+    return _impl(current_config(), ad_account_id=ad_account_id, date_range_start=date_range_start,
+                 date_range_end=date_range_end, campaign_id=campaign_id, min_clicks=min_clicks,
+                 compact=compact)
+
+
+@_tool(title="Microsoft Advertising location report", annotations=_READONLY, tags={"microsoft_ads"})
+@_safe
+def get_microsoft_location_performance(
+    ad_account_id: str = "",
+    date_range_start: str = "",
+    date_range_end: str = "",
+    campaign_id: str = "",
+    group_by: str = "city",
+) -> dict:
+    """Where Microsoft Advertising clicks and spend came from, split into people physically there and people searching about the place.
+
+    Rows per location with impressions, clicks, spend and conversions, and
+    the share of spend from 'location of interest' traffic (people elsewhere
+    searching about the area), which a local service business usually does
+    not want.
+
+    Args:
+        ad_account_id: Microsoft ad account id. Empty uses the config default.
+        date_range_start: First day, YYYY-MM-DD. Empty means 29 days before
+            date_range_end.
+        date_range_end: Last day (inclusive). Empty means yesterday.
+        campaign_id: Limit to one campaign; empty means the whole account.
+        group_by: "city" (default), "metro", "state", "postal_code" or
+            "most_specific".
+    """
+    from adloop.microsoft_ads.read import get_microsoft_location_performance as _impl
+
+    return _impl(current_config(), ad_account_id=ad_account_id, date_range_start=date_range_start,
+                 date_range_end=date_range_end, campaign_id=campaign_id, group_by=group_by)
+
+
+@_tool(title="Microsoft Advertising conversion setup audit", annotations=_READONLY, tags={"microsoft_ads"})
+@_safe
+def get_microsoft_conversion_setup(
+    ad_account_id: str = "",
+    date_range_start: str = "",
+    date_range_end: str = "",
+    min_clicks: int = 30,
+) -> dict:
+    """Audit Microsoft Advertising conversion tracking: UET tags, conversion goals, campaign goals and conversions against clicks.
+
+    Returns a verdict (ok, needs attention, broken) with checks[]: a UET tag
+    exists and is active; active goals exist, record conversions and count in
+    Conversions (not only All conversions); campaign-level goals; campaigns
+    with many clicks and no conversion. Also returns the tags, goals and
+    per-campaign clicks and conversions.
+
+    Args:
+        ad_account_id: Microsoft ad account id. Empty uses the config default.
+        date_range_start: First day of the activity window, YYYY-MM-DD.
+        date_range_end: Last day (inclusive). Empty means yesterday.
+        min_clicks: Clicks from which a campaign without conversions is
+            flagged (default 30).
+    """
+    from adloop.microsoft_ads.read import get_microsoft_conversion_setup as _impl
+
+    return _impl(current_config(), ad_account_id=ad_account_id, date_range_start=date_range_start,
+                 date_range_end=date_range_end, min_clicks=min_clicks)
+
+
+@_tool(title="Draft a Microsoft Advertising campaign budget", annotations=_WRITE, tags={"microsoft_ads"})
+@_safe
+def update_microsoft_campaign_budget(ad_account_id: str = "", campaign_id: str = "", daily_budget: float = 0.0) -> dict:
+    """Draft a new daily budget for a Microsoft Advertising campaign (preview only; nothing changes yet).
+
+    Shows the current and new budget and the monthly maximum (30.4 × daily).
+    Refuses campaigns on a shared budget and amounts above the configured
+    safety cap (max_daily_budget). The returned plan_id is applied with
+    confirm_and_apply; a dry run re-reads the campaign and sends nothing, and
+    the apply refuses if the budget changed since the preview.
+
+    Args:
+        ad_account_id: Microsoft ad account id. Empty uses the config default.
+        campaign_id: Campaign id (from get_microsoft_campaigns).
+        daily_budget: New daily budget in the account currency.
+    """
+    from adloop.microsoft_ads.write import draft_microsoft_campaign_budget as _impl
+
+    return _impl(current_config(), ad_account_id=ad_account_id, campaign_id=campaign_id,
+                 daily_budget=daily_budget)
+
+
+@_tool(title="Draft pausing a Microsoft Advertising entity", annotations=_WRITE, tags={"microsoft_ads"})
+@_safe
+def pause_microsoft_entity(ad_account_id: str = "", entity_type: str = "", entity_id: str = "", parent_id: str = "") -> dict:
+    """Draft pausing a Microsoft Advertising campaign, ad group, keyword or ad (preview only).
+
+    The preview names the entity, its campaign and ad group, and its current
+    status. The returned plan_id is applied with confirm_and_apply, which
+    refuses if the status changed since the preview.
+
+    Args:
+        ad_account_id: Microsoft ad account id. Empty uses the config default.
+        entity_type: "campaign", "ad_group", "keyword" or "ad".
+        entity_id: The entity's id (from the read tools).
+        parent_id: Optional: the campaign id of an ad group, or the ad group
+            id of a keyword or ad, to find it faster.
+    """
+    from adloop.microsoft_ads.write import draft_microsoft_status as _impl
+
+    return _impl(current_config(), action="pause", ad_account_id=ad_account_id,
+                 entity_type=entity_type, entity_id=entity_id, parent_id=parent_id)
+
+
+@_tool(title="Draft enabling a Microsoft Advertising entity", annotations=_WRITE, tags={"microsoft_ads"})
+@_safe
+def enable_microsoft_entity(ad_account_id: str = "", entity_type: str = "", entity_id: str = "", parent_id: str = "") -> dict:
+    """Draft enabling a paused Microsoft Advertising campaign, ad group, keyword or ad (preview only).
+
+    Warnings name a paused parent or an editorial rejection that would still
+    keep it from serving. The returned plan_id is applied with
+    confirm_and_apply, which refuses if the status changed since the preview.
+
+    Args:
+        ad_account_id: Microsoft ad account id. Empty uses the config default.
+        entity_type: "campaign", "ad_group", "keyword" or "ad".
+        entity_id: The entity's id (from the read tools).
+        parent_id: Optional: the campaign id of an ad group, or the ad group
+            id of a keyword or ad, to find it faster.
+    """
+    from adloop.microsoft_ads.write import draft_microsoft_status as _impl
+
+    return _impl(current_config(), action="enable", ad_account_id=ad_account_id,
+                 entity_type=entity_type, entity_id=entity_id, parent_id=parent_id)
+
+
+@_tool(title="Search Microsoft Advertising locations", annotations=_READONLY, tags={"microsoft_ads"})
+@_safe
+def search_microsoft_locations(ad_account_id: str = "", query: str = "", location_type: str = "", limit: int = 20) -> dict:
+    """Find Microsoft Advertising location ids (countries, states, metros, cities, postal codes) by name.
+
+    Reads Microsoft's geographic location file (cached until Microsoft
+    publishes a new version) and returns location_id, name, type and
+    status, the ids the targeting and new-campaign tools take.
+
+    Args:
+        ad_account_id: Microsoft ad account id. Empty uses the config default.
+        query: Name or postal code, e.g. "Chicago" or "60601".
+        location_type: Optional filter such as "City", "Metro", "State" or "PostalCode".
+        limit: Most results (1–100).
+    """
+    from adloop.microsoft_ads.read import search_microsoft_locations as _impl
+
+    return _impl(current_config(), ad_account_id=ad_account_id, query=query, location_type=location_type, limit=limit)
+
+
+@_tool(title="Microsoft Advertising negative keywords", annotations=_READONLY, tags={"microsoft_ads"})
+@_safe
+def get_microsoft_negative_keywords(ad_account_id: str = "", campaign_id: str = "") -> dict:
+    """List Microsoft Advertising negative keywords: those directly on campaigns and the shared negative keyword lists.
+
+    Each list shows its keywords, the campaigns it is attached to and a
+    remove_id per keyword; direct negatives also carry a remove_id.
+    Insights flag direct negatives and lists attached to nothing.
+
+    Args:
+        ad_account_id: Microsoft ad account id. Empty uses the config default.
+        campaign_id: Limit to one campaign and the lists attached to it.
+    """
+    from adloop.microsoft_ads.manage import get_microsoft_negative_keywords as _impl
+
+    return _impl(current_config(), ad_account_id=ad_account_id, campaign_id=campaign_id)
+
+
+@_tool(title="Microsoft Advertising ad extensions", annotations=_READONLY, tags={"microsoft_ads"})
+@_safe
+def get_microsoft_ad_extensions(ad_account_id: str = "", campaign_id: str = "") -> dict:
+    """List sitelinks, callouts, structured snippets, call and image extensions on Microsoft Advertising ad groups, campaigns and the account.
+
+    Each row has the level (account, campaign or ad_group), type, content,
+    final URLs, editorial status and the remove_id that unlinks it. Image
+    rows add alt_text, display_text, layouts, media_ids and images: each
+    image's media type, size and a url that opens the picture, so a photo
+    can be checked before its link is removed. Insights flag campaigns
+    without sitelinks, disapproved extensions and accounts without image
+    extensions.
+
+    Args:
+        ad_account_id: Microsoft ad account id. Empty uses the config default.
+        campaign_id: Limit to one campaign.
+    """
+    from adloop.microsoft_ads.manage import get_microsoft_ad_extensions as _impl
+
+    return _impl(current_config(), ad_account_id=ad_account_id, campaign_id=campaign_id)
+
+
+@_tool(title="Draft Microsoft Advertising campaign settings", annotations=_WRITE, tags={"microsoft_ads"})
+@_safe
+def update_microsoft_campaign(
+    ad_account_id: str = "",
+    campaign_id: str = "",
+    name: str = "",
+    bidding_strategy: str = "",
+    target_cpa: float | None = None,
+    max_cpc: float | None = None,
+    tracking_url_template: str | None = None,
+    final_url_suffix: str | None = None,
+) -> dict:
+    """Draft Microsoft Advertising campaign setting changes: name, bid strategy and targets, tracking template, final URL suffix.
+
+    Bid strategies: ManualCpc, EnhancedCpc, MaxClicks, MaxConversions (with
+    an optional target_cpa; TargetCpa is accepted and becomes MaxConversions,
+    as Microsoft now does). Moving to manual bidding is refused while the
+    campaign has active broad-match keywords. The daily budget has its own
+    tool, update_microsoft_campaign_budget. The returned plan_id is applied
+    with confirm_and_apply, which refuses if a changed setting was edited
+    after the preview.
+
+    Args:
+        ad_account_id: Microsoft ad account id. Empty uses the config default.
+        campaign_id: Campaign id.
+        name: New name (at most 128 characters, unique in the account).
+        bidding_strategy: ManualCpc, EnhancedCpc, MaxClicks or MaxConversions.
+        target_cpa: Target cost per conversion for MaxConversions.
+        max_cpc: Maximum CPC for MaxClicks / MaxConversions (only changes an existing cap).
+        tracking_url_template: New template ({lpurl}...); "" removes it.
+        final_url_suffix: New suffix (e.g. utm parameters); "" removes it.
+    """
+    from adloop.microsoft_ads.manage import update_microsoft_campaign as _impl
+
+    return _impl(current_config(), ad_account_id=ad_account_id, campaign_id=campaign_id, name=name,
+                 bidding_strategy=bidding_strategy, target_cpa=target_cpa, max_cpc=max_cpc,
+                 tracking_url_template=tracking_url_template, final_url_suffix=final_url_suffix)
+
+
+@_tool(title="Draft Microsoft Advertising targeting changes", annotations=_WRITE, tags={"microsoft_ads"})
+@_safe
+def update_microsoft_campaign_targeting(
+    ad_account_id: str = "",
+    campaign_id: str = "",
+    location_ids: _StrListOpt = None,
+    excluded_location_ids: _StrListOpt = None,
+    location_intent: str = "",
+    ad_schedule: _DictListOpt = None,
+) -> dict:
+    """Draft Microsoft Advertising campaign targeting: included and excluded locations, location intent, ad schedule.
+
+    Location lists are the full new sets; the preview shows what is added
+    and removed. location_intent PeopleIn keeps ads to people in the
+    locations. ad_schedule replaces every window ([] serves at all hours);
+    the hours follow the account time zone, or each searcher's own when the
+    campaign uses AdScheduleUseSearcherTimeZone (the preview says which), and
+    a campaign's first schedule needs a double confirmation because it
+    switches all other hours off.
+    The returned plan_id is applied with confirm_and_apply, which refuses if
+    the targeting changed after the preview.
+
+    Args:
+        ad_account_id: Microsoft ad account id. Empty uses the config default.
+        campaign_id: Campaign id.
+        location_ids: Full new list of included location ids (search_microsoft_locations); cannot be empty.
+        excluded_location_ids: Full new list of excluded location ids.
+        location_intent: PeopleIn or PeopleInOrSearchingForOrViewingPages.
+        ad_schedule: Windows like {"day_of_week": "Monday", "start_hour": 8, "end_hour": 17,
+            "start_minute": 0, "end_minute": 0} (minutes 0/15/30/45).
+    """
+    from adloop.microsoft_ads.manage import update_microsoft_campaign_targeting as _impl
+
+    return _impl(current_config(), ad_account_id=ad_account_id, campaign_id=campaign_id, location_ids=location_ids,
+                 excluded_location_ids=excluded_location_ids, location_intent=location_intent, ad_schedule=ad_schedule)
+
+
+@_tool(title="Draft a Microsoft Advertising campaign", annotations=_WRITE, tags={"microsoft_ads"})
+@_safe
+def draft_microsoft_campaign(
+    ad_account_id: str = "",
+    name: str = "",
+    daily_budget: float = 0.0,
+    bidding_strategy: str = "MaxConversions",
+    target_cpa: float | None = None,
+    languages: _StrListOpt = None,
+    location_ids: _StrListOpt = None,
+    excluded_location_ids: _StrListOpt = None,
+    location_intent: str = "PeopleIn",
+    tracking_url_template: str = "",
+    final_url_suffix: str = "",
+) -> dict:
+    """Draft a new Microsoft Advertising Search campaign, created PAUSED with its locations (preview only).
+
+    Requires a daily budget (capped by max_daily_budget), languages and
+    included locations. Defaults to MaxConversions and PeopleIn; warns when
+    no conversion goal counts toward Conversions. The apply creates the
+    campaign, then its location criteria, and names what was created if the
+    second step fails. The returned plan_id is applied with confirm_and_apply.
+
+    Args:
+        ad_account_id: Microsoft ad account id. Empty uses the config default.
+        name: Campaign name (unique, at most 128 characters).
+        daily_budget: Daily budget in the account currency.
+        bidding_strategy: MaxConversions (default), MaxClicks, EnhancedCpc or ManualCpc.
+        target_cpa: Optional target cost per conversion.
+        languages: Ad languages, e.g. ["English"].
+        location_ids: Included location ids (search_microsoft_locations).
+        excluded_location_ids: Excluded location ids.
+        location_intent: PeopleIn (default) or PeopleInOrSearchingForOrViewingPages.
+        tracking_url_template: Optional tracking template.
+        final_url_suffix: Optional final URL suffix (e.g. utm parameters).
+    """
+    from adloop.microsoft_ads.manage import draft_microsoft_campaign as _impl
+
+    return _impl(current_config(), ad_account_id=ad_account_id, name=name, daily_budget=daily_budget,
+                 bidding_strategy=bidding_strategy, target_cpa=target_cpa, languages=languages,
+                 location_ids=location_ids, excluded_location_ids=excluded_location_ids,
+                 location_intent=location_intent, tracking_url_template=tracking_url_template,
+                 final_url_suffix=final_url_suffix)
+
+
+@_tool(title="Draft a Microsoft Advertising ad group", annotations=_WRITE, tags={"microsoft_ads"})
+@_safe
+def draft_microsoft_ad_group(
+    ad_account_id: str = "",
+    campaign_id: str = "",
+    name: str = "",
+    cpc_bid: float | None = None,
+    network: str = "OwnedAndOperatedOnly",
+    keywords: _StrOrDictListOpt = None,
+) -> dict:
+    """Draft a new Microsoft Advertising ad group, optionally with keywords (preview only).
+
+    The ad group is created active but serves only once one of its ads (new
+    ads are paused) is enabled. Manual-bid campaigns need cpc_bid; broad
+    match is refused unless the campaign uses automated bidding. network
+    OwnedAndOperatedOnly (default) keeps ads off syndicated partner sites.
+    The returned plan_id is applied with confirm_and_apply.
+
+    Args:
+        ad_account_id: Microsoft ad account id. Empty uses the config default.
+        campaign_id: Parent campaign id.
+        name: Ad group name (unique in the campaign).
+        cpc_bid: Default max CPC in the account currency.
+        network: OwnedAndOperatedOnly or OwnedAndOperatedAndSyndicatedSearch.
+        keywords: Keywords as text or {"text", "match_type": Exact|Phrase|Broad, "bid"}; text defaults to Phrase.
+    """
+    from adloop.microsoft_ads.manage import draft_microsoft_ad_group as _impl
+
+    return _impl(current_config(), ad_account_id=ad_account_id, campaign_id=campaign_id, name=name,
+                 cpc_bid=cpc_bid, network=network, keywords=keywords)
+
+
+@_tool(title="Draft Microsoft Advertising ad group changes", annotations=_WRITE, tags={"microsoft_ads"})
+@_safe
+def update_microsoft_ad_group(
+    ad_account_id: str = "",
+    ad_group_id: str = "",
+    name: str = "",
+    cpc_bid: float | None = None,
+    network: str = "",
+    audience_ads_bid_adjustment: int | None = None,
+) -> dict:
+    """Draft Microsoft Advertising ad group changes: name, default bid, search network, Audience Network adjustment.
+
+    A bid raise is capped by max_bid_increase_pct. audience_ads_bid_adjustment
+    -100 keeps the ad group off the Microsoft Audience Network. The returned
+    plan_id is applied with confirm_and_apply, which refuses if a changed
+    setting was edited after the preview.
+
+    Args:
+        ad_account_id: Microsoft ad account id. Empty uses the config default.
+        ad_group_id: Ad group id.
+        name: New name.
+        cpc_bid: New default max CPC.
+        network: OwnedAndOperatedOnly or OwnedAndOperatedAndSyndicatedSearch.
+        audience_ads_bid_adjustment: -100 (off) to 900 percent.
+    """
+    from adloop.microsoft_ads.manage import update_microsoft_ad_group as _impl
+
+    return _impl(current_config(), ad_account_id=ad_account_id, ad_group_id=ad_group_id, name=name,
+                 cpc_bid=cpc_bid, network=network, audience_ads_bid_adjustment=audience_ads_bid_adjustment)
+
+
+@_tool(title="Draft Microsoft Advertising keywords", annotations=_WRITE, tags={"microsoft_ads"})
+@_safe
+def draft_microsoft_keywords(ad_account_id: str = "", ad_group_id: str = "", keywords: _StrOrDictListOpt = None) -> dict:
+    """Draft adding keywords to a Microsoft Advertising ad group (preview only).
+
+    Keywords already in the ad group are skipped; broad match is refused
+    unless the campaign uses automated bidding. The returned plan_id is
+    applied with confirm_and_apply.
+
+    Args:
+        ad_account_id: Microsoft ad account id. Empty uses the config default.
+        ad_group_id: Ad group id.
+        keywords: Text or {"text", "match_type": Exact|Phrase|Broad, "bid"}; text defaults to Phrase.
+    """
+    from adloop.microsoft_ads.manage import draft_microsoft_keywords as _impl
+
+    return _impl(current_config(), ad_account_id=ad_account_id, ad_group_id=ad_group_id, keywords=keywords)
+
+
+@_tool(title="Draft Microsoft Advertising keyword bids", annotations=_WRITE, tags={"microsoft_ads"})
+@_safe
+def update_microsoft_keyword_bids(ad_account_id: str = "", ad_group_id: str = "", bids: _DictListOpt = None) -> dict:
+    """Draft keyword bid changes in one Microsoft Advertising ad group (preview only).
+
+    Each raise is capped by max_bid_increase_pct against the keyword's
+    current bid (or the ad group default). A null bid removes the keyword's
+    own bid so the ad group default applies. The returned plan_id is applied
+    with confirm_and_apply, which refuses if a bid changed after the preview.
+
+    Args:
+        ad_account_id: Microsoft ad account id. Empty uses the config default.
+        ad_group_id: Ad group id.
+        bids: [{"keyword_id", "bid"}].
+    """
+    from adloop.microsoft_ads.manage import update_microsoft_keyword_bids as _impl
+
+    return _impl(current_config(), ad_account_id=ad_account_id, ad_group_id=ad_group_id, bids=bids)
+
+
+@_tool(title="Draft Microsoft Advertising negative keywords", annotations=_WRITE, tags={"microsoft_ads"})
+@_safe
+def add_microsoft_negative_keywords(
+    ad_account_id: str = "",
+    campaign_id: str = "",
+    ad_group_id: str = "",
+    keywords: _StrListOpt = None,
+    match_type: str = "Phrase",
+) -> dict:
+    """Draft negative keywords directly on one Microsoft Advertising campaign or ad group (preview only).
+
+    Negatives already there are skipped, and the preview names active
+    keywords they would block. A shared list (propose_microsoft_negative_keyword_list)
+    is the reusable alternative. The returned plan_id is applied with
+    confirm_and_apply.
+
+    Args:
+        ad_account_id: Microsoft ad account id. Empty uses the config default.
+        campaign_id: Campaign id (or ad_group_id, not both).
+        ad_group_id: Ad group id.
+        keywords: Negative keyword texts.
+        match_type: Phrase (default) or Exact.
+    """
+    from adloop.microsoft_ads.manage import add_microsoft_negative_keywords as _impl
+
+    return _impl(current_config(), ad_account_id=ad_account_id, campaign_id=campaign_id, ad_group_id=ad_group_id,
+                 keywords=keywords, match_type=match_type)
+
+
+@_tool(title="Draft a Microsoft Advertising negative keyword list", annotations=_WRITE, tags={"microsoft_ads"})
+@_safe
+def propose_microsoft_negative_keyword_list(
+    ad_account_id: str = "",
+    list_name: str = "",
+    keywords: _StrListOpt = None,
+    match_type: str = "Phrase",
+    campaign_ids: _StrListOpt = None,
+) -> dict:
+    """Draft a new shared Microsoft Advertising negative keyword list and attach it to campaigns (preview only).
+
+    Refuses a name that already exists (add_to_microsoft_negative_keyword_list
+    appends to it) and campaigns already at Microsoft's 20-list limit; the
+    preview names active keywords the negatives would block. The returned
+    plan_id is applied with confirm_and_apply.
+
+    Args:
+        ad_account_id: Microsoft ad account id. Empty uses the config default.
+        list_name: List name.
+        keywords: Negative keyword texts (up to 5,000).
+        match_type: Phrase (default) or Exact.
+        campaign_ids: Campaigns to attach the list to.
+    """
+    from adloop.microsoft_ads.manage import propose_microsoft_negative_keyword_list as _impl
+
+    return _impl(current_config(), ad_account_id=ad_account_id, list_name=list_name, keywords=keywords,
+                 match_type=match_type, campaign_ids=campaign_ids)
+
+
+@_tool(title="Draft adding to a Microsoft Advertising negative list", annotations=_WRITE, tags={"microsoft_ads"})
+@_safe
+def add_to_microsoft_negative_keyword_list(
+    ad_account_id: str = "", list_id: str = "", keywords: _StrListOpt = None, match_type: str = "Phrase",
+) -> dict:
+    """Draft appending negatives to an existing Microsoft Advertising negative keyword list (preview only).
+
+    Items already in the list are skipped; the preview names active
+    keywords in attached campaigns that the new negatives would block. The
+    returned plan_id is applied with confirm_and_apply.
+
+    Args:
+        ad_account_id: Microsoft ad account id. Empty uses the config default.
+        list_id: Shared list id (get_microsoft_negative_keywords).
+        keywords: Negative keyword texts.
+        match_type: Phrase (default) or Exact.
+    """
+    from adloop.microsoft_ads.manage import add_to_microsoft_negative_keyword_list as _impl
+
+    return _impl(current_config(), ad_account_id=ad_account_id, list_id=list_id, keywords=keywords, match_type=match_type)
+
+
+@_tool(title="Draft attaching a Microsoft Advertising negative list", annotations=_WRITE, tags={"microsoft_ads"})
+@_safe
+def attach_microsoft_negative_keyword_list(ad_account_id: str = "", list_id: str = "", campaign_ids: _StrListOpt = None) -> dict:
+    """Draft attaching a shared Microsoft Advertising negative keyword list to campaigns (preview only).
+
+    Campaigns already attached are skipped. The returned plan_id is applied
+    with confirm_and_apply.
+
+    Args:
+        ad_account_id: Microsoft ad account id. Empty uses the config default.
+        list_id: Shared list id.
+        campaign_ids: Campaign ids.
+    """
+    from adloop.microsoft_ads.manage import attach_microsoft_negative_keyword_list as _impl
+
+    return _impl(current_config(), ad_account_id=ad_account_id, list_id=list_id, campaign_ids=campaign_ids)
+
+
+@_tool(title="Draft detaching a Microsoft Advertising negative list", annotations=_WRITE, tags={"microsoft_ads"})
+@_safe
+def detach_microsoft_negative_keyword_list(ad_account_id: str = "", list_id: str = "", campaign_ids: _StrListOpt = None) -> dict:
+    """Draft detaching a shared Microsoft Advertising negative keyword list from campaigns; the list stays (preview only).
+
+    The returned plan_id is applied with confirm_and_apply.
+
+    Args:
+        ad_account_id: Microsoft ad account id. Empty uses the config default.
+        list_id: Shared list id.
+        campaign_ids: Campaign ids.
+    """
+    from adloop.microsoft_ads.manage import detach_microsoft_negative_keyword_list as _impl
+
+    return _impl(current_config(), ad_account_id=ad_account_id, list_id=list_id, campaign_ids=campaign_ids)
+
+
+@_tool(title="Draft a Microsoft Advertising responsive search ad", annotations=_WRITE, tags={"microsoft_ads"})
+@_safe
+def draft_microsoft_responsive_search_ad(
+    ad_account_id: str = "",
+    ad_group_id: str = "",
+    headlines: _StrOrDictListOpt = None,
+    descriptions: _StrOrDictListOpt = None,
+    final_url: str = "",
+    path1: str = "",
+    path2: str = "",
+) -> dict:
+    """Draft a Microsoft Advertising responsive search ad, created PAUSED (preview only).
+
+    Checks 3–15 headlines of at most 30 characters, 2–4 descriptions of at
+    most 90, display paths of at most 15, pin slots that stay fillable and a
+    reachable landing page. The returned plan_id is applied with
+    confirm_and_apply; the dry run refuses an identical ad already in the
+    ad group.
+
+    Args:
+        ad_account_id: Microsoft ad account id. Empty uses the config default.
+        ad_group_id: Ad group id.
+        headlines: Text or {"text", "pinned_field": HEADLINE_1|HEADLINE_2|HEADLINE_3}.
+        descriptions: Text or {"text", "pinned_field": DESCRIPTION_1|DESCRIPTION_2}.
+        final_url: Landing page.
+        path1: First display path.
+        path2: Second display path (needs path1).
+    """
+    from adloop.microsoft_ads.manage import draft_microsoft_responsive_search_ad as _impl
+
+    return _impl(current_config(), ad_account_id=ad_account_id, ad_group_id=ad_group_id, headlines=headlines,
+                 descriptions=descriptions, final_url=final_url, path1=path1, path2=path2)
+
+
+@_tool(title="Draft Microsoft Advertising responsive search ad changes", annotations=_WRITE, tags={"microsoft_ads"})
+@_safe
+def update_microsoft_responsive_search_ad(
+    ad_account_id: str = "",
+    ad_id: str = "",
+    headlines: _StrOrDictListOpt = None,
+    descriptions: _StrOrDictListOpt = None,
+    final_url: str = "",
+    path1: str | None = None,
+    path2: str | None = None,
+) -> dict:
+    """Draft changes to a Microsoft Advertising responsive search ad (preview only).
+
+    headlines or descriptions replace that whole list; paths "" remove
+    them. Edited ads go back to editorial review. The returned plan_id is
+    applied with confirm_and_apply, which refuses if the ad changed after
+    the preview.
+
+    Args:
+        ad_account_id: Microsoft ad account id. Empty uses the config default.
+        ad_id: Ad id.
+        headlines: Full new list (text or {"text", "pinned_field"}).
+        descriptions: Full new list.
+        final_url: New landing page.
+        path1: New first display path; "" removes it.
+        path2: New second display path; "" removes it.
+    """
+    from adloop.microsoft_ads.manage import update_microsoft_responsive_search_ad as _impl
+
+    return _impl(current_config(), ad_account_id=ad_account_id, ad_id=ad_id, headlines=headlines,
+                 descriptions=descriptions, final_url=final_url, path1=path1, path2=path2)
+
+
+@_tool(title="Draft Microsoft Advertising sitelinks", annotations=_WRITE, tags={"microsoft_ads"})
+@_safe
+def draft_microsoft_sitelinks(ad_account_id: str = "", campaign_id: str = "", scope: str = "", sitelinks: _DictListOpt = None) -> dict:
+    """Draft sitelinks for a Microsoft Advertising campaign or the account (preview only).
+
+    Link text is at most 25 characters with descriptions (35 without);
+    descriptions come in pairs of at most 35; every URL is checked.
+    Sitelinks already linked are skipped. The returned plan_id is applied
+    with confirm_and_apply.
+
+    Args:
+        ad_account_id: Microsoft ad account id. Empty uses the config default.
+        campaign_id: Campaign id (or scope="account").
+        scope: "account" links them to every campaign without its own.
+        sitelinks: [{"link_text", "final_url", "description1", "description2"}].
+    """
+    from adloop.microsoft_ads.manage import draft_microsoft_sitelinks as _impl
+
+    return _impl(current_config(), ad_account_id=ad_account_id, campaign_id=campaign_id, scope=scope, sitelinks=sitelinks)
+
+
+@_tool(title="Draft Microsoft Advertising callouts", annotations=_WRITE, tags={"microsoft_ads"})
+@_safe
+def draft_microsoft_callouts(ad_account_id: str = "", campaign_id: str = "", scope: str = "", callouts: _StrListOpt = None) -> dict:
+    """Draft callouts (at most 25 characters each) for a Microsoft Advertising campaign or the account (preview only).
+
+    Callouts already linked are skipped. The returned plan_id is applied
+    with confirm_and_apply.
+
+    Args:
+        ad_account_id: Microsoft ad account id. Empty uses the config default.
+        campaign_id: Campaign id (or scope="account").
+        scope: "account" links them account-wide.
+        callouts: Callout texts.
+    """
+    from adloop.microsoft_ads.manage import draft_microsoft_callouts as _impl
+
+    return _impl(current_config(), ad_account_id=ad_account_id, campaign_id=campaign_id, scope=scope, callouts=callouts)
+
+
+@_tool(title="Draft a Microsoft Advertising structured snippet", annotations=_WRITE, tags={"microsoft_ads"})
+@_safe
+def draft_microsoft_structured_snippet(
+    ad_account_id: str = "", campaign_id: str = "", scope: str = "", header: str = "", values: _StrListOpt = None,
+) -> dict:
+    """Draft a structured snippet (a header and 3–10 values) for a Microsoft Advertising campaign or the account (preview only).
+
+    The returned plan_id is applied with confirm_and_apply.
+
+    Args:
+        ad_account_id: Microsoft ad account id. Empty uses the config default.
+        campaign_id: Campaign id (or scope="account").
+        scope: "account" links it account-wide.
+        header: Microsoft header such as Services, Brands, Types.
+        values: 3–10 values of at most 25 characters.
+    """
+    from adloop.microsoft_ads.manage import draft_microsoft_structured_snippet as _impl
+
+    return _impl(current_config(), ad_account_id=ad_account_id, campaign_id=campaign_id, scope=scope, header=header, values=values)
+
+
+@_tool(title="Draft a Microsoft Advertising call extension", annotations=_WRITE, tags={"microsoft_ads"})
+@_safe
+def draft_microsoft_call_extension(ad_account_id: str = "", campaign_id: str = "", phone_number: str = "", country_code: str = "") -> dict:
+    """Draft a call extension (phone number shown with the ads) for one Microsoft Advertising campaign (preview only).
+
+    Microsoft allows one per campaign; a campaign that already has one is
+    refused. The returned plan_id is applied with confirm_and_apply.
+
+    Args:
+        ad_account_id: Microsoft ad account id. Empty uses the config default.
+        campaign_id: Campaign id.
+        phone_number: The number to show (usually a call-tracking number).
+        country_code: Two-letter country of the number, e.g. US.
+    """
+    from adloop.microsoft_ads.manage import draft_microsoft_call_extension as _impl
+
+    return _impl(current_config(), ad_account_id=ad_account_id, campaign_id=campaign_id, phone_number=phone_number,
+                 country_code=country_code)
+
+
+@_tool(title="Draft Microsoft Advertising image extensions", annotations=_WRITE, tags={"microsoft_ads"})
+@_safe
+def draft_microsoft_image_extension(
+    ad_account_id: str = "",
+    campaign_id: str = "",
+    ad_group_id: str = "",
+    scope: str = "",
+    image_paths: _StrList = [],  # noqa: B006
+    image_urls: _StrList = [],  # noqa: B006
+    upload_ids: _StrList = [],  # noqa: B006
+    alt_text: str = "",
+    display_text: str = "",
+    final_url: str = "",
+) -> dict:
+    """Draft image extensions (photos shown with Microsoft search ads) for a campaign, an ad group or the account (preview only).
+
+    One image extension per image, up to 10 images. Each image is checked
+    now against Microsoft's requirements: JPEG, PNG or non-animated GIF, at
+    most 5 MB, a 1.91:1 aspect ratio (e.g. 1200x628), at least 703x368 and
+    at most 2592 wide and 2048 high; a bad image is refused with the reason.
+    Applying uploads the images to the account's media library, creates the
+    extensions and links them; the dry run reads every image again and
+    refuses one that changed. Image extensions can also take the ads into
+    native placements on the Microsoft Audience Network. The returned
+    plan_id is applied with confirm_and_apply.
+
+    Args:
+        ad_account_id: Microsoft ad account id. Empty uses the config default.
+        campaign_id: Campaign id (or ad_group_id, or scope="account").
+        ad_group_id: Ad group id (from get_microsoft_ad_groups).
+        scope: "account" links them to the whole account.
+        image_paths: Local image files on the machine running AdLoop (not on
+            a hosted server).
+        image_urls: Public http(s) image URLs; private or internal addresses
+            are refused.
+        upload_ids: Ids of uploaded images (up_..., from upload_images or
+            list_uploads), for images without a public URL.
+        alt_text: Required, at most 35 characters: describes the image for
+            screen readers and shows on hover. Used for every image.
+        display_text: Optional caption (at most 35 characters) shown under each
+            image in the multi-image layout; passing it makes the extensions
+            eligible for that layout too.
+        final_url: Optional landing page for clicks on the image (checked);
+            empty uses the ad's own final URL.
+    """
+    from adloop.microsoft_ads.manage import draft_microsoft_image_extension as _impl
+
+    return _impl(current_config(), ad_account_id=ad_account_id, campaign_id=campaign_id, ad_group_id=ad_group_id,
+                 scope=scope, image_paths=image_paths, image_urls=image_urls, upload_ids=upload_ids,
+                 alt_text=alt_text, display_text=display_text, final_url=final_url)
+
+
+@_tool(title="Draft removing a Microsoft Advertising entity", annotations=_DESTRUCTIVE, tags={"microsoft_ads"})
+@_safe
+def remove_microsoft_entity(ad_account_id: str = "", entity_type: str = "", entity_id: str = "") -> dict:
+    """Draft deleting a Microsoft Advertising entity: irreversible, double confirmation (preview only).
+
+    Removes a campaign, ad group, ad or keyword by id, or (by the remove_id
+    the read tools return) a direct negative keyword, a negative list item,
+    a location or schedule criterion, or an extension link (account,
+    campaign or ad group, image extensions included). Pausing keeps
+    history and can be undone. The returned plan_id is applied with
+    confirm_and_apply.
+
+    Args:
+        ad_account_id: Microsoft ad account id. Empty uses the config default.
+        entity_type: campaign, ad_group, ad, keyword, negative_keyword,
+            negative_list_item, campaign_criterion or extension_association.
+        entity_id: The id, or the remove_id for the composite types.
+    """
+    from adloop.microsoft_ads.manage import remove_microsoft_entity as _impl
+
+    return _impl(current_config(), ad_account_id=ad_account_id, entity_type=entity_type, entity_id=entity_id)
+
+
+# ---------------------------------------------------------------------------
+# Roku Ads Tools (connected TV, Ads API beta; read-only)
+# ---------------------------------------------------------------------------
+# Every tool takes account_uid, which falls back to roku_ads.account_uid.
+
+
+@_tool(title="List Roku Ads accounts", annotations=_READONLY, tags={"roku_ads"})
+@_safe
+def list_roku_accounts() -> dict:
+    """List the Roku Ads organizations and ad accounts the signed-in app can read.
+
+    Returns per account the account_uid the other Roku tools take, the
+    organization, currency, time zone, country, website and the roles the
+    sign-in holds there (Viewer is enough to read). Only self-serve Ads
+    Manager accounts appear; insertion-order accounts are not in the API.
+    """
+    from adloop.roku_ads.read import list_roku_accounts as _impl
+
+    return _impl(current_config())
+
+
+@_tool(title="Roku Ads campaigns", annotations=_READONLY, tags={"roku_ads"})
+@_safe
+def get_roku_campaigns(account_uid: str = "", include_archived: bool = False) -> dict:
+    """List Roku Ads campaigns with their ad group: status, budget, bid, flight, schedule, targeting and goal.
+
+    Each campaign carries its objective, enabled and archived flags, and its
+    ad group's delivery status (draft, scheduled, creative_needed,
+    reviewing_creative, active, inactive, ended, deactivated), budget, bid
+    strategy and max CPM, start and end, day-part schedule, included and
+    excluded locations, audiences, placement, frequency cap, content
+    settings, optimization goal and event group. Insights flag deactivated
+    (billing) campaigns, ad groups without an approved creative, missing
+    location targeting or frequency caps, and conversion goals without an
+    event group.
+
+    Args:
+        account_uid: Roku ad account uid (from list_roku_accounts). Empty uses
+            roku_ads.account_uid from the config.
+        include_archived: Also list archived campaigns.
+    """
+    from adloop.roku_ads.read import get_roku_campaigns as _impl
+
+    return _impl(current_config(), account_uid=account_uid, include_archived=include_archived)
+
+
+@_tool(title="Roku Ads performance", annotations=_READONLY, tags={"roku_ads"})
+@_safe
+def get_roku_performance(
+    account_uid: str = "",
+    level: str = "campaign",
+    date_range_start: str = "",
+    date_range_end: str = "",
+    breakdown: str = "",
+    campaign_uid: str = "",
+    entity_uids: _StrListOpt = None,
+    actions: _StrListOpt = None,
+    attributed_events_by: str = "time_of_impression",
+    include_raw: bool = False,
+) -> dict:
+    """Roku Ads spend, impressions, CPM, video completion and attributed actions per level.
+
+    Reads Roku's synchronous metrics (7 days per request; longer windows,
+    up to 92 days, are read in 7-day pieces and added up). Returns per row
+    impressions, spend, CPM, video starts, completions, quartiles, VCR
+    (completions / impressions), cost per completed view, and the requested
+    actions with CPA, joined with names, statuses and optimization goals.
+    TV has no clicks. Actions are pixel or Conversions API events from
+    households that saw an ad, credited for 14 days; insights flag spend
+    without the goal action and days still filling in.
+
+    Queries the Roku Ads API: https://developer.ads.roku.com/ads/reference/get_metrics
+
+    Args:
+        account_uid: Roku ad account uid. Empty uses the config default.
+        level: "account", "campaign", "ad_group", "ad" or "creative". Ads and
+            creatives need entity_uids, since Roku lists neither.
+        date_range_start: First day, YYYY-MM-DD. Empty means 6 days before
+            date_range_end.
+        date_range_end: Last day (inclusive), YYYY-MM-DD. Empty means yesterday
+            in the account's time zone.
+        breakdown: "" for totals or "date" for one row per day.
+        campaign_uid: Limit campaign and ad_group levels to one campaign.
+        entity_uids: Explicit uids of the chosen level instead of all of them.
+        actions: Action names such as "lead", "page_view", "purchase". Empty
+            means the optimization goals of the ad groups in scope.
+        attributed_events_by: "time_of_impression" (default) or
+            "time_of_conversion": which day an action counts on.
+        include_raw: Add the API's first response page, unmodified, for
+            checking how a beta response is laid out.
+    """
+    from adloop.roku_ads.read import get_roku_performance as _impl
+
+    return _impl(
+        current_config(), account_uid=account_uid, level=level, date_range_start=date_range_start,
+        date_range_end=date_range_end, breakdown=breakdown, campaign_uid=campaign_uid,
+        entity_uids=entity_uids, actions=actions, attributed_events_by=attributed_events_by,
+        include_raw=include_raw,
+    )
+
+
+@_tool(title="Run a Roku Ads report", annotations=_READONLY, tags={"roku_ads"})
+@_safe
+def run_roku_report(
+    account_uid: str = "",
+    metrics: _StrListOpt = None,
+    dimensions: _StrListOpt = None,
+    date_range_start: str = "",
+    date_range_end: str = "",
+    campaign_uid: str = "",
+    name: str = "",
+    wait_seconds: int = 45,
+    max_rows: int = 200,
+) -> dict:
+    """Create a Roku Ads asynchronous report and return its rows if it is ready within wait_seconds.
+
+    Reports cover what metrics do not: household reach and frequency, ROAS,
+    unique actions, and breakdowns by date, week, month, hour, postal code,
+    metro market, state, country, placement, campaign, ad group, ad and
+    creative (13 months of history, about 8 hours of latency, actions
+    credited by conversion time). Roku can take up to an hour to build one;
+    an unfinished report returns its report_uid, which get_roku_report reads
+    later. Rows come back with the file's own column names and totals for
+    the columns that add up.
+
+    Queries the Roku Ads API: https://developer.ads.roku.com/ads/reference/create_reports
+
+    Args:
+        account_uid: Roku ad account uid. Empty uses the config default.
+        metrics: Any of actions, cpa, cpcv, cpm, cpur, roas, household_frequency,
+            household_reach, impressions, order_value, spend,
+            total_unique_actions, vcr, video_view_25pct, video_view_50pct,
+            video_view_75pct, video_view_100pct. Empty means impressions,
+            spend, household_reach, household_frequency and vcr.
+        dimensions: Any of activity_name, account_name, account_id,
+            campaign_id, campaign_name, ad_id, ad_group_id, ad_group_budget,
+            ad_group_end_time, ad_group_start_time, country, creative_id,
+            creative_name, date, metro_market, month, placement, postal_code,
+            state_territory, week, year, hour. Action metrics add
+            activity_name automatically.
+        date_range_start: First day, YYYY-MM-DD. Empty means 29 days before
+            date_range_end.
+        date_range_end: Last day (inclusive), YYYY-MM-DD. Empty means yesterday.
+        campaign_uid: Limit the report to one campaign.
+        name: Report name shown in Roku; empty generates one.
+        wait_seconds: How long to wait for Roku to finish before returning
+            the report_uid instead of rows.
+        max_rows: Most rows to return (totals cover every row).
+    """
+    from adloop.roku_ads.read import run_roku_report as _impl
+
+    return _impl(
+        current_config(), account_uid=account_uid, metrics=metrics, dimensions=dimensions,
+        date_range_start=date_range_start, date_range_end=date_range_end, campaign_uid=campaign_uid,
+        name=name, wait_seconds=wait_seconds, max_rows=max_rows,
+    )
+
+
+@_tool(title="Read a Roku Ads report", annotations=_READONLY, tags={"roku_ads"})
+@_safe
+def get_roku_report(report_uid: str = "", campaign_uid: str = "", max_rows: int = 200) -> dict:
+    """Status of a Roku Ads asynchronous report, and its rows once Roku has built it.
+
+    Returns the status (pending, running, done, error) and, when done, the
+    columns, row count, rows and totals of the columns that add up.
+
+    Args:
+        report_uid: The report_uid run_roku_report returned.
+        campaign_uid: Keep only this campaign's rows (needs a campaign id column).
+        max_rows: Most rows to return (totals cover every row).
+    """
+    from adloop.roku_ads.read import get_roku_report as _impl
+
+    return _impl(current_config(), report_uid=report_uid, campaign_uid=campaign_uid, max_rows=max_rows)
+
+
+@_tool(title="Audit Roku Ads conversion setup", annotations=_READONLY, tags={"roku_ads"})
+@_safe
+def get_roku_conversion_setup(
+    account_uid: str = "",
+    date_range_start: str = "",
+    date_range_end: str = "",
+    min_impressions: int = 5000,
+) -> dict:
+    """Audit Roku Ads conversion tracking: event groups, ad group goals and actions from delivery.
+
+    Checks every event group (the Roku pixel / Conversions API container:
+    active, stale, inactive, archived, and which active or upcoming ad groups
+    use it), every such ad group's optimization goal against its event group, and,
+    over the window, whether impressions produced the goal action. Returns a
+    verdict (ok, needs attention, broken), checks sorted fail → warn →
+    info → pass, per ad group activity with CPA, and insights. Configuration
+    problems fail; missing actions only warn, since nobody may have acted.
+
+    Args:
+        account_uid: Roku ad account uid. Empty uses the config default.
+        date_range_start: First day, YYYY-MM-DD. Empty means 13 days before
+            date_range_end.
+        date_range_end: Last day (inclusive), YYYY-MM-DD. Empty means yesterday.
+        min_impressions: Impressions an ad group needs before missing goal
+            actions are flagged.
+    """
+    from adloop.roku_ads.read import get_roku_conversion_setup as _impl
+
+    return _impl(current_config(), account_uid=account_uid, date_range_start=date_range_start,
+                 date_range_end=date_range_end, min_impressions=min_impressions)
+
+
+@_tool(title="Roku Ads audiences", annotations=_READONLY, tags={"roku_ads"})
+@_safe
+def get_roku_audiences(account_uid: str = "") -> dict:
+    """List Roku Ads custom and standard audiences, what they are built from, and which campaigns use them.
+
+    Custom audiences show their source: website or app events (event names,
+    lookback, event group and its status), a customer file (file status and
+    matched households) or a partner. Insights flag audiences fed by a stale
+    or missing event group, customer files that failed matching, archived
+    audiences still on an active or upcoming ad group, and unused audiences. Roku returns
+    no audience size or status.
+
+    Args:
+        account_uid: Roku ad account uid. Empty uses the config default.
+    """
+    from adloop.roku_ads.read import get_roku_audiences as _impl
+
+    return _impl(current_config(), account_uid=account_uid)
+
+
+@_tool(title="Draft a Roku Ads event audience", annotations=_WRITE, tags={"roku_ads"})
+@_safe
+def draft_roku_event_audience(
+    account_uid: str = "",
+    name: str = "",
+    event_group_uid: str = "",
+    event_names: _StrListOpt = None,
+    lookback_days: int = 30,
+) -> dict:
+    """Draft a Roku Ads custom audience of households that fired pixel events within a lookback (preview only).
+
+    Custom audiences are the only thing Roku's Ads API (beta) can create;
+    campaigns, ad groups and creatives are edited in Ads Manager until Roku
+    adds those endpoints. Checks the event group (and warns when it is stale
+    or inactive) and duplicate names. A new audience shows as pending for
+    about 72 hours. The returned plan_id is applied with confirm_and_apply.
+    Customer-file audiences are not uploaded: they are personal data.
+
+    Args:
+        account_uid: Roku ad account uid. Empty uses the config default.
+        name: Audience name (at least 3 characters).
+        event_group_uid: Event group (Roku pixel) to read events from; empty
+            uses the account's default event group.
+        event_names: Events that qualify a household, e.g. ["page_view"] or ["lead"].
+        lookback_days: How far back a qualifying event counts (1–90).
+    """
+    from adloop.roku_ads.write import draft_roku_event_audience as _impl
+
+    return _impl(current_config(), account_uid=account_uid, name=name, event_group_uid=event_group_uid,
+                 event_names=event_names, lookback_days=lookback_days)
 
 
 # ---------------------------------------------------------------------------

@@ -12,7 +12,7 @@ You have access to AdLoop MCP tools that connect Google Ads, Reddit Ads and Goog
 
 | Tool | When to Use | Key Parameters |
 |------|-------------|----------------|
-| `health_check` | First thing to run when tools are failing — tests OAuth token, GA4, Ads, and (when configured) Reddit Ads connectivity | (none) |
+| `health_check` | First thing to run when tools are failing — tests OAuth token, GA4, Ads, and (when configured) Reddit Ads, ChatGPT Ads, Microsoft Advertising and Roku Ads connectivity | (none) |
 
 **A tool you expect is missing?** Apps such as claude.ai, ChatGPT and Perplexity cache AdLoop's tool list from when the connection was made. `health_check` returns `adloop_version` and `tools_offered`, the tools this server offers to you. If the user asks for something a tool in `tools_offered` does and that tool isn't in your own tool list, don't improvise with other tools: tell the user their app shows an older list and to refresh the AdLoop connection (claude.ai: Settings → Connectors → AdLoop; ChatGPT: the AdLoop plugin's settings; Perplexity: remove and add the connector again; coding agents: reconnect the MCP server or start a new session).
 
@@ -220,6 +220,139 @@ Reddit is a second ad platform with its own connection (own OAuth app, no develo
 4. Cross-check `get_reddit_ads` for `REJECTED` ads (`rejection_reason`) and `PENDING_APPROVAL` — they explain missing spend
 5. Present spend, clicks, CTR, CPC, conversions, CPA in account currency; compare against Google Ads only on CPA/ROAS, never on CTR (feed placements behave differently from search)
 
+### ChatGPT Ads Tools
+
+ChatGPT Ads (OpenAI Ads Manager, ads.openai.com) through the OpenAI Advertiser API. Toolset `chatgpt_ads`; needs `chatgpt_ads.api_key` in the config (or `OPENAI_ADS_API_KEY`), an Advertiser key from Ads Manager → Settings → API keys. Each key belongs to one ad account; `ad_account_id` only picks which configured key to use (`chatgpt_ads.accounts` for more accounts). The hierarchy is ad account → campaign (objective, budget, location/platform targeting, conversion events) → ad group (bid, context hints) → ad (chat card: title, body, image, destination). There are no keywords: context hints steer which conversations an ad group fits.
+
+| Tool | When to Use | Key Parameters |
+|------|-------------|----------------|
+| `get_chatgpt_ads_account` | Account name, currency, time zone, brand and integrity reviews, spending limits, account-level blockers (payment, identity verification). First stop when nothing serves | `ad_account_id` |
+| `get_chatgpt_campaigns` | Campaign inventory: status, `serving_state` + `serving_issues`, bidding type (impressions / clicks / conversions = oCPC), budget, targeting, attached conversion events, tracking template | `include_archived` |
+| `get_chatgpt_ad_groups` | Bids with their meaning (per click, per impression, or oCPC target CPA), context hints, serving state, campaign status | `campaign_id` (optional) |
+| `get_chatgpt_ads` | Copy, destination, `review_status` + `review_reason`, serving state, parent statuses, `click_parameters` (the utm_* a click carries after templates) | `campaign_id`, `ad_group_id` (optional) |
+| `get_chatgpt_performance` | Spend, impressions, clicks, CTR, CPC, CPM, conversions, CPA, ROAS per level, with statuses at every level and `insights[]` | `level` (account/campaign/ad_group/ad), date range, `breakdown` (date/country/device/platform), `compact`, `click_window_days` (7/14/30), `view_window_days` (0/1) |
+| `get_chatgpt_conversions` | Goal conversions split click-through / view-through, purchase value, and `events[]`: every attributed event (goal or not) | `level`, date range, `breakdown` (date/country/device), `include_events`, `event_names`, windows, `time_basis` |
+| `get_chatgpt_conversion_setup` | Audit of the whole conversion chain with a `verdict` and `checks[]` (fail/warn/info/pass) | date range, `check_recent_events`, `min_clicks` |
+| `get_chatgpt_change_history` | Who changed what (audit log), before/after values, counts by type/actor/day | date range, `campaign_id` / `ad_group_id` / `ad_id` |
+| `chatgpt_attribution_check` | ChatGPT Ads clicks + conversions vs GA4 sessions + key events, split into paid (a utm_source with a paid utm_medium on the ads), unpaid ChatGPT referrals, and ambiguous sessions that could be either | `property_id`, date range |
+
+- **Status has two layers.** `status` is what was set (active/paused/archived); `serving_state` comes from OpenAI's `serving_issues` (payment missing, brand review, campaign paused, ad in review, landing page crawl failed, budget spent). Report the serving state and its cause, never "active" alone. The issues already reflect parents: an ad under a paused campaign carries `campaign_not_active`.
+- **A campaign counts only the conversion events attached to it.** Pixel events that are not attached show up in `get_chatgpt_conversions` `events[]` but never in `conversions`. Zero conversions on a campaign without an attached event is guaranteed, not measured; the tools say so.
+- **Conversions include view-through by default** (30-day click + 1-day view, by ad-event date). Before judging CPA, compare with `view_window_days=0`. OpenAI's numbers will exceed GA4's last-click key events; that is attribution, not a bug.
+- **Windows are whole days in the account's time zone and end yesterday.** Conversion data needs whole days and settles over about a day; a window reaching today is moved back with a note.
+- **Money**: spend, CPC, CPM, CPA are currency units; budgets and bids are converted from micros already.
+- **Rate limits** (600/min per endpoint, 1,200/min overall): a `CHATGPT_ADS_RATE_LIMITED` error carries `retry_after`; wait, never loop.
+- **Writes** (same draft → preview → `confirm_and_apply` gate, platform `chatgpt`). OpenAI has no validate-only mode for single resources: the dry run re-reads the target and refuses when a field the plan changes was edited since the preview, and re-checks the budget cap, the bid-increase cap and the landing page. The real apply runs the same checks again first. New campaigns, ad groups and ads are created **paused**, each with an idempotency key, so a retried apply cannot create a duplicate.
+
+| Tool | What It Does | Key Parameters |
+|------|-------------|----------------|
+| `search_chatgpt_locations` | Location ids by name for targeting | `query` |
+| `pause_chatgpt_entity` / `enable_chatgpt_entity` | Pause or activate a campaign, ad group or ad; enabling warns about paused parents and ads in review | `entity_type`, `entity_id` |
+| `archive_chatgpt_entity` | Archive (permanent, double confirmation; OpenAI has no delete) | `entity_type`, `entity_id` |
+| `update_chatgpt_campaign` | Name, daily or lifetime budget, dates, locations / excluded / countries, platforms, tracking template, attached conversion events | `campaign_id` + fields; `clear_fields` |
+| `update_chatgpt_ad_group` | Name, strategy (fixed_bid / maximize_clicks / maximize_conversions), max bid, context hints (replace, or add/remove) | `ad_group_id` + fields |
+| `update_chatgpt_ad` | Name, title (3–50), body (≤100), landing page, image; copy edits go back to review | `ad_id` + fields |
+| `draft_chatgpt_campaign` | New campaign, paused; needs a budget and locations | `name`, `bidding_type`, `daily_budget` or `lifetime_budget` + `end_date`, `location_ids` or `countries` |
+| `draft_chatgpt_ad_group` | New ad group, paused | `campaign_id`, `name`, `context_hints`, `strategy`, `max_bid` |
+| `draft_chatgpt_ad` | New chat-card ad, paused; image uploaded at apply | `ad_group_id`, `title`, `body`, `target_url`, `image_url` / `image_path` / `file_id` |
+
+- **Budgets:** daily budgets (and a lifetime budget's daily equivalent over its dates) are capped by `max_daily_budget`; raising one by more than half needs a double confirmation. OpenAI allows lifetime → daily but not daily → lifetime, and `bidding_type` never changes after creation.
+- **Bids** follow the campaign's bidding type: impressions take a fixed bid per impression, clicks a fixed CPC or maximize_clicks, conversions a target CPA (fixed) or maximize_conversions. Automatic strategies need a daily campaign budget and drop audience bid multipliers. Fixed-bid raises are capped by `max_bid_increase_pct`.
+- **Targeting** is replaced as a whole: pass the full location list. Custom audiences are kept. Never leave a campaign without locations.
+- **Tracking:** keep `utm_source=chatgpt&utm_medium=cpc` (the default for new campaigns) so `chatgpt_attribution_check` can separate ad clicks from unpaid ChatGPT referrals.
+
+### When user wants to change or build ChatGPT Ads campaigns
+
+1. Read first: `get_chatgpt_campaigns`, `get_chatgpt_ad_groups`, `get_chatgpt_ads` for ids, statuses and current values; `get_chatgpt_performance` before budget or bid moves
+2. One change per draft; show the preview (from → to, warnings); `confirm_and_apply(dry_run=true)`, then the real apply after the user's go-ahead
+3. New campaign: `search_chatgpt_locations` → `draft_chatgpt_campaign` → `draft_chatgpt_ad_group` → `draft_chatgpt_ad` (verify the landing page exists) → `enable_chatgpt_entity` for the ad, ad group and campaign once all exist
+4. A conversions campaign needs an active standard conversion event; check `get_chatgpt_conversion_setup` before relying on it
+
+### When user asks about ChatGPT Ads, or whether ChatGPT Ads conversions work
+
+1. `get_chatgpt_performance` (level `campaign`, `compact=true`) for the overview; drill into `ad_group` / `ad`
+2. If conversions are zero or look wrong, run `get_chatgpt_conversion_setup` BEFORE judging the channel: a missing link (no attached event, goal event never fires, pixel not on the landing page) explains most "ChatGPT doesn't convert" cases. Present its `verdict` and every `fail`/`warn` check
+3. `get_chatgpt_conversions` shows which events clicks actually produce: page views without leads means the lead event does not fire or is not attributed
+4. `chatgpt_attribution_check` closes the loop with GA4: key events from paid ChatGPT sessions while ChatGPT Ads reports 0 conversions point at the OpenAI setup when the GA4 key event is the same action as the campaign's goal event (a form lead); a call click in GA4 is not something OpenAI sees. Paid needs distinctive tagging (`utm_medium=cpc` or similar): with untagged or medium-less ads the sessions land in `ga4_ambiguous_chatgpt`, so tag the ads before drawing conclusions. Unpaid ChatGPT referral traffic exists without ads
+5. Check `get_chatgpt_ads` for rejected ads, ads in review, and ads without `utm_source` (GA4 then mixes them with unpaid ChatGPT traffic)
+6. If performance moved suddenly, `get_chatgpt_change_history` for the days before
+7. Phone calls reach OpenAI only when call tracking sends them through the Conversions API (`action_source: phone_call`); the browser pixel never sees them. For call-driven businesses without that, compare against call-tracking or CRM data before concluding
+
+### Microsoft Advertising Tools
+
+Microsoft Advertising (Bing, Yahoo, AOL, DuckDuckGo search ads) through the REST API v13. Toolset `microsoft_ads`; needs `microsoft_ads.developer_token`, `microsoft_ads.client_id` (an Entra app with public client flows and the msads.manage permission) and a one-time `adloop microsoft-login` (browser sign-in on `http://localhost:8080/callback`; sign in with the user that has access to the ad accounts. Directories with security defaults block the device-code flow with sign-in error 530035, so `--device-code` is only a fallback). `customer_id` is the manager account, `ad_account_id` the default ad account; `list_microsoft_ads_accounts` shows both.
+
+| Tool | When to Use | Key Parameters |
+|------|-------------|----------------|
+| `list_microsoft_ads_accounts` | Discovery: the signed-in user, manager accounts, ad accounts (id, number, currency, time zone, status) | (none) |
+| `get_microsoft_campaigns` | Budget (own or shared), bidding, languages, included/excluded locations and location intent | `include_targeting` |
+| `get_microsoft_ad_groups` | Bid, network (search partners on/off), Audience Network exposure, dates, campaign status | `campaign_id` |
+| `get_microsoft_keywords` | Match type, bid, status, editorial review, parent statuses | `campaign_id`, `ad_group_id` |
+| `get_microsoft_ads` | Headlines (pins), descriptions, paths, final URLs, editorial review | `campaign_id`, `ad_group_id` |
+| `get_microsoft_performance` | Spend, clicks, CTR, CPC, conversions, CPA, revenue, impression share and share lost to budget/rank | `level` (account/campaign/ad_group/keyword/ad), date range, `breakdown` (date/device), `campaign_id`, `compact` |
+| `get_microsoft_search_terms` | What people searched, the keyword and match type it matched, waste candidates | date range, `campaign_id`, `min_clicks`, `compact` |
+| `get_microsoft_location_performance` | Where clicks came from; people physically there vs searching about the place | date range, `group_by` (city/metro/state/postal_code/most_specific) |
+| `get_microsoft_conversion_setup` | Audit: UET tag status, conversion goals (tracking status, excluded from bidding), campaign goals, clicks without conversions | date range, `min_clicks` |
+| `update_microsoft_campaign_budget` | Draft a new daily budget (own budget only; capped by `max_daily_budget`) | `campaign_id`, `daily_budget` |
+| `pause_microsoft_entity` / `enable_microsoft_entity` | Draft pausing or enabling a campaign, ad group, keyword or ad | `entity_type`, `entity_id`, `parent_id` (optional) |
+| `search_microsoft_locations` | Location ids (country, state, metro, city, postal code) by name; Microsoft's file is cached | `query`, `location_type` |
+| `update_microsoft_campaign` | Name, bid strategy (ManualCpc, EnhancedCpc, MaxClicks, MaxConversions + target CPA), tracking template, final URL suffix | `campaign_id` + fields |
+| `update_microsoft_campaign_targeting` | Included / excluded locations (full lists), location intent, ad schedule (replaces; account time zone, or the searcher's when the campaign uses AdScheduleUseSearcherTimeZone: the preview's `hours_in` says which) | `campaign_id`, `location_ids`, `excluded_location_ids`, `location_intent`, `ad_schedule` |
+| `draft_microsoft_campaign` | New Search campaign, paused, with budget, bidding, languages, locations, intent | `name`, `daily_budget`, `languages`, `location_ids` |
+| `draft_microsoft_ad_group` / `update_microsoft_ad_group` | New ad group (with keywords) / name, default bid, network, Audience Network adjustment | `campaign_id` or `ad_group_id` + fields |
+| `draft_microsoft_keywords` / `update_microsoft_keyword_bids` | Add keywords (duplicates skipped) / change keyword bids | `ad_group_id`, `keywords` or `bids` |
+| `get_microsoft_negative_keywords` | Direct negatives and shared lists with items, attachments and `remove_id`s | `campaign_id` |
+| `propose_microsoft_negative_keyword_list` / `add_to_microsoft_negative_keyword_list` | New shared list (attached) / append to a list | `list_name` or `list_id`, `keywords`, `campaign_ids` |
+| `attach_microsoft_negative_keyword_list` / `detach_microsoft_negative_keyword_list` | Link or unlink a list and campaigns | `list_id`, `campaign_ids` |
+| `add_microsoft_negative_keywords` | Negatives directly on a campaign or ad group | `campaign_id` or `ad_group_id`, `keywords` |
+| `draft_microsoft_responsive_search_ad` / `update_microsoft_responsive_search_ad` | New RSA (paused) / replace headlines, descriptions, URL, paths | `ad_group_id` or `ad_id` + copy |
+| `get_microsoft_ad_extensions` | Sitelinks, callouts, snippets, call and image extensions per ad group, campaign and account, with `remove_id`s (image rows add `alt_text`, `display_text`, `layouts`, `media_ids` and `images` with each picture's size and `url`, to look at a photo before unlinking it) | `campaign_id` |
+| `draft_microsoft_sitelinks` / `draft_microsoft_callouts` / `draft_microsoft_structured_snippet` / `draft_microsoft_call_extension` | Create and link extensions to a campaign (or the account) | `campaign_id` or `scope="account"` + content |
+| `draft_microsoft_image_extension` | Photos with the search ads: uploads up to 10 images to the media library, creates one image extension per image and links them | `campaign_id`, `ad_group_id` or `scope="account"`; `image_paths` / `image_urls` / `upload_ids`; `alt_text` (required, ≤35); optional `display_text` (≤35), `final_url` |
+| `remove_microsoft_entity` | Delete (irreversible, double confirmation): campaign, ad group, ad, keyword, or by `remove_id` a negative, list item, criterion, extension link (account, campaign or ad group; unlinking keeps the extension) | `entity_type`, `entity_id` |
+
+- **Statuses at every level.** Keyword and ad rows carry the ad group and campaign status; reports carry `campaign_status`, `ad_group_status`, `keyword_status`. An account whose status is not Active serves nothing; `BudgetPaused` campaigns stopped on budget.
+- **Location intent matters for local businesses.** `PeopleInOrSearchingForOrViewingPages` (Microsoft's default) also reaches people elsewhere searching about the area. `get_microsoft_location_performance` shows how much spend that "location of interest" traffic took.
+- **Monthly spend:** Microsoft may spend up to 30.4 × the daily budget in a month; the budget preview says so.
+- **Writes** go through draft → preview → `confirm_and_apply`. Microsoft has no validate-only mode: the dry run re-reads the target, refuses if the budget or status changed since the draft or the campaign moved to a shared budget, and re-checks the cap. The real apply runs the same checks again right before sending, so a change made in Microsoft Advertising in between is refused, not overwritten: draft again. Updates send only the changed field.
+- **Management rules** mirror Google Ads: broad match is refused on ManualCpc / EnhancedCpc campaigns, moving to manual bidding is refused while active broad keywords exist, new campaigns need languages and locations (default PeopleIn), new RSAs and campaigns are paused, while new keywords and ad groups are created Active as in Google Ads (the preview's `status_on_create` says so, and keywords in a live ad group serve as soon as they are applied), keyword and ad group bid raises are capped by `max_bid_increase_pct` (including a keyword falling back to the ad group bid), a first ad schedule needs a double confirmation. Replacing a schedule window deletes the old window before adding the new one when they overlap; the preview warns when that leaves the campaign briefly unscheduled. Negative keywords go in shared lists by default; every negative draft names active keywords it would block.
+- **Multi-step applies** (a campaign then its targeting, a list then its attachments, extensions then their links) end with `PARTIAL_APPLY` when a later step fails, or when Microsoft creates some items of a batch and refuses others: `created` lists the IDs that exist, and the plan is retired so nothing is created twice. Check the account, then draft only what is missing.
+- **Image extensions** (`draft_microsoft_image_extension`): JPEG, PNG or non-animated GIF, at most 5 MB, **1.91:1** (e.g. 1200x628), at least 703x368, at most 2592 wide and 2048 high; the draft refuses anything else and says how to crop it. Ask the user for alt text that describes the photo. Microsoft's help allows 25 image extensions per account, campaign or ad group, its API reference says 6: the draft warns above 6 and refuses above 25. `display_text` adds the multi-image layout, which needs at least five images in four extensions. **Caution:** image extensions can take search ads beyond Bing results: Microsoft's audience ads guide says search ads are extended to native placements on the Microsoft Audience Network (Outlook, MSN) with their image extensions, so check the ad groups' Audience Network setting with `get_microsoft_ad_groups` when the client wants search only. Images without a public URL go through `upload_images` first.
+- Reports are built asynchronously and take a few seconds; long date ranges at keyword or search-term level take longer.
+- Search terms with clicks and no conversions are candidates, not verdicts: calls from Microsoft ads convert outside its view unless call tracking feeds back.
+- **Conversions** come from Microsoft's `ConversionsQualified` columns (the old `Conversions` columns are deprecated and read 0 in keyword and search-term reports); conversion rate and CPA are computed from them. A UET tag is required only by URL, duration, pages-per-visit and event goals: offline-import goals need none, and an unverified tag that no active goal uses is a loose end (warn), not a broken setup.
+
+### Roku Ads Tools
+
+Roku Ads Manager (connected TV) through the Roku Ads API (beta; self-serve accounts only, insertion-order accounts are not in it). Toolset `roku_ads`; needs a developer app that an organization admin adds in Ads Manager → Organization → Ads API, its `client_id`, `client_secret`, `authorization_url` and `redirect_uri` under `roku_ads`, and a one-time `adloop roku-login`. `account_uid` is the default ad account. The hierarchy is organization → ad account → campaign (objective Awareness or Conversion) → one ad group (budget, bid, flight, schedule, targeting, frequency cap, optimization goal, event group) → creatives.
+
+| Tool | When to Use | Key Parameters |
+|------|-------------|----------------|
+| `list_roku_accounts` | Discovery: organizations, ad accounts (uid, currency, time zone), the sign-in's roles | (none) |
+| `get_roku_campaigns` | Status at campaign and ad group level, budget, bid, flight dates, schedule, locations, audiences, frequency cap, goal and event group | `include_archived` |
+| `get_roku_performance` | Spend, impressions, CPM, video completion (VCR, CPCV) and actions with CPA per account, campaign, ad group, ad or creative | `level`, date range (≤92 days), `breakdown` (date), `campaign_uid`, `entity_uids`, `actions`, `attributed_events_by`, `include_raw` |
+| `run_roku_report` / `get_roku_report` | Household reach and frequency, ROAS, unique actions, and breakdowns by postal code, metro, state, placement, hour, creative | `metrics`, `dimensions`, date range (13 months), `campaign_uid`, `wait_seconds`; later `report_uid` |
+| `get_roku_conversion_setup` | Audit with a `verdict`: event groups (active/stale/inactive), each active or upcoming ad group's goal against its event group, goal actions from delivery | date range, `min_impressions` |
+| `get_roku_audiences` | Custom audiences (events, customer files, partners), what feeds them, which campaigns use them | (none) |
+| `draft_roku_event_audience` | New custom audience of households that fired pixel events within a lookback (the only write Roku's API offers) | `name`, `event_names`, `event_group_uid`, `lookback_days` |
+
+- **Roku campaigns cannot be changed through the API yet.** Roku's Ads API (beta) has no campaign, ad group or creative write endpoints ("coming soon" in its docs). Budget, bid, schedule, targeting, creative and status changes are made in Roku Ads Manager; say so instead of improvising. Event audiences are drafted here and attached to a campaign in Ads Manager. Customer-file audiences are not uploaded: they are personal data.
+
+- **TV has no clicks.** Roku reports impressions, video completion and actions: pixel or Conversions API events from households that saw an ad, credited for 14 days (by impression time in metrics, by conversion time in reports). Never compare Roku with search on CTR or CPC; compare cost per action, reach and cost per completed view.
+- **Status has two levels.** The campaign and its ad group each carry draft, scheduled, creative_needed, reviewing_creative, active, inactive, ended or deactivated, plus `is_enabled` and `is_archived` on the campaign. `deactivated` means billing (an overdue invoice or a card) and nothing serves; `creative_needed` means no approved creative. `serving` is true only when both levels are active (and the campaign enabled, not archived); a scheduled one, or one waiting for or reviewing a creative, shows `serving: false` with the reason in `serving_note`, though the conversion setup audit still covers it.
+- **Recent days are incomplete.** Actions keep arriving for 14 days and reports lag about 8 hours; the tools say which days are still filling in.
+- **Metrics reach 7 days per request**; `get_roku_performance` reads longer windows in 7-day pieces. Reports cover up to 13 months but Roku can take up to an hour to build one: when `run_roku_report` returns a `report_uid` with status pending or running, read it later with `get_roku_report`.
+- **Beta response layouts.** Roku leaves some response details undocumented. If numbers look wrong, `include_raw=true` on `get_roku_performance` shows the API's own first page.
+- Budgets and max CPM are shown as Roku returns them (Roku documents no unit); compare with Ads Manager before quoting them.
+
+### When user asks how Roku / TV ads are doing or whether they work
+
+1. `get_roku_campaigns` first: a deactivated campaign or an ad group waiting for a creative explains zero delivery
+2. `get_roku_performance` (level `campaign`, last 7 or 14 days, or longer) for spend, impressions, CPM, VCR and goal actions
+3. If actions are zero, run `get_roku_conversion_setup` before judging the channel: no event group, a stale one, or a goal event the site never sends explains most "TV doesn't convert" cases. Missing actions on a working setup only warn: households may simply not have acted yet
+4. For reach and geography (did the spot reach the service area?), `run_roku_report` with `household_reach`, `household_frequency`, `impressions`, `spend` by `metro_market` or `postal_code`
+5. TV drives calls and later searches, not clicks: if the spot shows a tracked phone number, count those calls in call tracking, and look for lifts in direct, organic and branded search traffic in GA4 over the flight. Roku cannot see either
+
 ### When user asks about organic traffic, SEO, or paid/organic overlap
 
 1. Call `list_gsc_sites` if no site is configured; confirm the property with the user
@@ -248,7 +381,7 @@ For images that have no public URL: a file on the user's computer, or an image t
 
 - **With the card** (`upload: "card"` in the result): the user drops PNG, JPEG or GIF files (up to 5 MB) on the card; it then posts the upload ids into the chat. Wait for that message instead of asking for a URL.
 - **With an upload link** (`upload_url`): give the user the link (valid 30 minutes) to open in the browser, then call `list_uploads` once they say they are done. A coding agent that has the file on disk can upload it itself: `curl -T "logo.png" "<upload_url>/"`, one call per file.
-- **Using an upload:** `draft_image_assets(upload_ids=["up_..."])` for Google Ads; `"upload:up_..."` as `image_url`, `thumbnail_url` or a carousel card's `image_url` in `draft_reddit_ad` (AdLoop Cloud only, because Reddit downloads the image from a short-lived public link). Videos cannot be uploaded.
+- **Using an upload:** `draft_image_assets(upload_ids=["up_..."])` for Google Ads; `draft_microsoft_image_extension(upload_ids=["up_..."])` for Microsoft Advertising; `"upload:up_..."` as `image_url`, `thumbnail_url` or a carousel card's `image_url` in `draft_reddit_ad` (AdLoop Cloud only, because Reddit downloads the image from a short-lived public link). Videos cannot be uploaded.
 - Uploads expire after 24 hours. Self-hosted without a card, pass local files directly (`image_paths`).
 
 ### Offline Conversion Uploads
@@ -382,6 +515,8 @@ Same draft → preview → `confirm_and_apply` gate; the plan carries `platform:
 - `require_dry_run: true` in config overrides `dry_run=false` — the user must change the config to allow real mutations.
 - `two_phase_apply: true` in config (always on for AdLoop Cloud) refuses `dry_run=false` with status `DRY_RUN_REQUIRED` until that plan_id has completed one `dry_run=true` pass. Run the dry run, show the user, then apply — do not retry `dry_run=false` in a loop.
 - All operations (including dry runs) are logged to `~/.adloop/audit.log`.
+- `blocked_operations` is checked again by `confirm_and_apply`: a plan whose operation was blocked after it was drafted is refused with status `BLOCKED`, dry run and apply alike.
+- **`PARTIAL_APPLY` and `UNKNOWN_OUTCOME`** (Microsoft, Roku): `PARTIAL_APPLY` means part of the change is in the account (`created` names it), from a multi-step apply whose later step failed or a batch Microsoft accepted only in part; `UNKNOWN_OUTCOME` means the platform never answered a create, so it may or may not exist (neither has idempotency). In both cases the plan is retired and cannot be applied again: read the account (`get_microsoft_*`, `get_roku_audiences`), tell the user what exists, and draft only what is missing. ChatGPT Ads creates carry an idempotency key instead, so after a lost response the same plan can simply be applied again.
 
 ## Safety Rules (CRITICAL — always follow)
 

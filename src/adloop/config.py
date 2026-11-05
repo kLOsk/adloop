@@ -78,6 +78,64 @@ class RedditConfig:
 
 
 @dataclass
+class ChatGPTAdsConfig:
+    """ChatGPT Ads (OpenAI Ads Manager, Advertiser API).
+
+    Every Advertiser API key belongs to exactly one ad account, so the
+    account is implied by the key: ``api_key`` (or ``OPENAI_ADS_API_KEY`` in
+    the environment) is the default account. ``accounts`` maps further ad
+    account ids (``adacct_...``) to their own keys, for agencies running
+    several clients; a tool's ``ad_account_id`` picks the key. Keys come from
+    Ads Manager → Settings → API keys, not from platform.openai.com.
+    """
+
+    api_key: str = ""
+    ad_account_id: str = ""  # optional label for the default key's account
+    accounts: dict[str, str] = field(default_factory=dict)
+
+
+@dataclass
+class MicrosoftAdsConfig:
+    """Microsoft Advertising (Bing Ads) REST API.
+
+    Needs a developer token (Microsoft Ads → Settings → Developer settings,
+    or developers.ads.microsoft.com) and an Entra app registered as a public
+    client with the msads.manage permission (``client_id``). ``adloop
+    microsoft-login`` signs in once and stores the refresh token at
+    ``token_path``. ``customer_id`` is the manager account (CustomerId
+    header); ``ad_account_id`` the default ad account (CustomerAccountId).
+    """
+
+    developer_token: str = ""
+    client_id: str = ""
+    client_secret: str = ""  # only for confidential (web) apps; public clients leave it empty
+    tenant: str = "common"
+    customer_id: str = ""
+    ad_account_id: str = ""
+    token_path: str = "~/.adloop/microsoft_token.json"
+
+
+@dataclass
+class RokuAdsConfig:
+    """Roku Ads (Ads Manager, Ads API beta; self-serve accounts only).
+
+    An organization admin creates a developer app in Roku Ads Manager →
+    Organization → Ads API (name, logo, website, redirect URI). The tab
+    shows ``client_id``, ``client_secret`` (once) and the ``authorization_url``
+    to copy here; ``redirect_uri`` must equal the one registered on the app.
+    ``adloop roku-login`` signs in once and stores the tokens at
+    ``token_path``. ``account_uid`` is the default ad account.
+    """
+
+    client_id: str = ""
+    client_secret: str = ""
+    authorization_url: str = ""
+    redirect_uri: str = ""
+    account_uid: str = ""
+    token_path: str = "~/.adloop/roku_token.json"
+
+
+@dataclass
 class SafetyConfig:
     max_daily_budget: float = 50.0
     max_bid_increase_pct: int = 100
@@ -108,6 +166,9 @@ class AdLoopConfig:
     merchant: MerchantConfig = field(default_factory=MerchantConfig)
     pagespeed: PageSpeedConfig = field(default_factory=PageSpeedConfig)
     reddit: RedditConfig = field(default_factory=RedditConfig)
+    chatgpt_ads: ChatGPTAdsConfig = field(default_factory=ChatGPTAdsConfig)
+    microsoft_ads: MicrosoftAdsConfig = field(default_factory=MicrosoftAdsConfig)
+    roku_ads: RokuAdsConfig = field(default_factory=RokuAdsConfig)
     safety: SafetyConfig = field(default_factory=SafetyConfig)
     # Absolute path the config was resolved from (even if it did not exist
     # on disk when loaded). Used by the runtime to tell callers exactly
@@ -179,6 +240,10 @@ def load_config(config_path: str | None = None) -> AdLoopConfig:
     merchant_raw = raw.get("merchant", {}) or {}
     pagespeed_raw = raw.get("pagespeed", {})
     reddit_raw = raw.get("reddit", {}) or {}
+    chatgpt_raw = raw.get("chatgpt_ads", {}) or {}
+    chatgpt_accounts_raw = chatgpt_raw.get("accounts", {}) or {}
+    microsoft_raw = raw.get("microsoft_ads", {}) or {}
+    roku_raw = raw.get("roku_ads", {}) or {}
     safety_raw = raw.get("safety", {})
 
     return AdLoopConfig(
@@ -218,6 +283,36 @@ def load_config(config_path: str | None = None) -> AdLoopConfig:
             username=_text(reddit_raw, "username"),
             user_agent=_text(reddit_raw, "user_agent"),
             token_path=_text(reddit_raw, "token_path", "~/.adloop/reddit_token.json"),
+        ),
+        chatgpt_ads=ChatGPTAdsConfig(
+            api_key=_text(chatgpt_raw, "api_key"),
+            ad_account_id=_text(chatgpt_raw, "ad_account_id"),
+            accounts={
+                str(account).strip(): str(key).strip()
+                for account, key in (
+                    chatgpt_accounts_raw.items()
+                    if isinstance(chatgpt_accounts_raw, dict)
+                    else []
+                )
+                if str(account).strip() and key and str(key).strip()
+            },
+        ),
+        microsoft_ads=MicrosoftAdsConfig(
+            developer_token=_text(microsoft_raw, "developer_token"),
+            client_id=_text(microsoft_raw, "client_id"),
+            client_secret=_text(microsoft_raw, "client_secret"),
+            tenant=_text(microsoft_raw, "tenant", "common"),
+            customer_id=_text(microsoft_raw, "customer_id"),
+            ad_account_id=_text(microsoft_raw, "ad_account_id"),
+            token_path=_text(microsoft_raw, "token_path", "~/.adloop/microsoft_token.json"),
+        ),
+        roku_ads=RokuAdsConfig(
+            client_id=_text(roku_raw, "client_id"),
+            client_secret=_text(roku_raw, "client_secret"),
+            authorization_url=_text(roku_raw, "authorization_url"),
+            redirect_uri=_text(roku_raw, "redirect_uri"),
+            account_uid=_text(roku_raw, "account_uid"),
+            token_path=_text(roku_raw, "token_path", "~/.adloop/roku_token.json"),
         ),
         safety=SafetyConfig(
             max_daily_budget=safety_raw.get("max_daily_budget", 50.0),

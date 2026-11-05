@@ -5,7 +5,8 @@ AdLoop on its own path: the upload card (MCP Apps) calls the app-only
 ``store_image_upload`` tool with the file, or, on a hosted server, the user
 opens a one-time upload link. Either way the image lands in an
 :class:`UploadStore` under an ``up_...`` id, and the tools take that id:
-``draft_image_assets(upload_ids=[...])`` for Google Ads, ``upload:<id>`` in
+``draft_image_assets(upload_ids=[...])`` for Google Ads,
+``draft_microsoft_image_extension(upload_ids=[...])`` for Microsoft, ``upload:<id>`` in
 the media fields of ``draft_reddit_ad``.
 
 Conversion CSVs take the same path (``upload_conversion_csv``) and go into

@@ -19,6 +19,8 @@ if TYPE_CHECKING:
     from google.auth.credentials import Credentials
 
     from adloop.config import AdLoopConfig
+    from adloop.microsoft_ads.auth import MicrosoftCredentials
+    from adloop.roku_ads.auth import RokuCredentials
     from adloop.reddit.auth import RedditCredentials
 
 # Request all scopes in a single OAuth flow so one token works for both
@@ -90,6 +92,12 @@ class CredentialsProvider(Protocol):
 
     def reddit_credentials(self, config: AdLoopConfig) -> RedditCredentials: ...
 
+    def chatgpt_ads_api_key(self, config: AdLoopConfig, ad_account_id: str) -> str: ...
+
+    def microsoft_ads_credentials(self, config: AdLoopConfig) -> MicrosoftCredentials: ...
+
+    def roku_ads_credentials(self, config: AdLoopConfig) -> RokuCredentials: ...
+
 
 class LocalFileCredentialsProvider:
     """OSS default: local credential files + interactive OAuth.
@@ -138,6 +146,31 @@ class LocalFileCredentialsProvider:
         # file (reddit.token_path), nothing shared with the Google token.
         self._guard_local_only()
         from adloop.reddit.auth import local_credentials
+
+        return local_credentials(config)
+
+    def chatgpt_ads_api_key(self, config: AdLoopConfig, ad_account_id: str) -> str:
+        # Advertiser API keys are static bearer keys, one per ad account:
+        # chatgpt_ads.accounts[<id>] for a named account, else the default
+        # chatgpt_ads.api_key, else OPENAI_ADS_API_KEY from the environment.
+        self._guard_local_only()
+        from adloop.chatgpt_ads.client import local_api_key
+
+        return local_api_key(config, ad_account_id)
+
+    def microsoft_ads_credentials(self, config: AdLoopConfig) -> MicrosoftCredentials:
+        # Microsoft identity platform: own Entra app, own token file
+        # (microsoft_ads.token_path), written by `adloop microsoft-login`.
+        self._guard_local_only()
+        from adloop.microsoft_ads.auth import local_credentials
+
+        return local_credentials(config)
+
+    def roku_ads_credentials(self, config: AdLoopConfig) -> RokuCredentials:
+        # Roku Ads Manager developer app, own token file (roku_ads.token_path),
+        # written by `adloop roku-login`.
+        self._guard_local_only()
+        from adloop.roku_ads.auth import local_credentials
 
         return local_credentials(config)
 
@@ -287,6 +320,42 @@ def get_reddit_credentials(config: AdLoopConfig) -> RedditCredentials:
             "provider implements reddit_credentials()."
         )
     return provider.reddit_credentials(config)
+
+
+def get_chatgpt_ads_api_key(config: AdLoopConfig, ad_account_id: str = "") -> str:
+    """Return the Advertiser API key for a ChatGPT Ads account."""
+    provider = _active_provider
+    if not hasattr(provider, "chatgpt_ads_api_key"):
+        raise RuntimeError(
+            "This deployment's credentials provider does not support "
+            "ChatGPT Ads. ChatGPT Ads tools are only available where the "
+            "provider implements chatgpt_ads_api_key()."
+        )
+    return provider.chatgpt_ads_api_key(config, ad_account_id)
+
+
+def get_microsoft_ads_credentials(config: AdLoopConfig) -> MicrosoftCredentials:
+    """Return refreshable bearer credentials for the Microsoft Advertising API."""
+    provider = _active_provider
+    if not hasattr(provider, "microsoft_ads_credentials"):
+        raise RuntimeError(
+            "This deployment's credentials provider does not support "
+            "Microsoft Advertising. Microsoft Ads tools are only available where "
+            "the provider implements microsoft_ads_credentials()."
+        )
+    return provider.microsoft_ads_credentials(config)
+
+
+def get_roku_ads_credentials(config: AdLoopConfig) -> RokuCredentials:
+    """Return refreshable bearer credentials for the Roku Ads API."""
+    provider = _active_provider
+    if not hasattr(provider, "roku_ads_credentials"):
+        raise RuntimeError(
+            "This deployment's credentials provider does not support Roku Ads. "
+            "Roku Ads tools are only available where the provider implements "
+            "roku_ads_credentials()."
+        )
+    return provider.roku_ads_credentials(config)
 
 
 def _requested_scopes(config: AdLoopConfig) -> list[str]:

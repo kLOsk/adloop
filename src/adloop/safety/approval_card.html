@@ -122,7 +122,7 @@
       gone: "Diese Änderung ist nicht mehr offen (angewendet, verworfen oder abgelaufen).",
     },
   };
-  const PLATFORMS = { google: "Google Ads", reddit: "Reddit Ads", ga4: "Google Analytics", gtm: "Tag Manager" };
+  const PLATFORMS = { google: "Google Ads", reddit: "Reddit Ads", microsoft: "Microsoft Advertising", chatgpt: "ChatGPT Ads", roku: "Roku Ads", ga4: "Google Analytics", gtm: "Tag Manager" };
   const MAX_ROWS = 14;
 
   let lang = "en";
@@ -160,13 +160,16 @@
   }
 
   function humanize(op) {
-    const s = String(op || "change").replace(/^(reddit|gtm|ga4)_/, "").replace(/_/g, " ");
+    const s = String(op || "change").replace(/^(reddit|microsoft|chatgpt|roku|gtm|ga4)_/, "").replace(/_/g, " ");
     return s.charAt(0).toUpperCase() + s.slice(1);
   }
 
   function platformOf(preview) {
     const op = String(preview.operation || "");
     if (preview.platform === "reddit" || op.startsWith("reddit_")) return "reddit";
+    if (preview.platform === "microsoft" || op.startsWith("microsoft_")) return "microsoft";
+    if (preview.platform === "chatgpt" || op.startsWith("chatgpt_")) return "chatgpt";
+    if (preview.platform === "roku" || op.startsWith("roku_")) return "roku";
     if (op.startsWith("gtm_")) return "gtm";
     if (op.includes("key_event")) return "ga4";
     return "google";
@@ -220,8 +223,20 @@
 
     const dl = $("changes");
     dl.replaceChildren();
+    // Same rules as approval.display_fields: request payloads and snapshots
+    // are for the code; the actual change comes first.
     const SHOWN_ELSEWHERE = new Set(["account", "entity_name", "warnings"]);
-    const entries = Object.entries(ch).filter(([k]) => !SHOWN_ELSEWHERE.has(k));
+    const INTERNAL = new Set(["body", "before", "update", "operations", "criteria", "keyword_rows",
+      "negative_rows", "request", "image_source", "entity_kind", "update_audience_adjustment", "customer_id"]);
+    const INTERNAL_IF_OBJECT = new Set(["campaign", "ad", "ad_group", "image", "extensions"]);
+    const FIRST = ["current_status", "target_status", "changes"];
+    const isPayload = (k, v) => INTERNAL_IF_OBJECT.has(k) && v && typeof v === "object" &&
+      (!Array.isArray(v) || (v.length && typeof v[0] === "object"));
+    const visible = Object.entries(ch).filter(([k, v]) =>
+      !SHOWN_ELSEWHERE.has(k) && !INTERNAL.has(k) && !isPayload(k, v) && !(k === "name" && v === ch.entity_name));
+    const entries = visible.filter(([k]) => FIRST.includes(k))
+      .sort((a, b) => FIRST.indexOf(a[0]) - FIRST.indexOf(b[0]))
+      .concat(visible.filter(([k]) => !FIRST.includes(k)));
     entries.slice(0, MAX_ROWS).forEach(([k, v]) => row(dl, k, v));
     if (entries.length > MAX_ROWS) {
       const more = document.createElement("div");
