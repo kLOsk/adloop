@@ -4,7 +4,9 @@
 
 # AdLoop
 
-**The AI command center for Google Ads, Reddit Ads, GA4, and tracking code.**
+**The Google Ads MCP server for Claude, ChatGPT and Cursor.**
+
+Plus Reddit Ads, GA4 and your tracking code, with a preview before every change.
 
 [![PyPI](https://img.shields.io/pypi/v/adloop.svg)](https://pypi.org/project/adloop/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)

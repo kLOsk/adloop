@@ -1,14 +1,14 @@
 [project]
 name = "adloop"
 version = "0.38.4"
-description = "The AI command center for Google Ads, Reddit Ads, GA4, and tracking code."
+description = "Google Ads MCP server for Claude, ChatGPT and Cursor, with Reddit Ads, GA4 and Tag Manager. Every change is previewed first."
 readme = "README.md"
 authors = [
     { name = "Daniel Klose", email = "info@daniel-klose.com" }
 ]
 requires-python = ">=3.11"
 license = { text = "MIT" }
-keywords = ["mcp", "google-ads", "reddit-ads", "google-analytics", "ga4", "cursor", "marketing"]
+keywords = ["mcp", "mcp-server", "google-ads", "google-ads-mcp", "reddit-ads", "google-analytics", "ga4", "claude", "chatgpt", "cursor", "marketing"]
 dependencies = [
     "fastmcp>=4.0",
     "google-ads>=32.0.0",
