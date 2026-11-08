@@ -147,13 +147,9 @@ def _custom_html_refusal(what: str) -> dict:
 
 
 def _blocked(operation: str, config: AdLoopConfig) -> dict | None:
-    from adloop.safety.guards import SafetyViolation, check_blocked_operation
+    from adloop.safety.guards import blocked_operation_error
 
-    try:
-        check_blocked_operation(operation, config.safety)
-    except SafetyViolation as e:
-        return {"error": str(e)}
-    return None
+    return blocked_operation_error(operation, config.safety)
 
 
 def _client(config: AdLoopConfig):
@@ -278,7 +274,8 @@ def _merge_parameters(existing: list[dict], updates: list[dict]) -> list[dict]:
 def _store(operation: str, entity_type: str, entity_id: str, changes: dict,
            *, warnings: list[str] | None = None,
            double_confirm: bool = False) -> dict:
-    from adloop.safety.preview import ChangePlan, store_plan
+    from adloop.safety.guards import store_draft
+    from adloop.safety.preview import ChangePlan
 
     plan = ChangePlan(
         operation=operation,
@@ -289,11 +286,7 @@ def _store(operation: str, entity_type: str, entity_id: str, changes: dict,
         requires_double_confirm=double_confirm,
         platform=PLATFORM,
     )
-    store_plan(plan)
-    preview = plan.to_preview()
-    if warnings:
-        preview["warnings"] = warnings
-    return preview
+    return store_draft(plan, warnings=warnings)
 
 
 def _workspace_digest(status: dict) -> str:

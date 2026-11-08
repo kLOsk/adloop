@@ -538,6 +538,12 @@ def _dialog_applies(plan_id: str) -> ChangePlan | None:
     if safety.two_phase_apply and plan.dry_run_result is None:
         # confirm_and_apply refuses with DRY_RUN_REQUIRED; don't ask first.
         return None
+    from adloop.safety.guards import blocked_operation_error
+
+    if blocked_operation_error(plan.operation, safety) is not None:
+        # confirm_and_apply refuses with BLOCKED; asking first would have the
+        # user approve a change that cannot happen.
+        return None
     return plan
 
 
