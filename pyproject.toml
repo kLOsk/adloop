@@ -1,6 +1,6 @@
 [project]
 name = "adloop"
-version = "0.39.2"
+version = "0.39.3"
 description = "Google Ads MCP server for Claude, ChatGPT and Cursor, with Reddit Ads, GA4 and Tag Manager. Every change is previewed first."
 readme = "README.md"
 authors = [
