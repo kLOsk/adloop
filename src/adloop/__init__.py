@@ -37,6 +37,9 @@ def main() -> None:
       adloop install-rules   Install Claude orchestration rules globally.
       adloop update-rules    Refresh the installed rules block.
       adloop uninstall-rules Remove the installed rules block + commands.
+      adloop microsoft-login Sign in to Microsoft Advertising in the browser
+                             (--user <email> preselects the account; --device-code
+                             for the code-on-another-device flow).
       adloop --version, -V   Print version and exit.
     """
     args = sys.argv[1:]
@@ -63,6 +66,26 @@ def main() -> None:
         except KeyboardInterrupt:
             print("\n\n  Cancelled.\n")
             sys.exit(130)
+        return
+
+    if args and args[0] == "microsoft-login":
+        from adloop.config import load_config
+        from adloop.microsoft_ads.auth import MicrosoftAdsAuthError, browser_login, device_code_login
+
+        options = args[1:]
+        hint = next((options[k + 1] for k, a in enumerate(options[:-1]) if a == "--user"), "")
+        try:
+            if "--device-code" in options:
+                path = device_code_login(load_config())
+            else:
+                path = browser_login(load_config(), login_hint=hint)
+        except MicrosoftAdsAuthError as exc:
+            print(f"\n  {exc}\n")
+            sys.exit(1)
+        except KeyboardInterrupt:
+            print("\n\n  Cancelled.\n")
+            sys.exit(130)
+        print(f"\n  Signed in. Token saved to {path}. Restart the MCP server to use it.\n")
         return
 
     # Process-global side effects (signal handlers, heartbeat thread, and

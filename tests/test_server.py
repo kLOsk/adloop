@@ -389,6 +389,7 @@ class TestToolsets:
 
         assert list(TOOLSETS) == [
             "ads", "ga4", "tracking", "gtm", "gsc", "web", "merchant", "reddit",
+            "microsoft_ads",
         ]
 
     @pytest.mark.asyncio

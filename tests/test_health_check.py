@@ -127,3 +127,32 @@ async def test_server_announces_its_icons_and_website():
         "https://getadloop.com/icon-512.png",
         "https://getadloop.com/favicon.svg",
     ]
+
+
+def test_hosted_provider_without_an_integration_reports_not_configured(monkeypatch, stub_other_services):
+    """Hosted, a provider that does not support an ad platform means the
+    platform is not offered, even when shared config names its app."""
+    import adloop.ga4.reports as reports
+    from adloop import auth
+    from adloop.config import MicrosoftAdsConfig
+
+    class OlderProvider:
+        pass
+
+    def no_local_files(*_a, **_k):
+        raise AssertionError("hosted mode must not read local credential files")
+
+    monkeypatch.setattr("adloop.runtime.deployment_mode", lambda: "server")
+    monkeypatch.setattr("adloop.microsoft_ads.auth.local_credentials", no_local_files)
+    monkeypatch.setattr(reports, "get_account_summaries", lambda _c: _summaries())
+    monkeypatch.setattr(reports, "probe_data_api", lambda _c, _p: None)
+    previous = auth.get_credentials_provider()
+    auth.set_credentials_provider(OlderProvider())
+    runtime.set_default_config(AdLoopConfig(
+        microsoft_ads=MicrosoftAdsConfig(developer_token="dev-token", client_id="app-id"),
+    ))
+    try:
+        status = server.health_check()
+    finally:
+        auth.set_credentials_provider(previous)
+    assert status["microsoft_ads"] == "not_configured"
