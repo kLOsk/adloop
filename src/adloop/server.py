@@ -1137,6 +1137,132 @@ def list_ga4_dimensions_and_metrics(
     )
 
 
+@_tool(title="Analytics funnel report", annotations=_READONLY, tags={"ga4"})
+@_safe
+def run_ga4_funnel(
+    steps: _StrOrDictListOpt = None,
+    date_range_start: str = "28daysAgo",
+    date_range_end: str = "today",
+    open_funnel: bool = False,
+    breakdown: str = "",
+    breakdown_limit: int = 5,
+    next_action: str = "",
+    dimension_filter: _DictListOpt = None,
+    property_id: str = "",
+) -> dict:
+    """Run a GA4 funnel report: how many users go from one step to the next, and where they drop off.
+
+    Steps are event names or pages, in order. Returns per step the users,
+    completion rate to the next step, abandonments and abandonment rate,
+    plus how many started and finished, the overall completion rate and the
+    biggest drop (after which step most users leave). With breakdown, the
+    same per value of a dimension (e.g. deviceCategory); with next_action,
+    the most common next event or page after each step, i.e. what users do
+    instead. Uses the GA4 Data API v1alpha (runFunnelReport), the endpoint
+    behind GA4's funnel explorations; data reaches back as far as the
+    property's data retention.
+
+    Args:
+        steps: 2 to 10 steps. Each is an event name ("add_to_cart") or an
+            object: {"event": "purchase", "name": "Bought"}, {"page":
+            "/checkout"} (page views whose URL contains the text), optional
+            "directly_followed": true (no other event in between) and
+            "within_minutes": 30 (must follow the previous step within that
+            time).
+        date_range_start: "today", "yesterday", "NdaysAgo" or "YYYY-MM-DD".
+        date_range_end: Same formats.
+        open_funnel: False (default) counts only users who start at step 1;
+            true lets users enter at any step.
+        breakdown: Dimension to split every step by, e.g. deviceCategory,
+            sessionDefaultChannelGroup, country.
+        breakdown_limit: How many values of the breakdown dimension (1-15).
+        next_action: Dimension for "what came next" after each step, e.g.
+            eventName or pagePath.
+        dimension_filter: Only count users matching these conditions, same
+            format as in run_ga4_report, e.g. [{"field": "deviceCategory",
+            "value": "mobile"}].
+        property_id: GA4 property as "properties/123456789" or the bare
+            numeric ID. If empty, uses the default from config.
+    """
+    from adloop.ga4.funnels import run_ga4_funnel as _impl
+
+    return _impl(
+        current_config(),
+        property_id=property_id or current_config().ga4.property_id,
+        steps=steps,
+        date_range_start=date_range_start,
+        date_range_end=date_range_end,
+        open_funnel=open_funnel,
+        breakdown=breakdown,
+        breakdown_limit=breakdown_limit,
+        next_action=next_action,
+        dimension_filter=dimension_filter,
+    )
+
+
+@_tool(title="Analytics conversion attribution", annotations=_READONLY, tags={"ga4"})
+@_safe
+def run_ga4_attribution(
+    dimensions: _StrListOpt = None,
+    metrics: _StrListOpt = None,
+    date_range_start: str = "28daysAgo",
+    date_range_end: str = "today",
+    conversions: _StrListOpt = None,
+    attribution_model: str = "DATA_DRIVEN",
+    limit: int = 50,
+    property_id: str = "",
+) -> dict:
+    """Show which channels, campaigns or sources get the credit for conversions under GA4's attribution models, or compare data-driven with last click.
+
+    The view of GA4's Advertising workspace: conversions, revenue, ad cost
+    and ROAS per channel (or campaign, source, country, device) attributed
+    by the model, not by session. attribution_model COMPARE runs data-driven
+    and last click side by side and returns each row's share of the credit
+    under both and the shift in percentage points, with insights naming the
+    channels that gain or lose most. Conversions can be named by key event
+    name; empty means all. Uses the GA4 Data API v1alpha (runReport with a
+    conversion spec), which Google is still rolling out: a property without
+    it gets an explanation and the fallback. Ad cost and ROAS need Google
+    Ads linked to the property.
+
+    Args:
+        dimensions: Any of campaignName, continent, country,
+            defaultChannelGroup (default), deviceCategory, medium, platform,
+            primaryChannelGroup, source, sourceMedium, sourcePlatform,
+            subcontinent.
+        metrics: Any of allConversionsByConversionDate,
+            allConversionsByInteractionDate, totalRevenueByConversionDate,
+            totalRevenueByInteractionDate, advertiserAdCost,
+            advertiserAdClicks, advertiserAdImpressions,
+            advertiserAdCostPerClick,
+            advertiserAdCostPerAllConversionsByConversionDate,
+            advertiserAdCostPerAllConversionsByInteractionDate,
+            returnOnAdSpendByConversionDate, returnOnAdSpendByInteractionDate.
+            Default: conversions, revenue, ad cost and ROAS by conversion date.
+        date_range_start: "today", "yesterday", "NdaysAgo" or "YYYY-MM-DD".
+        date_range_end: Same formats.
+        conversions: Key event names (e.g. ["purchase"]) or GA4 conversion
+            action IDs ("conversionActions/123"); empty for all.
+        attribution_model: DATA_DRIVEN (default), LAST_CLICK, or COMPARE.
+        limit: Maximum rows per model.
+        property_id: GA4 property as "properties/123456789" or the bare
+            numeric ID. If empty, uses the default from config.
+    """
+    from adloop.ga4.attribution import run_ga4_attribution as _impl
+
+    return _impl(
+        current_config(),
+        property_id=property_id or current_config().ga4.property_id,
+        dimensions=dimensions,
+        metrics=metrics,
+        date_range_start=date_range_start,
+        date_range_end=date_range_end,
+        conversions=conversions,
+        attribution_model=attribution_model,
+        limit=limit,
+    )
+
+
 @_tool(title="List Analytics annotations", annotations=_READONLY, tags={"ga4"})
 @_safe
 def list_ga4_annotations(
