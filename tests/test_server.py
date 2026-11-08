@@ -397,11 +397,15 @@ class TestToolsets:
     async def test_every_tool_carries_exactly_one_toolset_tag(self):
         """New tools MUST be tagged — untagged tools would silently vanish
         for every ADLOOP_TOOLSETS user and every restricted cloud key."""
-        from adloop.server import TOOLSETS, mcp
+        from adloop.server import CROSS_PLATFORM_TOOLS, TOOLSETS, mcp
 
         known = set(TOOLSETS) | {"core"}
         for tool in await mcp.list_tools():
             hits = (tool.tags or set()) & known
+            if tool.name in CROSS_PLATFORM_TOOLS:
+                # Needs both platforms, so it carries both toolset tags.
+                assert hits == CROSS_PLATFORM_TOOLS[tool.name], f"{tool.name}: toolset tags {hits}"
+                continue
             assert len(hits) == 1, f"{tool.name}: toolset tags {hits or 'MISSING'}"
 
     @pytest.mark.asyncio

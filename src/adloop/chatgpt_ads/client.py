@@ -12,8 +12,13 @@ which owns the behaviours the rest of the package relies on:
   one surfaces as ``ChatGPTAdsApiError(status=429)`` so the calling agent
   can tell the user instead of looping.
 - **Money**: budgets and bids are micros (one million per currency unit);
-  reporting metrics (spend, CPC, CPM) are already currency units.
-  :func:`from_micros` is the only place that divides by a million.
+  reporting metrics (spend, CPC, CPM) are already currency units. The
+  conversions are Reddit's (:func:`adloop.reddit.client.from_micro` and
+  ``to_micro``), which work the same way.
+- **Unknown outcomes**: a write whose request may have reached OpenAI
+  without an answer coming back (a timeout, a dropped connection, a 5xx)
+  raises :class:`ChatGPTAdsOutcomeUnknown`. Reads and requests that never
+  left this machine say that nothing changed.
 """
 
 from __future__ import annotations
@@ -21,6 +26,10 @@ from __future__ import annotations
 import os
 import time
 from typing import TYPE_CHECKING, Any
+
+# Re-exported: the same micros conversions as Reddit's API.
+from adloop.reddit.client import from_micro as from_micros  # noqa: F401
+from adloop.reddit.client import to_micro  # noqa: F401
 
 if TYPE_CHECKING:
     from adloop.config import AdLoopConfig
@@ -72,6 +81,20 @@ class ChatGPTAdsApiError(Exception):
         self.retry_after = retry_after
 
 
+class ChatGPTAdsOutcomeUnknown(ChatGPTAdsApiError):
+    """A write may have reached OpenAI, but no answer came back.
+
+    The change may or may not be in the account. The caller reads the
+    entity back before anything else; an update or status change can be
+    retried once the dry run sees what is live, a create relies on its
+    ``Idempotency-Key``.
+    """
+
+
+# A 5xx on a write can come after OpenAI processed it.
+_UNKNOWN_OUTCOME_STATUSES = (500, 502, 503, 504)
+
+
 def redact(text: Any, secrets: list[str]) -> Any:
     """``text`` with every secret (8+ characters) replaced by ``[redacted]``."""
     if not isinstance(text, str):
@@ -99,16 +122,6 @@ def exact_from_micros(value: Any) -> float | None:
         return None
     try:
         return int(value) / 1_000_000
-    except (TypeError, ValueError):
-        return None
-
-
-def from_micros(value: Any) -> float | None:
-    """Micros → currency amount (2 dp); ``None`` stays ``None``."""
-    if value is None or value == "":
-        return None
-    try:
-        return round(float(value) / 1_000_000, 2)
     except (TypeError, ValueError):
         return None
 
@@ -203,6 +216,20 @@ def _error_detail(payload: Any) -> tuple[str, str]:
     return _trim(str(message)), str(payload.get("code") or "")
 
 
+def _never_sent(exc: Exception) -> bool:
+    """True when the request provably never left this machine."""
+    import requests
+
+    if isinstance(exc, (requests.ConnectTimeout, requests.exceptions.InvalidURL)):
+        return True
+    reason = getattr(exc.args[0], "reason", None) if exc.args else None
+    try:
+        from urllib3.exceptions import NewConnectionError
+    except ImportError:  # pragma: no cover - urllib3 ships with requests
+        return False
+    return isinstance(reason, NewConnectionError)
+
+
 def _retry_after(headers: Any) -> int | None:
     raw = headers.get("Retry-After") or headers.get("retry-after")
     if raw is None:
@@ -223,13 +250,16 @@ def api_request(
     ad_account_id: str = "",
     headers: dict | None = None,
     files: dict | None = None,
+    mutation: bool = False,
 ) -> dict:
     """Perform one authenticated call and return the decoded JSON body.
 
     ``path`` is relative to :data:`API_BASE`. List-valued ``params`` go out
     as repeated keys, so pass bracketed names (``"fields[]"``) the way the
     API documents them. ``headers`` adds e.g. an ``Idempotency-Key``;
-    ``files`` sends a multipart upload instead of a JSON body.
+    ``files`` sends a multipart upload instead of a JSON body. ``mutation``
+    marks a request that changes the account, so a lost answer is reported
+    as an unknown outcome instead of "nothing changed".
     """
     import requests
 
@@ -257,9 +287,17 @@ def api_request(
                 timeout=_REQUEST_TIMEOUT_SECONDS,
             )
         except requests.RequestException as exc:
+            where = f"{method} /{path.lstrip('/')} ({type(exc).__name__})"
+            if mutation and not _never_sent(exc):
+                raise ChatGPTAdsOutcomeUnknown(
+                    f"No answer from the ChatGPT Ads API for {where}: the request may have "
+                    "reached OpenAI, so whether it changed anything is unknown.",
+                    status=0,
+                ) from None
             raise ChatGPTAdsApiError(
-                f"Could not reach the ChatGPT Ads API for {method} /{path.lstrip('/')} "
-                f"({type(exc).__name__}); nothing is known to have changed, check before retrying.",
+                f"Could not reach the ChatGPT Ads API for {where}; "
+                + ("the request was not sent, so nothing changed." if mutation
+                   else "nothing was changed (a read)."),
                 status=0,
             ) from None
         status = response.status_code
@@ -302,13 +340,16 @@ def api_request(
                 code=code,
                 retry_after=retry_after,
             )
-        raise ChatGPTAdsApiError(
-            f"ChatGPT Ads API returned {status} for {method} /{path.lstrip('/')}"
-            + (f": {detail}" if detail else ""),
-            status=status,
-            url=url,
-            code=code,
+        message = f"ChatGPT Ads API returned {status} for {method} /{path.lstrip('/')}" + (
+            f": {detail}" if detail else ""
         )
+        if mutation and status in _UNKNOWN_OUTCOME_STATUSES:
+            raise ChatGPTAdsOutcomeUnknown(
+                message + ". OpenAI may have carried out the request before failing, so "
+                "whether it changed anything is unknown.",
+                status=status, url=url, code=code,
+            )
+        raise ChatGPTAdsApiError(message, status=status, url=url, code=code)
 
 
 def api_get(
@@ -324,20 +365,21 @@ def api_post(
     *,
     ad_account_id: str = "",
     idempotency_key: str = "",
+    mutation: bool = True,
 ) -> dict:
-    if idempotency_key:
-        return api_request(
-            config, "POST", path, json_body=body or {}, ad_account_id=ad_account_id,
-            headers={"Idempotency-Key": idempotency_key},
-        )
-    return api_request(config, "POST", path, json_body=body or {}, ad_account_id=ad_account_id)
+    """POST a write (or, with ``mutation=False``, a report query such as conversions/insights)."""
+    headers = {"Idempotency-Key": idempotency_key} if idempotency_key else None
+    return api_request(
+        config, "POST", path, json_body=body or {}, ad_account_id=ad_account_id,
+        headers=headers, mutation=mutation,
+    )
 
 
 def api_upload(config: AdLoopConfig, filename: str, content: bytes, mime: str, *, ad_account_id: str = "") -> dict:
-    """Multipart ``POST /upload`` of one image; returns ``{"file_id": ...}``."""
+    """Multipart ``POST /upload`` of one image's bytes; returns ``{"file_id": ...}``."""
     return api_request(
         config, "POST", "upload", ad_account_id=ad_account_id,
-        files={"file": (filename, content, mime)},
+        files={"file": (filename, content, mime)}, mutation=True,
     )
 
 

@@ -224,3 +224,31 @@ def test_a_hosted_workspace_without_microsoft_is_not_probed(monkeypatch):
         runtime.set_tool_visibility(None)
         auth.set_credentials_provider(previous)
     assert "microsoft_ads" not in status
+
+
+def test_hosted_provider_without_chatgpt_ads_reports_not_configured(monkeypatch, stub_other_services):
+    """Hosted, a provider without ChatGPT Ads support means the platform is not
+    offered, even when shared config holds a key; no local key is read."""
+    import adloop.ga4.reports as reports
+    from adloop import auth
+    from adloop.config import ChatGPTAdsConfig
+
+    class OlderProvider:
+        pass
+
+    def no_local_keys(*_a, **_k):
+        raise AssertionError("hosted mode must not read local ChatGPT Ads keys")
+
+    monkeypatch.setattr("adloop.runtime.deployment_mode", lambda: "server")
+    monkeypatch.setattr("adloop.chatgpt_ads.client.local_api_key", no_local_keys)
+    monkeypatch.setenv("OPENAI_ADS_API_KEY", "sk-ads-from-env")
+    monkeypatch.setattr(reports, "get_account_summaries", lambda _c: _summaries())
+    monkeypatch.setattr(reports, "probe_data_api", lambda _c, _p: None)
+    previous = auth.get_credentials_provider()
+    auth.set_credentials_provider(OlderProvider())
+    runtime.set_default_config(AdLoopConfig(chatgpt_ads=ChatGPTAdsConfig(api_key="sk-ads-shared")))
+    try:
+        status = server.health_check()
+    finally:
+        auth.set_credentials_provider(previous)
+    assert status["chatgpt_ads"] == "not_configured"

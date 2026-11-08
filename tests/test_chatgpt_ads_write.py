@@ -16,7 +16,7 @@ import pytest
 
 from adloop.ads import write as ads_write
 from adloop.chatgpt_ads import read, write
-from adloop.chatgpt_ads.client import ChatGPTAdsApiError
+from adloop.chatgpt_ads.client import ChatGPTAdsApiError, ChatGPTAdsOutcomeUnknown
 from adloop.config import AdLoopConfig, ChatGPTAdsConfig, SafetyConfig
 from adloop.safety import preview as preview_store
 from adloop.safety.preview import InMemoryPlanStore
@@ -27,6 +27,11 @@ TZ = "America/Los_Angeles"
 def _text(value) -> str:
     """A result as readable text (no \\u escapes), for message assertions."""
     return json.dumps(value, ensure_ascii=False, default=str)
+
+
+def _payload(preview: dict) -> dict:
+    """What the applier sends: the plan's apply-only payload, never shown in a preview."""
+    return preview_store.get_plan(preview["plan_id"]).apply_only_payload
 
 
 class FakeOpenAIAds:
@@ -94,6 +99,8 @@ class FakeOpenAIAds:
         self.created: dict[str, dict] = {}
         self.created_bodies: dict[str, dict] = {}
         self.lose_next_response = False
+        # Carry out the next update or status change, then lose the answer.
+        self.lose_next_update = False
         self._next = 100
 
     # -- helpers -------------------------------------------------------------
@@ -107,8 +114,17 @@ class FakeOpenAIAds:
     def writes(self) -> list[dict]:
         return [c for c in self.calls if c["method"] == "POST"]
 
+    def _lost_or(self, obj: dict, path: str) -> dict:
+        if self.lose_next_update:
+            self.lose_next_update = False
+            raise ChatGPTAdsOutcomeUnknown(
+                f"No answer from the ChatGPT Ads API for POST /{path} (ReadTimeout): the request may have "
+                "reached OpenAI, so whether it changed anything is unknown.")
+        return self._public(obj)
+
     # -- the patched api_request ----------------------------------------------
-    def __call__(self, config, method, path, *, params=None, json_body=None, ad_account_id="", headers=None, files=None):
+    def __call__(self, config, method, path, *, params=None, json_body=None, ad_account_id="", headers=None, files=None,
+                 mutation=False):
         params = dict(params or {})
         self.calls.append({"method": method, "path": path, "params": params, "body": copy.deepcopy(json_body),
                            "headers": dict(headers or {}), "files": files})
@@ -125,6 +141,12 @@ class FakeOpenAIAds:
                 return page([self._public(a) for a in self.ads.values() if a["_group"] == params.get("ad_group_id")])
             if path == "conversions/event_settings":
                 return page(copy.deepcopy(self.settings))
+            if len(parts) == 2 and parts[0] in ("campaigns", "ad_groups", "ads"):
+                # Single reads, like OpenAI's: no parent id in the answer.
+                obj = self._store(parts[0]).get(parts[1])
+                if obj is None:
+                    raise ChatGPTAdsApiError(f"ChatGPT Ads API returned 404 for GET /{path}", status=404)
+                return self._public(obj)
             if path == "geo_lookup/search":
                 return {"data": [{"id": "3000194", "name": "Springfield", "canonical_name": "Springfield,Illinois,US",
                                   "type": "market", "country_code": "US", "region_code": "IL", "parent_id": "2000006"}]}
@@ -153,7 +175,9 @@ class FakeOpenAIAds:
                     if key:
                         self.created[key] = obj
                         self.created_bodies[key] = copy.deepcopy(json_body)
-                    raise ChatGPTAdsApiError("Could not reach the ChatGPT Ads API for POST /ads (ReadTimeout)")
+                    raise ChatGPTAdsOutcomeUnknown(
+                        f"No answer from the ChatGPT Ads API for POST /{path} (ReadTimeout): the request may have "
+                        "reached OpenAI, so whether it changed anything is unknown.")
                 if key:
                     self.created[key] = obj
                     self.created_bodies[key] = copy.deepcopy(json_body)
@@ -161,14 +185,14 @@ class FakeOpenAIAds:
             if len(parts) == 3 and parts[2] in ("pause", "activate", "archive"):
                 obj = self._store(parts[0])[parts[1]]
                 obj["status"] = {"pause": "paused", "activate": "active", "archive": "archived"}[parts[2]]
-                return self._public(obj)
+                return self._lost_or(obj, path)
             if len(parts) == 2:
                 obj = self._store(parts[0])[parts[1]]
                 for k, v in (json_body or {}).items():
                     obj[k] = copy.deepcopy(v)
                 if parts[0] == "ads" and "creative" in (json_body or {}):
                     obj["review_status"] = "in_review"
-                return self._public(obj)
+                return self._lost_or(obj, path)
         raise AssertionError(f"unexpected call {method} {path}")
 
 
@@ -266,11 +290,25 @@ class TestStatus:
 
     def test_status_changed_after_the_draft_is_refused_at_apply(self, api, config):
         preview = write.pause_chatgpt_entity(config, entity_type="ad", entity_id="ad_1")
-        api.ads["ad_1"]["status"] = "paused"  # someone paused it in Ads Manager
+        api.ads["ad_1"]["status"] = "archived"  # someone archived it in Ads Manager
         result = ads_write.confirm_and_apply(config, plan_id=preview["plan_id"], dry_run=False)
         assert "status changed since the draft" in result["error"]
         assert not api.writes()
         assert preview_store.get_plan(preview["plan_id"]) is not None
+
+    def test_status_already_at_the_target_sends_nothing(self, api, config):
+        preview = write.pause_chatgpt_entity(config, entity_type="ad", entity_id="ad_1")
+        api.ads["ad_1"]["status"] = "paused"  # paused in Ads Manager meanwhile
+        result = _apply(config, preview)
+        assert result["status"] == "APPLIED" and "nothing was sent" in result["result"]["note"]
+        assert not api.writes()
+
+    def test_preflight_reads_the_target_by_id(self, api, config):
+        preview = write.pause_chatgpt_entity(config, entity_type="ad", entity_id="ad_1")
+        api.calls.clear()
+        ads_write.confirm_and_apply(config, plan_id=preview["plan_id"], dry_run=True)
+        reads = [c["path"] for c in api.calls if c["method"] == "GET"]
+        assert reads == ["ad_account", "ads/ad_1"]
 
     def test_validation_and_unknown_entities(self, api, config):
         assert "entity_type" in _text(write.pause_chatgpt_entity(config, entity_type="keyword", entity_id="x"))
@@ -296,7 +334,7 @@ class TestStatus:
 class TestCampaignUpdate:
     def test_budget_change_sends_the_whole_budget(self, api, config):
         preview = write.update_chatgpt_campaign(config, campaign_id="cmpn_1", daily_budget=45)
-        assert preview["changes"]["changes"]["daily_budget"] == {"from": 35.0, "to": 45.0, "currency": "USD"}
+        assert preview["changes"]["display"]["daily_budget"] == {"from": 35.0, "to": 45.0, "currency": "USD"}
         assert preview["requires_double_confirm"] is False
         assert _apply(config, preview)["status"] == "APPLIED"
         call = api.writes()[-1]
@@ -321,7 +359,7 @@ class TestCampaignUpdate:
     def test_location_change_keeps_audiences_and_platforms(self, api, config):
         preview = write.update_chatgpt_campaign(config, campaign_id="cmpn_1", location_ids=["3000194", "3000200"],
                                                 excluded_location_ids=["4000001"])
-        targeting = preview["changes"]["changes"]["targeting"]
+        targeting = preview["changes"]["display"]["targeting"]
         assert targeting["locations"]["from"] == ["Springfield (market)"]
         assert targeting["locations"]["to"] == ["id 3000194", "id 3000200"]
         _apply(config, preview)
@@ -350,11 +388,11 @@ class TestCampaignUpdate:
     def test_tracking_template_without_paid_medium_warns(self, api, config):
         preview = write.update_chatgpt_campaign(config, campaign_id="cmpn_1", query_string_template="utm_campaign={campaign_id}")
         assert any("paid utm_medium" in w for w in preview["warnings"])
-        assert preview["changes"]["body"]["landing_page_configuration"] == {"query_string_template": "utm_campaign={campaign_id}"}
+        assert _payload(preview)["body"]["landing_page_configuration"] == {"query_string_template": "utm_campaign={campaign_id}"}
 
     def test_dates_are_account_local_days(self, api, config):
         preview = write.update_chatgpt_campaign(config, campaign_id="cmpn_1", start_date="2026-11-10", end_date="2026-11-30")
-        body = preview["changes"]["body"]
+        body = _payload(preview)["body"]
         from datetime import datetime
         from zoneinfo import ZoneInfo
 
@@ -362,17 +400,17 @@ class TestCampaignUpdate:
         assert body["start_time"] == int(datetime(2026, 11, 10, tzinfo=local).timestamp())
         # The campaign stops at the end of the 30th: midnight starting December 1st.
         assert body["end_time"] == int(datetime(2026, 12, 1, tzinfo=local).timestamp())
-        assert preview["changes"]["changes"]["end_date"]["to"] == "2026-11-30"
+        assert preview["changes"]["display"]["end_date"]["to"] == "2026-11-30"
         assert "after end_date" in _text(write.update_chatgpt_campaign(config, campaign_id="cmpn_1", start_date="2026-12-01", end_date="2026-11-01"))
 
     def test_conversion_events(self, api, config):
         assert "ces_nope" in _text(write.update_chatgpt_campaign(config, campaign_id="cmpn_1", conversion_event_setting_ids=["ces_nope"]))
         assert "cannot change" in _text(write.update_chatgpt_campaign(config, campaign_id="cmpn_2", conversion_event_setting_ids=["ces_lead"]))
         ok = write.update_chatgpt_campaign(config, campaign_id="cmpn_1", conversion_event_setting_ids=["ces_lead", "ces_custom"])
-        shown = ok["changes"]["changes"]["conversion_events"]
+        shown = ok["changes"]["display"]["conversion_events"]
         assert shown["from"] == ["ces_lead"] and len(shown["to"]) == 2
         assert shown["to"][0] == "Web Form Lead (lead_created)" and shown["to"][1].startswith("Quote (")
-        assert ok["changes"]["body"] == {"conversion_event_setting_ids": ["ces_lead", "ces_custom"]}
+        assert _payload(ok)["body"] == {"conversion_event_setting_ids": ["ces_lead", "ces_custom"]}
 
     def test_edit_in_ads_manager_after_the_draft_blocks_the_apply(self, api, config):
         preview = write.update_chatgpt_campaign(config, campaign_id="cmpn_1", daily_budget=40)
@@ -400,8 +438,8 @@ class TestCampaignUpdate:
 class TestAdGroupUpdate:
     def test_bid_change_sends_the_whole_bidding_config(self, api, config):
         preview = write.update_chatgpt_ad_group(config, ad_group_id="adgrp_1", max_bid=10)
-        assert preview["changes"]["changes"]["bid"]["from"] == "fixed 8.00 per click"
-        assert preview["changes"]["changes"]["bid"]["to"] == "fixed 10.00 per click"
+        assert preview["changes"]["display"]["bid"]["from"] == "fixed 8.00 per click"
+        assert preview["changes"]["display"]["bid"]["to"] == "fixed 10.00 per click"
         _apply(config, preview)
         assert api.writes()[-1]["body"]["bidding_config"] == {
             "billing_event_type": "click", "strategy": "fixed_bid", "max_bid_micros": 10_000_000,
@@ -413,7 +451,7 @@ class TestAdGroupUpdate:
 
     def test_automatic_strategy_rules(self, api, config):
         auto = write.update_chatgpt_ad_group(config, ad_group_id="adgrp_1", strategy="maximize_clicks")
-        config_sent = auto["changes"]["body"]["bidding_config"]
+        config_sent = _payload(auto)["body"]["bidding_config"]
         assert config_sent["strategy"] == "maximize_clicks" and "max_bid_micros" not in config_sent
         assert config_sent["custom_audience_bid_multipliers"] == []
         assert any("drops the audience bid multipliers" in w for w in auto["warnings"])
@@ -427,18 +465,18 @@ class TestAdGroupUpdate:
 
     def test_conversion_campaign_bid_is_a_target_cpa(self, api, config):
         preview = write.update_chatgpt_ad_group(config, ad_group_id="adgrp_2", max_bid=100)
-        assert preview["changes"]["changes"]["bid"]["to"] == "fixed 100.00 target CPA"
+        assert preview["changes"]["display"]["bid"]["to"] == "fixed 100.00 target CPA"
 
     def test_context_hints_add_remove_and_replace(self, api, config):
         preview = write.update_chatgpt_ad_group(config, ad_group_id="adgrp_1", add_context_hints=["hydro jetting", "Clogged Drain"],
                                                 remove_context_hints=["sewer backup", "not there"])
-        hints = preview["changes"]["changes"]["context_hints"]
+        hints = preview["changes"]["display"]["context_hints"]
         assert hints["added"] == ["hydro jetting"] and hints["removed"] == ["sewer backup"]
         assert any("nothing to remove" in w for w in preview["warnings"])
         _apply(config, preview)
         assert api.writes()[-1]["body"] == {"context_hints": ["clogged drain", "hydro jetting"]}
         replaced = write.update_chatgpt_ad_group(config, ad_group_id="adgrp_1", context_hints=["drain repair"])
-        assert replaced["changes"]["body"]["context_hints"] == ["drain repair"]
+        assert _payload(replaced)["body"]["context_hints"] == ["drain repair"]
         mixed = write.update_chatgpt_ad_group(config, ad_group_id="adgrp_1", context_hints=["a"], add_context_hints=["b"])
         assert "not both" in _text(mixed)
 
@@ -457,7 +495,7 @@ class TestAdGroupUpdate:
 class TestAdUpdate:
     def test_copy_edit_sends_the_full_creative_and_goes_to_review(self, api, config):
         preview = write.update_chatgpt_ad(config, ad_id="ad_1", title="Drain cleaning from $69")
-        assert preview["changes"]["changes"]["title"] == {"from": "Drain cleaning $69", "to": "Drain cleaning from $69"}
+        assert preview["changes"]["display"]["title"] == {"from": "Drain cleaning $69", "to": "Drain cleaning from $69"}
         assert any("new version for review" in w for w in preview["warnings"])
         result = _apply(config, preview)
         assert result["status"] == "APPLIED" and result["result"]["review_status"] == "in_review"
@@ -473,7 +511,9 @@ class TestAdUpdate:
             _apply(config, preview)
         paths = [c["path"] for c in api.writes()]
         assert paths == ["upload", "ads/ad_1"]
-        assert api.writes()[0]["body"] == {"image_url": "https://cdn.example/drain.png"}
+        # The bytes AdLoop checked go up, so OpenAI never fetches the URL itself.
+        assert api.writes()[0]["files"]["file"] == ("drain.png", _PNG, "image/png")
+        assert api.writes()[0]["body"] is None
         assert api.writes()[1]["body"]["creative"]["file_id"].startswith("file_up")
 
     def test_limits_and_guards(self, api, config):
@@ -493,7 +533,7 @@ class TestAdUpdate:
 
     def test_multi_image_copy_edit_keeps_the_images(self, api, config):
         preview = write.update_chatgpt_ad(config, ad_id="ad_3", body="Licensed plumbers")
-        creative = preview["changes"]["body"]["creative"]
+        creative = _payload(preview)["body"]["creative"]
         assert "file_id" not in creative and "file_ids" not in creative
 
 
@@ -528,7 +568,7 @@ class TestCreates:
                                          conversion_event_setting_ids=["ces_custom"]))
         warn = write.draft_chatgpt_campaign(config, name="Clicks only", daily_budget=20, countries=["us"])
         assert any("report 0 conversions" in w for w in warn["warnings"])
-        assert warn["changes"]["body"]["targeting"]["locations"] == {"countries": ["US"]}
+        assert _payload(warn)["body"]["targeting"]["locations"] == {"countries": ["US"]}
 
     def test_retried_create_does_not_duplicate(self, api, config):
         preview = write.draft_chatgpt_campaign(config, name="Retry me", daily_budget=10, countries=["US"])
@@ -544,8 +584,9 @@ class TestCreates:
         assert preview["changes"]["bid"] == "maximize_clicks"
         _apply(config, preview)
         body = api.writes()[-1]["body"]
+        # No audience multipliers to clear on a new ad group: the field is left out.
         assert body["status"] == "paused" and body["bidding_config"] == {
-            "billing_event_type": "click", "strategy": "maximize_clicks", "custom_audience_bid_multipliers": []}
+            "billing_event_type": "click", "strategy": "maximize_clicks"}
         fixed = write.draft_chatgpt_ad_group(config, campaign_id="cmpn_2", name="Fixed", max_bid=80)
         assert fixed["changes"]["bid"] == "fixed 80.00 target CPA"
         assert "archived" in write.draft_chatgpt_ad_group(config, campaign_id="cmpn_3", name="Nope")["error"]
@@ -723,7 +764,7 @@ class TestRoundThreeFindings:
     def test_flight_start_moved_in_ads_manager_is_rechecked_at_apply(self, api, config):
         # The plan changes only the end; a later start in Ads Manager squeezes the same $500.
         preview = write.update_chatgpt_campaign(config, campaign_id="cmpn_2", end_date="2026-12-20")
-        api.campaigns["cmpn_2"]["start_time"] = preview["changes"]["body"]["end_time"] - 2 * 86400
+        api.campaigns["cmpn_2"]["start_time"] = _payload(preview)["body"]["end_time"] - 2 * 86400
         result = ads_write.confirm_and_apply(config, plan_id=preview["plan_id"], dry_run=False)
         assert result.get("status") != "APPLIED" and "start_time changed since the draft" in _text(result)
         assert not api.writes()
@@ -767,8 +808,8 @@ class TestUpstreamAuditFindings:
     def test_sub_cent_bids_are_shown_exactly(self, api, config):
         self._impressions(api)
         preview = write.update_chatgpt_ad_group(config, ad_group_id="adgrp_1", max_bid=0.005)
-        assert preview["changes"]["changes"]["bid"]["from"] == "fixed 0.004 per impression"
-        assert preview["changes"]["changes"]["bid"]["to"] == "fixed 0.005 per impression"
+        assert preview["changes"]["display"]["bid"]["from"] == "fixed 0.004 per impression"
+        assert preview["changes"]["display"]["bid"]["to"] == "fixed 0.005 per impression"
 
     def test_sub_cent_bid_raise_is_capped_again_at_apply(self, api, config):
         self._impressions(api)
@@ -799,4 +840,205 @@ class TestUpstreamAuditFindings:
                      if g["ad_group_id"] == "adgrp_1")
         preview = write.update_chatgpt_ad_group(config, ad_group_id="adgrp_1", max_bid=0.005)
         assert group["bidding"]["max_bid"] == 0.004
-        assert preview["changes"]["changes"]["bid"]["from"] == "fixed 0.004 per impression"
+        assert preview["changes"]["display"]["bid"]["from"] == "fixed 0.004 per impression"
+
+
+class TestMaintainerReview:
+    """kLOsk's review of #127."""
+
+    # -- payloads live in apply_only_payload, never in what is shown ----------
+    def test_request_and_snapshot_are_never_shown(self, api, config):
+        from adloop.safety.approval import confirmation_message
+
+        preview = write.update_chatgpt_campaign(config, campaign_id="cmpn_1", daily_budget=40)
+        plan = preview_store.get_plan(preview["plan_id"])
+        hidden = ("body", "before", "compare_keys", "ad_account_id", "image")
+        assert not set(hidden) & set(plan.changes) and not set(hidden) & set(preview["changes"])
+        assert plan.apply_only_payload["body"] == {"budget": {"daily_spend_limit_micros": 40_000_000}}
+        message = confirmation_message(plan)
+        assert "daily_spend_limit_micros" not in message and "before" not in message
+        assert "ad account id" not in message  # no empty field rows
+        assert "daily budget: 35.0 → 40.0" in message.splitlines()[1]
+        dry = ads_write.confirm_and_apply(config, plan_id=preview["plan_id"], dry_run=True)
+        assert "daily_spend_limit_micros" not in _text(dry)
+        _apply(config, preview)
+        with open(config.safety.log_file) as log:
+            assert "daily_spend_limit_micros" not in log.read()
+        assert api.writes()[-1]["body"] == {"budget": {"daily_spend_limit_micros": 40_000_000}}
+
+    def test_the_image_pin_is_never_shown(self, api, config):
+        from adloop.safety.approval import confirmation_message
+
+        with _fetch():
+            preview = write.draft_chatgpt_ad(config, ad_group_id="adgrp_1", title="Drain help", body="Fast.",
+                                             target_url="https://example.com/drain",
+                                             image_url="https://cdn.example/card.png")
+        plan = preview_store.get_plan(preview["plan_id"])
+        assert preview["changes"]["image"] == "https://cdn.example/card.png (PNG, 0.0 KB)"
+        assert "sha256" not in _text(preview) and "sha256" not in confirmation_message(plan)
+        assert len(plan.apply_only_payload["image"]["sha256"]) == 64
+
+    def test_a_plan_store_that_drops_the_payload_sends_nothing(self, api, config):
+        preview = write.update_chatgpt_campaign(config, campaign_id="cmpn_1", daily_budget=40)
+        preview_store.get_plan(preview["plan_id"]).apply_only_payload = {}
+        result = ads_write.confirm_and_apply(config, plan_id=preview["plan_id"], dry_run=False)
+        assert result.get("status") != "APPLIED" and "apply_only_payload is empty" in _text(result)
+        assert not api.writes()
+
+    def test_status_dialog_names_the_target_and_hides_the_action(self, api, config):
+        from adloop.safety.approval import confirmation_message
+
+        preview = write.pause_chatgpt_entity(config, entity_type="ad", entity_id="ad_1")
+        plan = preview_store.get_plan(preview["plan_id"])
+        assert plan.apply_only_payload == {"ad_account_id": "", "action": "pause"}
+        assert plan.changes["ad_group_name"] == "Drain cleaning" and "action" not in plan.changes
+        lines = confirmation_message(plan).splitlines()
+        assert lines[0] == 'AdLoop: set status "Drain $69" in ChatGPT Ads?'
+        assert "active → paused" in lines[1]
+
+    # -- lifetime → daily is judged on daily equivalents ---------------------
+    def test_lifetime_to_a_larger_daily_budget_is_double_confirmed(self, api, config):
+        # cmpn_2: 500 over a 31-day flight is about 16.13 a day; a daily 100 is about 6.2x that.
+        preview = write.update_chatgpt_campaign(config, campaign_id="cmpn_2", daily_budget=100)
+        assert preview["requires_double_confirm"] is True
+        warnings = " ".join(preview["warnings"])
+        assert "about 16.13 a day over its flight" in warnings and "about 6.2x the daily spend" in warnings
+        assert preview["changes"]["display"]["daily_spend"] == {"from": 16.13, "to": 100.0, "currency": "USD"}
+
+    def test_lifetime_to_a_similar_daily_budget_is_not(self, api, config):
+        preview = write.update_chatgpt_campaign(config, campaign_id="cmpn_2", daily_budget=20)
+        assert preview["requires_double_confirm"] is False
+        assert any("about 1.2x the daily spend" in w for w in preview["warnings"])
+
+    def test_shortening_a_lifetime_flight_counts_as_a_raise(self, api, config):
+        # 500 over 31 days → over 16 days is about 31 a day: nearly twice the daily spend.
+        preview = write.update_chatgpt_campaign(config, campaign_id="cmpn_2", end_date="2026-11-17")
+        assert "plan_id" in preview, preview
+        assert preview["requires_double_confirm"] is True
+
+    # -- the dry run and the apply read by id --------------------------------
+    def test_updates_and_creates_read_their_target_by_id(self, api, config):
+        update = write.update_chatgpt_ad_group(config, ad_group_id="adgrp_1", max_bid=9)
+        create = write.draft_chatgpt_ad(config, ad_group_id="adgrp_1", title="Drain help", body="Fast.",
+                                        target_url="https://example.com/drain", file_id="file_1")
+        for preview, target in ((update, "ad_groups/adgrp_1"), (create, "ad_groups/adgrp_1")):
+            api.calls.clear()
+            assert ads_write.confirm_and_apply(config, plan_id=preview["plan_id"], dry_run=True)["status"] == "DRY_RUN_SUCCESS"
+            reads = [c["path"] for c in api.calls if c["method"] == "GET"]
+            assert reads == ["ad_account", target], reads
+
+    # -- image ads: the checked bytes are pinned and uploaded ----------------
+    def test_an_image_changed_after_the_draft_is_refused(self, api, config):
+        with _fetch():
+            preview = write.draft_chatgpt_ad(config, ad_group_id="adgrp_1", title="Drain help", body="Fast.",
+                                             target_url="https://example.com/drain",
+                                             image_url="https://cdn.example/card.png")
+        with _fetch(b"\xff\xd8\xff" + b"\x01" * 40):
+            dry = ads_write.confirm_and_apply(config, plan_id=preview["plan_id"], dry_run=True)
+        assert dry["status"] == "DRY_RUN_FAILED" and "changed since the draft" in dry["error"]
+        assert not api.writes()
+
+    def test_a_local_image_changed_after_the_draft_is_refused(self, api, config, tmp_path):
+        image = tmp_path / "card.png"
+        image.write_bytes(_PNG)
+        preview = write.draft_chatgpt_ad(config, ad_group_id="adgrp_1", title="Drain help", body="Fast.",
+                                         target_url="https://example.com/drain", image_path=str(image))
+        image.write_bytes(_PNG + b"edited")
+        result = ads_write.confirm_and_apply(config, plan_id=preview["plan_id"], dry_run=False)
+        assert result.get("status") != "APPLIED" and "changed since the draft" in _text(result)
+        assert not api.writes()
+
+    def test_the_uploaded_bytes_are_the_checked_ones(self, api, config):
+        with _fetch():
+            preview = write.update_chatgpt_ad(config, ad_id="ad_1", image_url="https://cdn.example/new")
+            _apply(config, preview)
+        upload = api.writes()[0]
+        assert upload["path"] == "upload" and upload["files"]["file"] == ("image.png", _PNG, "image/png")
+
+    # -- a lost answer is an unknown outcome; the retry recognises it -------
+    def test_lost_update_answer_retries_without_sending_twice(self, api, config):
+        preview = write.update_chatgpt_campaign(config, campaign_id="cmpn_1", daily_budget=40)
+        api.lose_next_update = True
+        first = ads_write.confirm_and_apply(config, plan_id=preview["plan_id"], dry_run=False)
+        assert first.get("status") != "APPLIED"
+        assert "whether it changed anything is unknown" in first["error"]
+        assert "Confirming this plan again is safe" in first["error"]
+        second = _apply(config, preview)
+        assert second["status"] == "APPLIED" and "nothing was sent" in second["result"]["note"]
+        assert [c["path"] for c in api.writes()] == ["campaigns/cmpn_1"]
+
+    def test_lost_status_answer_retries_without_sending_twice(self, api, config):
+        preview = write.pause_chatgpt_entity(config, entity_type="campaign", entity_id="cmpn_1")
+        api.lose_next_update = True
+        assert ads_write.confirm_and_apply(config, plan_id=preview["plan_id"], dry_run=False).get("status") != "APPLIED"
+        second = ads_write.confirm_and_apply(config, plan_id=preview["plan_id"], dry_run=False)
+        assert second["status"] == "APPLIED" and "nothing was sent" in second["result"]["note"]
+        assert [c["path"] for c in api.writes()] == ["campaigns/cmpn_1/pause"]
+
+    def test_lost_create_answer_explains_the_idempotency_key(self, api, config):
+        preview = write.draft_chatgpt_campaign(config, name="Lost answer", daily_budget=10, countries=["US"])
+        api.lose_next_response = True
+        first = ads_write.confirm_and_apply(config, plan_id=preview["plan_id"], dry_run=False)
+        assert "may have created the campaign" in first["error"] and "Idempotency-Key" in first["error"]
+        second = ads_write.confirm_and_apply(config, plan_id=preview["plan_id"], dry_run=False)
+        assert second["status"] == "APPLIED"
+        assert sum(1 for c in api.campaigns.values() if c["name"] == "Lost answer") == 1
+
+    def test_partly_applied_update_sends_the_rest(self, api, config):
+        # Name and budget planned; the name already landed, the budget did not.
+        preview = write.update_chatgpt_campaign(config, campaign_id="cmpn_1", name="Springfield Drains", daily_budget=40)
+        api.campaigns["cmpn_1"]["name"] = "Springfield Drains"
+        assert _apply(config, preview)["status"] == "APPLIED"
+        assert api.writes()[-1]["body"] == {"name": "Springfield Drains", "budget": {"daily_spend_limit_micros": 40_000_000}}
+
+    # -- only the subfields the plan sends are compared ----------------------
+    def test_response_only_subfields_do_not_block_the_apply(self, api, config):
+        ad_edit = write.update_chatgpt_ad(config, ad_id="ad_1", title="Drain cleaning from $69")
+        api.ads["ad_1"]["creative"]["image_url"] = "https://cdn.openai.example/resolved.png"
+        assert _apply(config, ad_edit)["status"] == "APPLIED"
+        geo = write.update_chatgpt_campaign(config, campaign_id="cmpn_1", platforms=["web"])
+        api.campaigns["cmpn_1"]["targeting"]["locations"]["include"][0]["name"] = "Springfield, IL"
+        assert _apply(config, geo)["status"] == "APPLIED"
+        bid = write.update_chatgpt_ad_group(config, ad_group_id="adgrp_1", max_bid=9)
+        api.ad_groups["adgrp_1"]["bidding_config"]["effective_bid_micros"] = 8_500_000
+        assert _apply(config, bid)["status"] == "APPLIED"
+
+    def test_an_edit_to_a_sent_subfield_still_blocks_it(self, api, config):
+        preview = write.update_chatgpt_ad(config, ad_id="ad_1", title="Drain cleaning from $69")
+        api.ads["ad_1"]["creative"]["body"] = "Edited in Ads Manager."
+        dry = ads_write.confirm_and_apply(config, plan_id=preview["plan_id"], dry_run=True)
+        assert dry["status"] == "DRY_RUN_FAILED" and "creative changed since the draft" in dry["error"]
+
+    # -- audience multipliers: an empty list only to clear existing ones -----
+    def test_no_multiplier_field_without_multipliers_to_clear(self, api, config):
+        api.ad_groups["adgrp_1"]["bidding_config"].pop("custom_audience_bid_multipliers")
+        preview = write.update_chatgpt_ad_group(config, ad_group_id="adgrp_1", strategy="maximize_clicks")
+        assert "custom_audience_bid_multipliers" not in _payload(preview)["body"]["bidding_config"]
+
+    # -- context hints are capped in previews and reads ----------------------
+    def test_many_context_hints_are_summarised(self, api, config):
+        hints = [f"drain topic {i}" for i in range(30)]
+        preview = write.draft_chatgpt_ad_group(config, campaign_id="cmpn_1", name="Many hints", context_hints=hints)
+        assert preview["changes"]["context_hints"][-1] == "… 10 more"
+        assert len(preview["changes"]["context_hints"]) == 21 and preview["changes"]["context_hint_count"] == 30
+        assert _payload(preview)["body"]["context_hints"] == hints
+
+    def test_ad_group_read_caps_hints_and_has_a_compact_mode(self, api, config):
+        api.ad_groups["adgrp_1"]["context_hints"] = [f"hint {i}" for i in range(60)]
+        full = read.get_chatgpt_ad_groups(config, campaign_id="cmpn_1")
+        group = full["ad_groups"][0]
+        assert len(group["context_hints"]) == read.MAX_LISTED_HINTS and group["context_hint_count"] == 60
+        assert group["context_hints_truncated"] is True and "context_hint_count" in full["note"]
+        compact = read.get_chatgpt_ad_groups(config, campaign_id="cmpn_1", compact=True)
+        assert compact["compact"] and "context_hints" not in compact["ad_groups"][0]
+        assert compact["ad_groups"][0]["context_hint_count"] == 60
+
+    # -- small ones -----------------------------------------------------------
+    def test_attribution_check_needs_ga4_too_and_the_gate_names_chatgpt(self):
+        import asyncio
+
+        from adloop import server
+
+        tools = {t.name: t for t in asyncio.run(server.mcp.list_tools())}
+        assert {"chatgpt_ads", "ga4"} <= set(tools["chatgpt_attribution_check"].tags)
+        assert "ChatGPT Ads plans" in server.confirm_and_apply.__doc__

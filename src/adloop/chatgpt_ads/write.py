@@ -6,12 +6,18 @@ request, runs the safety guards, stores a :class:`ChangePlan` (platform
 ``confirm_and_apply`` hands the plan to :func:`preflight` (dry run) or
 :func:`apply_plan`.
 
+A plan's ``changes`` hold only what the person approves. The request the
+applier sends, the snapshot the preflight compares and the pinned image
+live in ``ChangePlan.apply_only_payload``, which no preview, dialog, card or
+audit entry shows.
+
 The Advertiser API has no validate-only mode for single resources, so the
-dry run re-reads the target, confirms that every field the plan changes
-still holds the value the preview showed, and re-runs the budget cap, the
-bid-increase cap and the landing-page check. Nothing is sent. The real
-apply runs the same preflight first, so a change made in Ads Manager in
-between is refused instead of overwritten.
+dry run re-reads the target by id, confirms that every subfield the plan
+sends still holds the value the preview showed (or already holds the
+planned value, after a lost answer), and re-runs the budget cap, the
+bid-increase cap, the landing-page check and the image's checksum.
+Nothing is sent. The real apply runs the same preflight first, so a change
+made in Ads Manager in between is refused instead of overwritten.
 
 API rules this module follows (developers.openai.com/ads):
 
@@ -22,27 +28,36 @@ API rules this module follows (developers.openai.com/ads):
 - Status changes use ``/pause``, ``/activate`` and ``/archive``; archive
   cannot be undone.
 - New campaigns, ad groups and ads are created **paused**, each with an
-  ``Idempotency-Key`` derived from the plan, so a retried apply cannot
-  create a duplicate.
+  ``Idempotency-Key`` derived from the plan. OpenAI documents the header on
+  all three create endpoints: "If a matching prior create is visible, the
+  existing object is returned instead of creating a duplicate." A retry of
+  the same plan sends the same key and body; a retry that comes before
+  OpenAI can see the first create can still duplicate it.
+- Images are uploaded as the bytes AdLoop checked (multipart
+  ``POST /upload``), never as a URL for OpenAI to fetch again.
 - Money is micros on the wire, account currency in every preview.
 """
 
 from __future__ import annotations
 
 import copy
+import hashlib
 import json
-import mimetypes
 from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
+from urllib.parse import urlparse
 
 from adloop.chatgpt_ads.client import (
     ChatGPTAdsApiError,
+    ChatGPTAdsOutcomeUnknown,
+    api_get,
     api_get_all,
     api_post,
     api_upload,
     exact_from_micros,
     from_micros,
+    to_micro,
 )
 from adloop.chatgpt_ads.read import (
     _event_settings,
@@ -52,10 +67,11 @@ from adloop.chatgpt_ads.read import (
     account_meta,
     event_key,
 )
+from adloop.safety.guards import blocked_operation_error, store_draft
+from adloop.safety.preview import ChangePlan
 
 if TYPE_CHECKING:
     from adloop.config import AdLoopConfig
-    from adloop.safety.preview import ChangePlan
 
 PLATFORM = "chatgpt"
 OPERATION_PREFIX = "chatgpt_"
@@ -79,52 +95,34 @@ _TITLE_LIMITS = (3, 50)
 _BODY_LIMIT = 100
 _NAME_LIMITS = (3, 1000)
 _MAX_CONTEXT_HINTS = 2000
+# A preview lists this many hints; the rest are counted.
+_SHOWN_HINTS = 20
 _MAX_LOCATIONS = 2500
-_IMAGE_TYPES = ("image/jpeg", "image/png", "image/webp")
 _MIN_IMAGE_SIDE = 640
-
-
-class _Refusal(Exception):
-    """A draft that cannot proceed; carries the user-facing details."""
-
-    def __init__(self, details: list[str]):
-        super().__init__("; ".join(details))
-        self.details = details
 
 
 def _validation_error(details: list[str]) -> dict:
     return {"error": "Validation failed", "details": details}
 
 
-def _guard(operation: str, config: AdLoopConfig) -> dict | None:
-    from adloop.safety.guards import SafetyViolation, check_blocked_operation
-
-    try:
-        check_blocked_operation(operation, config.safety)
-    except SafetyViolation as e:
-        return {"error": str(e)}
-    return None
-
-
-def _store(plan_kwargs: dict, *, warnings: list[str] | None = None) -> dict:
-    """Store the plan; ``customer_id`` is always the resolved ad account id.
+def _store(*, warnings: list[str] | None = None, **plan_fields: Any) -> dict:
+    """Store a ChatGPT Ads plan; ``customer_id`` is always the resolved ad account id.
 
     The account is pinned: the preflight re-reads which account the key in
     use belongs to and refuses when it is not this one (a key or default
     changed after the preview), so a plan can never land in another account.
     """
-    from adloop.safety.preview import ChangePlan, store_plan
+    plan_fields["changes"] = _shown(plan_fields.get("changes") or {})
+    return store_draft(ChangePlan(platform=PLATFORM, **plan_fields), warnings=warnings)
 
-    plan = ChangePlan(platform=PLATFORM, **plan_kwargs)
-    store_plan(plan)
-    preview = plan.to_preview()
-    if warnings:
-        preview["warnings"] = warnings
-    return preview
+
+def _shown(changes: dict) -> dict:
+    """What the person approves, without empty values ("- ad account id: ")."""
+    return {k: v for k, v in changes.items() if v not in (None, "", [], {})}
 
 
 def _micros(amount: float) -> int:
-    return int(round(float(amount) * 1_000_000))
+    return to_micro(amount)
 
 
 def _money(value: Any) -> float | None:
@@ -177,13 +175,25 @@ def _check_urls(urls: list[str], errors: list[str], warnings: list[str]) -> None
     warnings.extend(inconclusive.values())
 
 
+def _hint_sample(hints: list[str]) -> list[str]:
+    """Hints for a preview: the first few, then a count of the rest."""
+    if len(hints) <= _SHOWN_HINTS:
+        return list(hints)
+    return hints[:_SHOWN_HINTS] + [f"… {len(hints) - _SHOWN_HINTS} more"]
+
+
 # ---------------------------------------------------------------------------
-# Locating entities (ad groups and ads do not carry their parent's id)
+# Locating entities
 # ---------------------------------------------------------------------------
 
 
 def find_entity(config: AdLoopConfig, account: str, entity_type: str, entity_id: str) -> dict | None:
-    """The entity with its campaign (and ad group), archived ones included."""
+    """The entity with its campaign (and ad group), archived ones included.
+
+    Ad groups and ads do not carry their parent's id, so this scans the
+    account; drafts use it for the parent names a preview shows. The dry run
+    and the apply read the target by id instead (:func:`_get`).
+    """
     entity_id = str(entity_id)
     campaigns = api_get_all(config, "campaigns", {"include[]": ["serving_issues"]}, ad_account_id=account)
     for campaign in campaigns:
@@ -209,9 +219,61 @@ def find_entity(config: AdLoopConfig, account: str, entity_type: str, entity_id:
     return None
 
 
-def _snapshot(entity: dict, keys: list[str]) -> dict:
-    """The fields a plan changes, as the API returned them (for change detection)."""
-    return {k: copy.deepcopy(entity.get(k)) for k in keys}
+def _get(config: AdLoopConfig, account: str, entity_type: str, entity_id: str) -> dict | None:
+    """``GET /<collection>/<id>``: one request; None when it no longer exists."""
+    path = f"{_COLLECTIONS[entity_type]}/{entity_id}"
+    try:
+        return api_get(config, path, {"include[]": ["serving_issues"]}, ad_account_id=account)
+    except ChatGPTAdsApiError as exc:
+        if exc.status == 404:
+            return None
+        raise
+
+
+# Subfields an update sends back for each dict-valued field. Anything else in
+# the API's answer (resolved image URLs, location names) is response-only and
+# never counts as an edit made in Ads Manager.
+_SENT_KEYS = {
+    "budget": ("daily_spend_limit_micros", "lifetime_spend_limit_micros"),
+}
+
+
+def _compare_keys(body: dict, touched: list[str], *, extra: dict | None = None) -> dict:
+    """For each touched dict-valued field, the subfields this plan sends."""
+    keys: dict[str, list[str]] = {}
+    for field in touched:
+        value = body.get(field)
+        if field == "targeting":
+            continue  # compared in its writable form as a whole
+        if field in _SENT_KEYS:
+            keys[field] = list(_SENT_KEYS[field])
+        elif isinstance(value, dict):
+            keys[field] = sorted(set(value) | set((extra or {}).get(field, ())))
+    return keys
+
+
+def _project(field: str, value: Any, keys: list[str] | None) -> Any:
+    """``value`` reduced to what the plan sends, in a comparable form."""
+    if field == "targeting":
+        return writable_targeting({"targeting": value})
+    if keys is None:
+        return copy.deepcopy(value)
+    source = value if isinstance(value, dict) else {}
+    out = {}
+    for key in keys:
+        sub = source.get(key)
+        if key == "custom_audience_bid_multipliers":
+            sub = sorted(
+                [str(m.get("custom_audience_id")), m.get("bid_multiplier_micros")]
+                for m in sub or [] if isinstance(m, dict)
+            )
+        out[key] = copy.deepcopy(sub)
+    return out
+
+
+def _snapshot(entity: dict, touched: list[str], keys: dict) -> dict:
+    """The touched fields as the API returned them, reduced to what the plan sends."""
+    return {f: _project(f, entity.get(f), keys.get(f)) for f in touched}
 
 
 def _same(a: Any, b: Any) -> bool:
@@ -230,7 +292,7 @@ def _draft_status(
     config: AdLoopConfig, *, action: str, ad_account_id: str, entity_type: str, entity_id: str,
 ) -> dict:
     operation = "chatgpt_archive_entity" if action == "archive" else "chatgpt_set_status"
-    blocked = _guard(operation, config)
+    blocked = blocked_operation_error(operation, config.safety)
     if blocked:
         return blocked
     entity_type = (entity_type or "").strip().lower()
@@ -274,23 +336,20 @@ def _draft_status(
     if target == "archived":
         warnings.append("Archiving cannot be undone: the entity can never serve again. Pausing keeps it reusable.")
     return _store(
-        {
-            "operation": operation,
-            "entity_type": entity_type,
-            "entity_id": entity_id,
-            "customer_id": meta["ad_account_id"],
-            "requires_double_confirm": action == "archive",
-            "changes": {
-                "ad_account_id": account,
-                "entity_name": entity.get("name"),
-                "campaign_name": found["campaign"].get("name"),
-                "ad_group_name": (found.get("ad_group") or {}).get("name"),
-                "current_status": current,
-                "target_status": target,
-                "action": action,
-            },
-        },
         warnings=warnings,
+        operation=operation,
+        entity_type=entity_type,
+        entity_id=entity_id,
+        customer_id=meta["ad_account_id"],
+        requires_double_confirm=action == "archive",
+        changes={
+            "entity_name": entity.get("name"),
+            "campaign_name": found["campaign"].get("name") if entity_type != "campaign" else None,
+            "ad_group_name": (found.get("ad_group") or {}).get("name") if entity_type == "ad" else None,
+            "current_status": current,
+            "target_status": target,
+        },
+        apply_only_payload={"ad_account_id": account, "action": action},
     )
 
 
@@ -434,7 +493,7 @@ def update_chatgpt_campaign(
 ) -> dict:
     """Draft campaign changes: name, budget, dates, locations, platforms, tracking, conversion events."""
     operation = "chatgpt_update_campaign"
-    blocked = _guard(operation, config)
+    blocked = blocked_operation_error(operation, config.safety)
     if blocked:
         return blocked
     from adloop.safety.guards import SafetyViolation, requires_double_confirmation
@@ -600,41 +659,67 @@ def update_chatgpt_campaign(
         return {"error": "Nothing to change: pass at least one field that differs from the campaign."}
 
     # Budget and flight dates together decide what a lifetime budget spends
-    # per day: check whenever either changes.
+    # per day. The cap and the size of the change are both judged on daily
+    # equivalents: a lifetime 500 over 31 days (about 16 a day) becoming a
+    # daily 100 is about 6x the spend, not a fifth of it.
+    old_daily = _daily_equivalent(budget, campaign.get("start_time"), campaign.get("end_time"))
     daily = _daily_equivalent(new_budget or budget, start_ts, end_ts)
-    if new_budget or "start_time" in body or "end_time" in body:
+    spend_changes = bool(new_budget) or "start_time" in body or "end_time" in body
+    if spend_changes:
         try:
             daily = _check_flight_budget(new_budget or budget, start_ts, end_ts, config)
         except SafetyViolation as e:
             return {"error": str(e)}
-    old_amount = current_daily if current_daily is not None else current_lifetime
-    new_amount = from_micros(next(iter(new_budget.values()))) if new_budget else None
-    double = bool(new_budget) and requires_double_confirmation(
-        operation, current_budget=old_amount, proposed_budget=new_amount,
-    )
-    if new_budget and old_amount and new_amount and new_amount > old_amount * 2:
-        warnings.append(f"This more than doubles the budget ({old_amount} → {new_amount} {meta['currency']}).")
+    currency = meta["currency"]
+    double = False
+    if spend_changes and daily != old_daily:
+        if old_daily is None:
+            # The current spend cannot be worked out (a lifetime budget without
+            # an end), so the change cannot be sized: confirm it twice.
+            double = True
+            warnings.append("The current budget's daily spend cannot be worked out (no end date), so this change cannot be sized.")
+        else:
+            double = requires_double_confirmation(operation, current_budget=old_daily, proposed_budget=daily)
+            if daily is not None and daily > old_daily * 2:
+                warnings.append(
+                    f"This more than doubles the daily spend ({old_daily} → {daily} {currency} a day, "
+                    f"about {daily / old_daily:.1f}x)." if old_daily else f"The daily spend goes from 0 to {daily} {currency}."
+                )
+        shown["daily_spend"] = {"from": old_daily, "to": daily, "currency": currency}
+    if new_budget and "daily_spend_limit_micros" in new_budget and current_daily is None and current_lifetime is not None:
+        if old_daily:
+            warnings.append(
+                f"This switches the campaign from a lifetime budget of {current_lifetime} {currency} "
+                f"(about {old_daily} a day over its flight) to a daily budget of {daily} {currency}, "
+                f"about {daily / old_daily:.1f}x the daily spend. OpenAI allows this switch one way only."
+            )
+        else:
+            warnings.append(
+                "This switches the campaign from a lifetime to a daily budget (allowed one way only)."
+            )
     if "targeting" in body:
         warnings.append("Location and audience targeting is replaced as a whole; the preview shows the full new set.")
 
+    touched = sorted(set(touched))
+    keys = _compare_keys(body, touched)
     return _store(
-        {
-            "operation": operation,
-            "entity_type": "campaign",
-            "entity_id": campaign_id,
-            "customer_id": meta["ad_account_id"],
-            "requires_double_confirm": double,
-            "changes": {
-                "ad_account_id": account,
-                "entity_name": campaign.get("name"),
-                "campaign_status": campaign.get("status"),
-                "changes": shown,
-                "daily_equivalent": daily,
-                "body": body,
-                "before": _snapshot(campaign, sorted(set(touched))),
-            },
-        },
         warnings=warnings,
+        operation=operation,
+        entity_type="campaign",
+        entity_id=campaign_id,
+        customer_id=meta["ad_account_id"],
+        requires_double_confirm=double,
+        changes={
+            "entity_name": campaign.get("name"),
+            "campaign_status": campaign.get("status"),
+            "display": shown,
+        },
+        apply_only_payload={
+            "ad_account_id": account,
+            "body": body,
+            "before": _snapshot(campaign, touched, keys),
+            "compare_keys": keys,
+        },
     )
 
 
@@ -658,7 +743,7 @@ def draft_chatgpt_campaign(
 ) -> dict:
     """Draft a new campaign, created PAUSED."""
     operation = "chatgpt_create_campaign"
-    blocked = _guard(operation, config)
+    blocked = blocked_operation_error(operation, config.safety)
     if blocked:
         return blocked
     from adloop.safety.guards import SafetyViolation
@@ -738,31 +823,28 @@ def draft_chatgpt_campaign(
     if bidding_type == "impressions":
         warnings.append("Impression bidding pays per view; clicks or conversions suit lead generation better.")
     return _store(
-        {
-            "operation": operation,
-            "entity_type": "campaign",
-            "entity_id": "",
-            "customer_id": meta["ad_account_id"],
-            "changes": {
-                "ad_account_id": account,
-                "entity_name": name.strip(),
-                "status_on_create": "paused",
-                "bidding_type": bidding_type,
-                "daily_budget": daily or None,
-                "lifetime_budget": lifetime or None,
-                "currency": meta["currency"],
-                "locations": _geo_label(locations),
-                "excluded_locations": _geo_label(excluded),
-                "platforms": plat or "all",
-                "start_date": start.isoformat() if start else None,
-                "end_date": end.isoformat() if end else None,
-                "query_string_template": template,
-                "conversion_events": events_shown,
-                "daily_equivalent": daily_eq,
-                "body": body,
-            },
-        },
         warnings=warnings,
+        operation=operation,
+        entity_type="campaign",
+        entity_id="",
+        customer_id=meta["ad_account_id"],
+        changes={
+            "entity_name": name.strip(),
+            "status_on_create": "paused",
+            "bidding_type": bidding_type,
+            "daily_budget": daily or None,
+            "lifetime_budget": lifetime or None,
+            "currency": meta["currency"],
+            "locations": _geo_label(locations),
+            "excluded_locations": _geo_label(excluded),
+            "platforms": plat or "all",
+            "start_date": start.isoformat() if start else None,
+            "end_date": end.isoformat() if end else None,
+            "query_string_template": template,
+            "conversion_events": events_shown,
+            "daily_equivalent": daily_eq if lifetime else None,
+        },
+        apply_only_payload={"ad_account_id": account, "body": body},
     )
 
 
@@ -794,7 +876,13 @@ def _bidding_config(
         if max_bid is not None:
             errors.append(f"{chosen} sets bids automatically; leave max_bid empty.")
         new.pop("max_bid_micros", None)
-        new["custom_audience_bid_multipliers"] = []
+        # Audience multipliers work with fixed bids only. An update clears
+        # existing ones with an empty list, as OpenAI's bidding guide does;
+        # otherwise the field is left out.
+        if new.get("custom_audience_bid_multipliers"):
+            new["custom_audience_bid_multipliers"] = []
+        else:
+            new.pop("custom_audience_bid_multipliers", None)
         if (campaign.get("budget") or {}).get("daily_spend_limit_micros") is None:
             errors.append(f"{chosen} needs a daily campaign budget.")
     return new
@@ -853,7 +941,7 @@ def update_chatgpt_ad_group(
 ) -> dict:
     """Draft ad group changes: name, bid strategy and max bid, context hints."""
     operation = "chatgpt_update_ad_group"
-    blocked = _guard(operation, config)
+    blocked = blocked_operation_error(operation, config.safety)
     if blocked:
         return blocked
     from adloop.safety.guards import SafetyViolation
@@ -927,31 +1015,34 @@ def update_chatgpt_ad_group(
         body["context_hints"] = new_hints
         touched.append("context_hints")
         shown["context_hints"] = {
-            "added": [h for h in new_hints if h not in hints_now],
-            "removed": [h for h in hints_now if h not in new_hints],
+            "added": _hint_sample([h for h in new_hints if h not in hints_now]),
+            "removed": _hint_sample([h for h in hints_now if h not in new_hints]),
             "count": {"from": len(hints_now), "to": len(new_hints)},
         }
     if errors:
         return _validation_error(errors)
     if not body:
         return {"error": "Nothing to change: pass at least one field that differs from the ad group."}
+    touched = sorted(set(touched))
+    keys = _compare_keys(body, touched)
     return _store(
-        {
-            "operation": operation,
-            "entity_type": "ad_group",
-            "entity_id": ad_group_id,
-            "customer_id": meta["ad_account_id"],
-            "changes": {
-                "ad_account_id": account,
-                "entity_name": group.get("name"),
-                "campaign_name": campaign.get("name"),
-                "ad_group_status": group.get("status"),
-                "changes": shown,
-                "body": body,
-                "before": _snapshot(group, sorted(set(touched))),
-            },
-        },
         warnings=warnings,
+        operation=operation,
+        entity_type="ad_group",
+        entity_id=ad_group_id,
+        customer_id=meta["ad_account_id"],
+        changes={
+            "entity_name": group.get("name"),
+            "campaign_name": campaign.get("name"),
+            "ad_group_status": group.get("status"),
+            "display": shown,
+        },
+        apply_only_payload={
+            "ad_account_id": account,
+            "body": body,
+            "before": _snapshot(group, touched, keys),
+            "compare_keys": keys,
+        },
     )
 
 
@@ -967,7 +1058,7 @@ def draft_chatgpt_ad_group(
 ) -> dict:
     """Draft a new ad group in a campaign, created PAUSED."""
     operation = "chatgpt_create_ad_group"
-    blocked = _guard(operation, config)
+    blocked = blocked_operation_error(operation, config.safety)
     if blocked:
         return blocked
     errors: list[str] = []
@@ -1002,24 +1093,22 @@ def draft_chatgpt_ad_group(
     body = {"campaign_id": campaign_id, "name": name.strip(), "status": "paused",
             "context_hints": hints, "bidding_config": bidding}
     return _store(
-        {
-            "operation": operation,
-            "entity_type": "ad_group",
-            "entity_id": "",
-            "customer_id": meta["ad_account_id"],
-            "changes": {
-                "ad_account_id": account,
-                "entity_name": name.strip(),
-                "campaign_name": campaign.get("name"),
-                "campaign_status": campaign.get("status"),
-                "status_on_create": "paused",
-                "bid": _bid_label(bidding, campaign.get("bidding_type")),
-                "currency": meta["currency"],
-                "context_hints": hints,
-                "body": body,
-            },
-        },
         warnings=warnings,
+        operation=operation,
+        entity_type="ad_group",
+        entity_id="",
+        customer_id=meta["ad_account_id"],
+        changes={
+            "entity_name": name.strip(),
+            "campaign_name": campaign.get("name"),
+            "campaign_status": campaign.get("status"),
+            "status_on_create": "paused",
+            "bid": _bid_label(bidding, campaign.get("bidding_type")),
+            "currency": meta["currency"],
+            "context_hints": _hint_sample(hints),
+            "context_hint_count": len(hints) if len(hints) > _SHOWN_HINTS else None,
+        },
+        apply_only_payload={"ad_account_id": account, "body": body},
     )
 
 
@@ -1039,6 +1128,8 @@ _IMAGE_SIGNATURES = (
     (b"\x89PNG\r\n\x1a\n", "PNG"),
     (b"\xff\xd8\xff", "JPEG"),
 )
+_IMAGE_MIME = {"PNG": "image/png", "JPEG": "image/jpeg", "WebP": "image/webp"}
+_IMAGE_EXT = {"PNG": "png", "JPEG": "jpg", "WebP": "webp"}
 
 
 def _image_kind(data: bytes) -> str | None:
@@ -1050,42 +1141,48 @@ def _image_kind(data: bytes) -> str | None:
     return None
 
 
-def _image_problem(image_url: str = "", image_path: str = "") -> str | None:
-    """Why an image cannot be used, or None.
+def _read_image(image_url: str = "", image_path: str = "") -> tuple[bytes, str]:
+    """The image's bytes and kind; ValueError says why it cannot be used.
 
     Remote images go through AdLoop's public-only fetcher: the host must
     resolve to a public address, every redirect is checked again, the
     connection is pinned to the checked address and the download is capped,
     so a draft cannot be used to reach the server's private network.
     """
+    from adloop.ads.image_fetch import MAX_IMAGE_BYTES
+
     if image_path:
         from adloop.runtime import deployment_mode
 
         if deployment_mode() == "server":
-            return "image_path reads a local file, which a hosted server cannot; pass image_url."
+            raise ValueError("image_path reads a local file, which a hosted server cannot; pass image_url.")
         path = Path(image_path).expanduser()
         if not path.is_file():
-            return f"{path} does not exist."
-        with path.open("rb") as handle:
-            head = handle.read(16)
-        if _image_kind(head) is None:
-            return f"{path.name} is not a JPEG, PNG or WebP image."
-        return None
+            raise ValueError(f"{path} does not exist.")
+        if path.stat().st_size > MAX_IMAGE_BYTES:
+            raise ValueError(f"{path.name} is larger than {MAX_IMAGE_BYTES // 1024} KB.")
+        data = path.read_bytes()
+        kind = _image_kind(data[:16])
+        if kind is None:
+            raise ValueError(f"{path.name} is not a JPEG, PNG or WebP image.")
+        return data, kind
     if not image_url.startswith(("http://", "https://")):
-        return "image_url must be a public http(s) link."
+        raise ValueError("image_url must be a public http(s) link.")
     from adloop.ads.image_fetch import ImageFetchError, fetch_image_bytes
 
     try:
         fetched = fetch_image_bytes(image_url)
     except ImageFetchError as exc:
-        return f"image_url cannot be used: {exc}"
-    data = fetched.data or b""
-    if _image_kind(bytes(data[:16])) is None:
-        return "image_url does not serve a JPEG, PNG or WebP image."
-    return None
+        raise ValueError(f"image_url cannot be used: {exc}") from None
+    data = bytes(fetched.data or b"")
+    kind = _image_kind(data[:16])
+    if kind is None:
+        raise ValueError("image_url does not serve a JPEG, PNG or WebP image.")
+    return data, kind
 
 
 def _image_source(image_url: str, image_path: str, file_id: str, errors: list[str]) -> dict | None:
+    """The image a plan uses: a file id, or the source pinned to the bytes checked now."""
     given = [k for k, v in (("image_url", image_url), ("image_path", image_path), ("file_id", file_id)) if v]
     if len(given) > 1:
         errors.append(f"Pass one image source, not {given}.")
@@ -1094,11 +1191,44 @@ def _image_source(image_url: str, image_path: str, file_id: str, errors: list[st
         return None
     if file_id:
         return {"file_id": file_id.strip()}
-    problem = _image_problem(image_url=image_url.strip(), image_path=image_path.strip())
-    if problem:
-        errors.append(problem)
+    try:
+        data, kind = _read_image(image_url=image_url.strip(), image_path=image_path.strip())
+    except ValueError as exc:
+        errors.append(str(exc))
         return None
-    return {"image_url": image_url.strip()} if image_url else {"image_path": str(Path(image_path).expanduser())}
+    source = {"image_url": image_url.strip()} if image_url else {"image_path": str(Path(image_path).expanduser())}
+    # The checksum pins the image the person approved: the dry run and the
+    # apply read it again and refuse different bytes, and the apply uploads
+    # exactly the bytes it checked.
+    return {**source, "sha256": hashlib.sha256(data).hexdigest(), "kind": kind, "size": len(data)}
+
+
+def _verified_image(image: dict | None) -> bytes | None:
+    """The pinned image's bytes, read again and checked against the draft; None for a file id."""
+    if not image or image.get("file_id"):
+        return None
+    data, _kind = _read_image(image.get("image_url", ""), image.get("image_path", ""))
+    if hashlib.sha256(data).hexdigest() != image.get("sha256"):
+        where = image.get("image_url") or Path(image.get("image_path", "")).name
+        raise ValueError(
+            f"The image at {where} changed since the draft (different bytes); nothing was sent. "
+            "Draft again to approve the new image."
+        )
+    return data
+
+
+def _image_label(image: dict) -> str:
+    if image.get("file_id"):
+        return str(image["file_id"])
+    where = image.get("image_url") or Path(image.get("image_path", "")).name
+    return f"{where} ({image.get('kind')}, {int(image.get('size') or 0) / 1024:.1f} KB)"
+
+
+def _upload_name(image: dict) -> str:
+    if image.get("image_path"):
+        return Path(image["image_path"]).name
+    name = Path(urlparse(image.get("image_url", "")).path).name
+    return name if "." in name else f"image.{_IMAGE_EXT.get(image.get('kind'), 'png')}"
 
 
 def update_chatgpt_ad(
@@ -1115,7 +1245,7 @@ def update_chatgpt_ad(
 ) -> dict:
     """Draft ad changes: internal name, title, body, landing page, image (copy edits go back to review)."""
     operation = "chatgpt_update_ad"
-    blocked = _guard(operation, config)
+    blocked = blocked_operation_error(operation, config.safety)
     if blocked:
         return blocked
     errors: list[str] = []
@@ -1177,29 +1307,34 @@ def update_chatgpt_ad(
         for key, value in creative_changes.items():
             shown[key] = {"from": creative.get(key), "to": value}
         if image:
-            shown["image"] = {"from": creative.get("file_id"), "to": image.get("image_url") or Path(image["image_path"]).name}
+            shown["image"] = {"from": creative.get("file_id"), "to": _image_label(image)}
         warnings.append("Editing the creative submits a new version for review; it serves again once approved.")
     if not payload and not image:
         return {"error": "Nothing to change: pass at least one field that differs from the ad."}
+    touched = sorted(set(touched))
+    # A new image's file id is added to the creative at apply, so it is one of
+    # the subfields this plan sends.
+    keys = _compare_keys(payload, touched, extra={"creative": ["file_id"]} if image else None)
     return _store(
-        {
-            "operation": operation,
-            "entity_type": "ad",
-            "entity_id": ad_id,
-            "customer_id": meta["ad_account_id"],
-            "changes": {
-                "ad_account_id": account,
-                "entity_name": ad.get("name"),
-                "ad_group_name": found["ad_group"].get("name"),
-                "campaign_name": found["campaign"].get("name"),
-                "ad_status": ad.get("status"),
-                "changes": shown,
-                "body": payload,
-                "image": image,
-                "before": _snapshot(ad, sorted(set(touched))),
-            },
-        },
         warnings=warnings,
+        operation=operation,
+        entity_type="ad",
+        entity_id=ad_id,
+        customer_id=meta["ad_account_id"],
+        changes={
+            "entity_name": ad.get("name"),
+            "ad_group_name": found["ad_group"].get("name"),
+            "campaign_name": found["campaign"].get("name"),
+            "ad_status": ad.get("status"),
+            "display": shown,
+        },
+        apply_only_payload={
+            "ad_account_id": account,
+            "body": payload,
+            "image": image or {},
+            "before": _snapshot(ad, touched, keys),
+            "compare_keys": keys,
+        },
     )
 
 
@@ -1218,7 +1353,7 @@ def draft_chatgpt_ad(
 ) -> dict:
     """Draft a new chat-card ad in an ad group, created PAUSED."""
     operation = "chatgpt_create_ad"
-    blocked = _guard(operation, config)
+    blocked = blocked_operation_error(operation, config.safety)
     if blocked:
         return blocked
     errors: list[str] = []
@@ -1253,26 +1388,22 @@ def draft_chatgpt_ad(
     payload = {"ad_group_id": ad_group_id, "name": name, "status": "paused", "creative": creative}
     warnings.append(f"Images should be at least {_MIN_IMAGE_SIDE}×{_MIN_IMAGE_SIDE} px; OpenAI reviews every new ad.")
     return _store(
-        {
-            "operation": operation,
-            "entity_type": "ad",
-            "entity_id": "",
-            "customer_id": meta["ad_account_id"],
-            "changes": {
-                "ad_account_id": account,
-                "entity_name": name,
-                "ad_group_name": group.get("name"),
-                "campaign_name": campaign.get("name"),
-                "status_on_create": "paused",
-                "title": creative["title"],
-                "body_text": creative["body"],
-                "target_url": target_url,
-                "image": image.get("image_url") or (Path(image["image_path"]).name if image.get("image_path") else image.get("file_id")),
-                "body": payload,
-                "image_source": image,
-            },
-        },
         warnings=warnings,
+        operation=operation,
+        entity_type="ad",
+        entity_id="",
+        customer_id=meta["ad_account_id"],
+        changes={
+            "entity_name": name,
+            "ad_group_name": group.get("name"),
+            "campaign_name": campaign.get("name"),
+            "status_on_create": "paused",
+            "title": creative["title"],
+            "body_text": creative["body"],
+            "target_url": target_url,
+            "image": _image_label(image),
+        },
+        apply_only_payload={"ad_account_id": account, "body": payload, "image": image},
     )
 
 
@@ -1281,23 +1412,50 @@ def draft_chatgpt_ad(
 # ---------------------------------------------------------------------------
 
 
-def is_chatgpt_plan(plan: ChangePlan) -> bool:
-    return str(plan.operation or "").startswith(OPERATION_PREFIX)
+def _payload(plan: ChangePlan) -> dict:
+    payload = plan.apply_only_payload or {}
+    if not payload:
+        # A plan store that drops the field must not turn into an empty request.
+        raise ValueError(
+            "This plan's request was not kept by the plan store (apply_only_payload is empty); "
+            "nothing was sent. Draft the change again."
+        )
+    return payload
 
 
-def _require_unchanged(entity: dict, before: dict, what: str) -> None:
-    for key, value in (before or {}).items():
-        if not _same(entity.get(key), value):
-            raise ValueError(f"The {what}'s {key} changed since the draft; draft again.")
+def _require_current(entity: dict, payload: dict, what: str) -> list[str]:
+    """Refuse when a field the plan sends was edited since the draft.
+
+    Compares only the subfields the plan sends. A field that already holds
+    the planned value counts as done (an earlier apply whose answer was
+    lost); the fields still to change are returned.
+    """
+    body = payload.get("body") or {}
+    keys = payload.get("compare_keys") or {}
+    pending = []
+    for field, then in (payload.get("before") or {}).items():
+        now = _project(field, entity.get(field), keys.get(field))
+        planned = _project(field, body[field], keys.get(field)) if field in body else then
+        if _same(now, planned):
+            continue
+        if not _same(now, then):
+            raise ValueError(f"The {what}'s {field} changed since the draft; draft again.")
+        pending.append(field)
+    return pending
 
 
-def preflight(config: AdLoopConfig, plan: ChangePlan) -> dict:
-    """Re-read the target and re-check the gates; sends nothing."""
+def _check(config: AdLoopConfig, plan: ChangePlan) -> tuple[dict, bytes | None]:
+    """Re-read the target by id and re-check the gates; sends nothing.
 
+    Returns the checks and, for an ad with a new image, the image bytes that
+    matched the draft's checksum (the apply uploads exactly those).
+    """
     changes = plan.changes or {}
-    account = changes.get("ad_account_id") or ""
+    payload = _payload(plan)
+    account = payload.get("ad_account_id") or ""
     op = plan.operation
     checks: dict[str, Any] = {"ad_account_id": plan.customer_id}
+    image_data: bytes | None = None
     # The key in use must still belong to the previewed account.
     current = account_meta(config, account, fresh=True)["ad_account_id"]
     if plan.customer_id and current != plan.customer_id:
@@ -1307,22 +1465,26 @@ def preflight(config: AdLoopConfig, plan: ChangePlan) -> dict:
         )
 
     if op in ("chatgpt_set_status", "chatgpt_archive_entity"):
-        found = find_entity(config, account, plan.entity_type, plan.entity_id)
-        if not found:
+        entity = _get(config, account, plan.entity_type, plan.entity_id)
+        if entity is None:
             raise ValueError(f"{plan.entity_type} '{plan.entity_id}' no longer exists.")
-        now = found["entity"].get("status")
-        if now != changes.get("current_status"):
-            raise ValueError(f"The status changed since the draft ({changes.get('current_status')} → {now}); draft again.")
-        checks.update(entity=found["entity"].get("name"), status_now=now)
+        now = entity.get("status")
+        target, then = changes.get("target_status"), changes.get("current_status")
+        if now == target and now != then:
+            checks["already_applied"] = True
+        elif now != then:
+            raise ValueError(f"The status changed since the draft ({then} → {now}); draft again.")
+        checks.update(entity=entity.get("name"), status_now=now)
     elif op in ("chatgpt_update_campaign", "chatgpt_update_ad_group", "chatgpt_update_ad"):
-        found = find_entity(config, account, plan.entity_type, plan.entity_id)
-        if not found:
+        entity = _get(config, account, plan.entity_type, plan.entity_id)
+        if entity is None:
             raise ValueError(f"{plan.entity_type} '{plan.entity_id}' no longer exists.")
-        entity = found["entity"]
         if entity.get("status") == "archived":
             raise ValueError(f"{plan.entity_type} '{entity.get('name')}' was archived since the draft.")
-        _require_unchanged(entity, changes.get("before") or {}, plan.entity_type.replace("_", " "))
-        body = changes.get("body") or {}
+        pending = _require_current(entity, payload, plan.entity_type.replace("_", " "))
+        if not pending:
+            checks["already_applied"] = True
+        body = payload.get("body") or {}
         if op == "chatgpt_update_campaign" and {"budget", "start_time", "end_time"} & set(body):
             checks["daily_equivalent"] = _check_flight_budget(
                 body.get("budget") or entity.get("budget") or {},
@@ -1331,33 +1493,32 @@ def preflight(config: AdLoopConfig, plan: ChangePlan) -> dict:
                 config,
             )
             checks["budget_cap_ok"] = True
-        if op == "chatgpt_update_ad_group" and "bidding_config" in body:
+        if op == "chatgpt_update_ad_group" and "bidding_config" in pending:
             old = (entity.get("bidding_config") or {}).get("max_bid_micros")
             new = body["bidding_config"].get("max_bid_micros")
             if old and new:
                 _check_bid_micros(old, new, config)
             checks["bid_increase_ok"] = True
         if op == "chatgpt_update_ad":
-            url = ((body.get("creative") or {}).get("target_url")) if "target_url" in (changes.get("changes") or {}) else None
+            url = ((body.get("creative") or {}).get("target_url")) if "target_url" in (changes.get("display") or {}) else None
             if url:
                 errors: list[str] = []
                 _check_urls([url], errors, [])
                 if errors:
                     raise ValueError("; ".join(errors))
-            image = changes.get("image") or {}
-            if image.get("image_url") or image.get("image_path"):
-                problem = _image_problem(image.get("image_url", ""), image.get("image_path", ""))
-                if problem:
-                    raise ValueError(problem)
+            image_data = _verified_image(payload.get("image"))
+            if image_data is not None:
+                checks["image_unchanged_since_draft"] = True
         checks["entity"] = entity.get("name")
-        checks["unchanged_since_draft"] = True
+        if pending:
+            checks["unchanged_since_draft"] = True
     elif op == "chatgpt_create_campaign":
-        body = changes.get("body") or {}
+        body = payload.get("body") or {}
         checks["daily_equivalent"] = _check_flight_budget(
             body.get("budget") or {}, body.get("start_time"), body.get("end_time"), config,
         )
         checks["budget_cap_ok"] = True
-        event_ids = (changes.get("body") or {}).get("conversion_event_setting_ids") or []
+        event_ids = body.get("conversion_event_setting_ids") or []
         if event_ids:
             settings, _err = _event_settings(config, account)
             live = {str(s.get("id")) for s in settings if not s.get("archived")}
@@ -1366,101 +1527,135 @@ def preflight(config: AdLoopConfig, plan: ChangePlan) -> dict:
                 raise ValueError(f"Conversion event setting(s) {missing} are gone or archived.")
         checks["status_on_create"] = "paused"
     elif op == "chatgpt_create_ad_group":
-        campaign_id = (changes.get("body") or {}).get("campaign_id", "")
-        found = find_entity(config, account, "campaign", campaign_id)
-        if not found or found["entity"].get("status") == "archived":
+        body = payload.get("body") or {}
+        campaign_id = body.get("campaign_id", "")
+        campaign = _get(config, account, "campaign", campaign_id)
+        if campaign is None or campaign.get("status") == "archived":
             raise ValueError(f"campaign '{campaign_id}' no longer exists or was archived.")
-        strategy = ((changes.get("body") or {}).get("bidding_config") or {}).get("strategy")
-        if strategy != "fixed_bid" and (found["entity"].get("budget") or {}).get("daily_spend_limit_micros") is None:
+        strategy = (body.get("bidding_config") or {}).get("strategy")
+        if strategy != "fixed_bid" and (campaign.get("budget") or {}).get("daily_spend_limit_micros") is None:
             raise ValueError(f"{strategy} needs a daily campaign budget, which the campaign no longer has.")
-        checks.update(campaign=found["entity"].get("name"), status_on_create="paused")
+        checks.update(campaign=campaign.get("name"), status_on_create="paused")
     elif op == "chatgpt_create_ad":
-        payload = changes.get("body") or {}
-        found = find_entity(config, account, "ad_group", payload.get("ad_group_id", ""))
-        if not found or found["entity"].get("status") == "archived":
-            raise ValueError(f"ad group '{payload.get('ad_group_id')}' no longer exists or was archived.")
+        body = payload.get("body") or {}
+        group = _get(config, account, "ad_group", body.get("ad_group_id", ""))
+        if group is None or group.get("status") == "archived":
+            raise ValueError(f"ad group '{body.get('ad_group_id')}' no longer exists or was archived.")
         errors = []
-        _check_urls([payload["creative"]["target_url"]], errors, [])
+        _check_urls([body["creative"]["target_url"]], errors, [])
         if errors:
             raise ValueError("; ".join(errors))
-        image = changes.get("image_source") or {}
-        if image.get("image_url") or image.get("image_path"):
-            problem = _image_problem(image.get("image_url", ""), image.get("image_path", ""))
-            if problem:
-                raise ValueError(problem)
-        checks.update(ad_group=found["entity"].get("name"), landing_page_ok=True, status_on_create="paused")
+        image_data = _verified_image(payload.get("image"))
+        if image_data is not None:
+            checks["image_unchanged_since_draft"] = True
+        checks.update(ad_group=group.get("name"), landing_page_ok=True, status_on_create="paused")
     else:
         raise ValueError(f"Unknown ChatGPT Ads operation: {op}")
-    return checks
+    return checks, image_data
 
 
-def _upload(config: AdLoopConfig, account: str, image: dict) -> str:
+def preflight(config: AdLoopConfig, plan: ChangePlan) -> dict:
+    """Re-read the target and re-check the gates; sends nothing."""
+    return _check(config, plan)[0]
+
+
+def _upload(config: AdLoopConfig, account: str, image: dict, data: bytes | None) -> str:
+    """The image's file id: given, or from uploading the bytes the preflight checked."""
     if image.get("file_id"):
         return str(image["file_id"])
-    if image.get("image_url"):
-        result = api_post(config, "upload", {"image_url": image["image_url"]}, ad_account_id=account)
-    else:
-        path = Path(image["image_path"])
-        mime = mimetypes.guess_type(path.name)[0] or "application/octet-stream"
-        result = api_upload(config, path.name, path.read_bytes(), mime, ad_account_id=account)
+    if data is None:
+        raise ValueError("The image was not read before the upload; nothing was sent.")
+    result = api_upload(
+        config, _upload_name(image), data, _IMAGE_MIME.get(image.get("kind"), "image/png"),
+        ad_account_id=account,
+    )
     file_id = result.get("file_id") or result.get("id")
     if not file_id:
         raise ChatGPTAdsApiError("OpenAI accepted the image but returned no file id.")
     return str(file_id)
 
 
+def _lost_answer(exc: ChatGPTAdsOutcomeUnknown, plan: ChangePlan) -> ChatGPTAdsOutcomeUnknown:
+    """The unknown outcome, with what to do about it for this plan."""
+    noun = plan.entity_type.replace("_", " ")
+    if plan.operation.startswith("chatgpt_create_"):
+        advice = (
+            f" OpenAI may have created the {noun}: look for it in the account before anything else. "
+            "Confirming this plan again sends the same Idempotency-Key and request; OpenAI returns "
+            f"the existing {noun} instead of a second one when it can already see the first create, "
+            "so give it a minute before retrying."
+        )
+    else:
+        advice = (
+            f" Read the {noun} back before anything else. Confirming this plan again is safe: the "
+            "dry run sees whether the change is already in place, and then nothing is sent."
+        )
+    return ChatGPTAdsOutcomeUnknown(str(exc) + advice, status=exc.status, url=exc.url, code=exc.code)
+
+
 def apply_plan(config: AdLoopConfig, plan: ChangePlan) -> dict:
     """Execute a ChatGPT Ads plan. Called by ``confirm_and_apply`` after the gate.
 
-    Re-runs :func:`preflight` first: a dry run can be old, and the plan must
+    Re-runs the preflight first: a dry run can be old, and the plan must
     still describe the live entity when it is applied.
     """
-    preflight(config, plan)
+    checks, image_data = _check(config, plan)
     changes = plan.changes or {}
-    account = changes.get("ad_account_id") or ""
+    payload = _payload(plan)
+    account = payload.get("ad_account_id") or ""
     op = plan.operation
     key = f"adloop-{plan.plan_id}"
+    already = "Already in place (an earlier apply went through); nothing was sent."
 
-    if op in ("chatgpt_set_status", "chatgpt_archive_entity"):
-        collection = _COLLECTIONS[plan.entity_type]
-        result = api_post(config, f"{collection}/{plan.entity_id}/{changes['action']}", {}, ad_account_id=account)
-        return {"entity_type": plan.entity_type, "entity_id": plan.entity_id,
-                "name": changes.get("entity_name"), "status": result.get("status") or changes["target_status"]}
+    try:
+        if op in ("chatgpt_set_status", "chatgpt_archive_entity"):
+            out = {"entity_type": plan.entity_type, "entity_id": plan.entity_id,
+                   "name": changes.get("entity_name"), "status": changes["target_status"]}
+            if checks.get("already_applied"):
+                return {**out, "note": already}
+            collection = _COLLECTIONS[plan.entity_type]
+            result = api_post(config, f"{collection}/{plan.entity_id}/{payload['action']}", {}, ad_account_id=account)
+            return {**out, "status": result.get("status") or changes["target_status"]}
 
-    if op in ("chatgpt_update_campaign", "chatgpt_update_ad_group", "chatgpt_update_ad"):
-        body = copy.deepcopy(changes.get("body") or {})
-        if op == "chatgpt_update_ad" and (changes.get("image") or {}):
-            file_id = _upload(config, account, changes["image"])
-            # Kept on the (claimed) plan: if the update's response is lost, a
-            # retry sends the same file instead of uploading another copy.
-            changes["image"] = {"file_id": file_id}
-            body.setdefault("creative", {})["file_id"] = file_id
-        collection = _COLLECTIONS[plan.entity_type]
-        result = api_post(config, f"{collection}/{plan.entity_id}", body, ad_account_id=account)
-        out = {"entity_type": plan.entity_type, "entity_id": plan.entity_id,
-               "name": result.get("name") or changes.get("entity_name"), "updated_fields": sorted(body)}
-        if op == "chatgpt_update_ad" and "creative" in body:
-            out["review_status"] = result.get("review_status") or (result.get("review") or {}).get("status")
-        return out
+        if op in ("chatgpt_update_campaign", "chatgpt_update_ad_group", "chatgpt_update_ad"):
+            body = copy.deepcopy(payload.get("body") or {})
+            out = {"entity_type": plan.entity_type, "entity_id": plan.entity_id,
+                   "name": changes.get("entity_name"), "updated_fields": sorted(body)}
+            if checks.get("already_applied"):
+                return {**out, "note": already}
+            if op == "chatgpt_update_ad" and payload.get("image"):
+                file_id = _upload(config, account, payload["image"], image_data)
+                # Kept on the (claimed) plan: if the update's answer is lost, a
+                # retry sends the same file, and its dry run recognises it.
+                payload["image"] = {"file_id": file_id}
+                payload["body"].setdefault("creative", {})["file_id"] = file_id
+                body.setdefault("creative", {})["file_id"] = file_id
+            collection = _COLLECTIONS[plan.entity_type]
+            result = api_post(config, f"{collection}/{plan.entity_id}", body, ad_account_id=account)
+            out["name"] = result.get("name") or out["name"]
+            if op == "chatgpt_update_ad" and "creative" in body:
+                out["review_status"] = result.get("review_status") or (result.get("review") or {}).get("status")
+            return out
 
-    if op == "chatgpt_create_campaign":
-        result = api_post(config, "campaigns", changes["body"], ad_account_id=account, idempotency_key=key)
-        return {"entity_type": "campaign", "campaign_id": result.get("id"), "name": result.get("name"),
-                "status": result.get("status"), "next": "Add ad groups and ads, then enable it."}
-    if op == "chatgpt_create_ad_group":
-        result = api_post(config, "ad_groups", changes["body"], ad_account_id=account, idempotency_key=key)
-        return {"entity_type": "ad_group", "ad_group_id": result.get("id"), "name": result.get("name"),
-                "status": result.get("status")}
-    if op == "chatgpt_create_ad":
-        body = copy.deepcopy(changes["body"])
-        file_id = _upload(config, account, changes.get("image_source") or {})
-        # The idempotency key only protects a retry that sends the same request:
-        # keep the uploaded file on the (claimed) plan so a retry after a lost
-        # response reuses it instead of uploading a new file.
-        changes["image_source"] = {"file_id": file_id}
-        body["creative"]["file_id"] = file_id
-        result = api_post(config, "ads", body, ad_account_id=account, idempotency_key=key)
-        return {"entity_type": "ad", "ad_id": result.get("id"), "name": result.get("name"),
-                "status": result.get("status"),
-                "review_status": result.get("review_status") or (result.get("review") or {}).get("status")}
+        if op == "chatgpt_create_campaign":
+            result = api_post(config, "campaigns", payload["body"], ad_account_id=account, idempotency_key=key)
+            return {"entity_type": "campaign", "campaign_id": result.get("id"), "name": result.get("name"),
+                    "status": result.get("status"), "next": "Add ad groups and ads, then enable it."}
+        if op == "chatgpt_create_ad_group":
+            result = api_post(config, "ad_groups", payload["body"], ad_account_id=account, idempotency_key=key)
+            return {"entity_type": "ad_group", "ad_group_id": result.get("id"), "name": result.get("name"),
+                    "status": result.get("status")}
+        if op == "chatgpt_create_ad":
+            file_id = _upload(config, account, payload.get("image") or {}, image_data)
+            # The idempotency key only protects a retry that sends the same
+            # request: keep the uploaded file on the (claimed) plan so a retry
+            # after a lost answer reuses it instead of uploading a new file.
+            payload["image"] = {"file_id": file_id}
+            payload["body"]["creative"]["file_id"] = file_id
+            result = api_post(config, "ads", payload["body"], ad_account_id=account, idempotency_key=key)
+            return {"entity_type": "ad", "ad_id": result.get("id"), "name": result.get("name"),
+                    "status": result.get("status"),
+                    "review_status": result.get("review_status") or (result.get("review") or {}).get("status")}
+    except ChatGPTAdsOutcomeUnknown as exc:
+        raise _lost_answer(exc, plan) from None
     raise ValueError(f"Unknown ChatGPT Ads operation: {op}")

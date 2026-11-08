@@ -174,7 +174,8 @@ def _fake_api(extra: dict | None = None):
     }
     routes.update(extra or {})
 
-    def fake(config, method, path, *, params=None, json_body=None, ad_account_id="", headers=None, files=None):
+    def fake(config, method, path, *, params=None, json_body=None, ad_account_id="", headers=None, files=None,
+             mutation=False):
         calls.append((method, path, params, json_body, ad_account_id))
         extras.append({"path": path, "headers": headers or {}, "files": files})
         handler = routes.get((method, path))
@@ -1202,3 +1203,53 @@ class TestUpstreamAuditFindings:
         finally:
             runtime.set_default_config(None)
         assert "error" in result and self.KEY not in json.dumps(result)
+
+
+class TestUnknownOutcomes:
+    """A write whose answer was lost says so; reads and unsent requests say nothing changed."""
+
+    def test_a_timed_out_write_is_an_unknown_outcome(self, config):
+        import requests
+
+        from adloop.chatgpt_ads.client import ChatGPTAdsOutcomeUnknown
+
+        with patch("requests.request", side_effect=requests.ReadTimeout("slow")):
+            with pytest.raises(ChatGPTAdsOutcomeUnknown) as err:
+                client.api_post(config, "campaigns/cmpn_1", {"name": "x"})
+        assert "whether it changed anything is unknown" in str(err.value)
+        assert "nothing" not in str(err.value)
+
+    def test_a_write_that_never_connected_changed_nothing(self, config):
+        import requests
+
+        from adloop.chatgpt_ads.client import ChatGPTAdsOutcomeUnknown
+
+        with patch("requests.request", side_effect=requests.ConnectTimeout("no route")):
+            with pytest.raises(ChatGPTAdsApiError) as err:
+                client.api_post(config, "campaigns/cmpn_1", {"name": "x"})
+        assert not isinstance(err.value, ChatGPTAdsOutcomeUnknown)
+        assert "was not sent, so nothing changed" in str(err.value)
+
+    def test_a_failed_read_changed_nothing(self, config):
+        import requests
+
+        with patch("requests.request", side_effect=requests.ReadTimeout("slow")):
+            with pytest.raises(ChatGPTAdsApiError) as err:
+                client.api_get(config, "campaigns")
+        assert "nothing was changed (a read)" in str(err.value)
+
+    def test_a_gateway_error_on_a_write_is_an_unknown_outcome(self, config):
+        from adloop.chatgpt_ads.client import ChatGPTAdsOutcomeUnknown
+
+        with patch("requests.request", return_value=_Resp(502, {"error": {"message": "bad gateway"}})):
+            with pytest.raises(ChatGPTAdsOutcomeUnknown) as err:
+                client.api_post(config, "ads", {"name": "x"}, idempotency_key="adloop-1")
+        assert err.value.status == 502
+
+    def test_a_report_query_is_not_a_write(self, config):
+        from adloop.chatgpt_ads.client import ChatGPTAdsOutcomeUnknown
+
+        with patch("requests.request", return_value=_Resp(503, {"error": {"message": "busy"}})):
+            with pytest.raises(ChatGPTAdsApiError) as err:
+                client.api_post(config, "conversions/insights", {}, mutation=False)
+        assert not isinstance(err.value, ChatGPTAdsOutcomeUnknown)

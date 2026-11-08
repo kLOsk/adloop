@@ -426,10 +426,18 @@ def _bid(group: dict, bidding_type: str | None) -> dict:
     }
 
 
-def ad_group_summary(group: dict, campaign: dict | None = None) -> dict:
+# An ad group can hold up to 2,000 context hints; a read lists this many.
+MAX_LISTED_HINTS = 50
+
+
+def ad_group_summary(group: dict, campaign: dict | None = None, *, compact: bool = False) -> dict:
+    """One ad group for a read. Context hints are capped at ``MAX_LISTED_HINTS``
+    (compact: none listed, only counted)."""
     issues = _issues(group)
     campaign = campaign or {}
-    return {
+    hints = [str(h) for h in group.get("context_hints") or []]
+    listed = [] if compact else hints[:MAX_LISTED_HINTS]
+    summary = {
         "ad_group_id": group.get("id"),
         "name": group.get("name"),
         "campaign_id": campaign.get("id"),
@@ -439,9 +447,14 @@ def ad_group_summary(group: dict, campaign: dict | None = None) -> dict:
         "serving_state": serving_state(group.get("status"), issues),
         "serving_issues": issues,
         "bidding": _bid(group, campaign.get("bidding_type")),
-        "context_hints": group.get("context_hints") or [],
+        "context_hint_count": len(hints),
         "tracking_template": _query_template(group),
     }
+    if not compact:
+        summary["context_hints"] = listed
+        if len(hints) > len(listed):
+            summary["context_hints_truncated"] = True
+    return summary
 
 
 def ad_summary(ad: dict, group: dict | None = None, campaign: dict | None = None) -> dict:
@@ -708,14 +721,19 @@ def get_chatgpt_ad_groups(
     ad_account_id: str = "",
     campaign_id: str = "",
     include_archived: bool = False,
+    compact: bool = False,
 ) -> dict:
-    """Ad groups with bids, context hints and serving state, with their campaign's status."""
+    """Ad groups with bids, context hints and serving state, with their campaign's status.
+
+    Each ad group lists at most ``MAX_LISTED_HINTS`` context hints and counts
+    them all; ``compact`` lists none (counts only).
+    """
     meta = account_meta(config, ad_account_id)
     account = (ad_account_id or "").strip()
     structure = load_structure(
         config, account, include_archived=include_archived, campaign_id=campaign_id.strip()
     )
-    groups = [ad_group_summary(g, c) for g, c in structure["ad_groups"]]
+    groups = [ad_group_summary(g, c, compact=compact) for g, c in structure["ad_groups"]]
 
     insights: list[str] = []
     for g in groups:
@@ -724,18 +742,26 @@ def get_chatgpt_ad_groups(
             insights.append(f"Ad group '{g['name']}' has no ads.")
         elif g["status"] == "active" and g["serving_state"].startswith("not serving"):
             insights.append(f"Ad group '{g['name']}' is active but {g['serving_state']}.")
-        if not g["context_hints"] and g["status"] == "active":
+        if not g["context_hint_count"] and g["status"] == "active":
             insights.append(
                 f"Ad group '{g['name']}' has no context hints; OpenAI decides alone "
                 "which conversations it fits."
             )
-    return {
+    result = {
         "ad_account_id": meta["ad_account_id"],
         "currency": meta["currency"],
         "ad_groups": groups,
         "total_ad_groups": len(groups),
         "insights": insights,
     }
+    if compact:
+        result["compact"] = True
+    elif any(g.get("context_hints_truncated") for g in groups):
+        result["note"] = (
+            f"Ad groups with more than {MAX_LISTED_HINTS} context hints list the first "
+            f"{MAX_LISTED_HINTS}; context_hint_count has the total."
+        )
+    return result
 
 
 def get_chatgpt_ads(
@@ -1154,7 +1180,7 @@ def _post_conversions(
     if entity_ids is not None:
         body["entity_ids"] = entity_ids
     try:
-        payload = api_post(config, "conversions/insights", body, ad_account_id=account)
+        payload = api_post(config, "conversions/insights", body, ad_account_id=account, mutation=False)
         return list(payload.get("data") or []), str(payload.get("account_currency") or "")
     except ChatGPTAdsApiError as exc:
         if exc.status != 413 or depth >= 12:

@@ -279,7 +279,7 @@ ChatGPT Ads (OpenAI Ads Manager) through the OpenAI Advertiser API, with the sam
 | Tool | What It Does |
 |------|-------------|
 | `get_chatgpt_ads_account` | Account name, currency, time zone, brand and integrity reviews, spending limits, and account-level blockers (payment, identity verification) |
-| `get_chatgpt_campaigns` / `get_chatgpt_ad_groups` / `get_chatgpt_ads` | Structure with status and serving state (OpenAI's `serving_issues`), budgets, bids and what they mean per bidding type, context hints, targeting, ad copy, review status, and the UTM parameters a click carries |
+| `get_chatgpt_campaigns` / `get_chatgpt_ad_groups` / `get_chatgpt_ads` | Structure with status and serving state (OpenAI's `serving_issues`), budgets, bids and what they mean per bidding type, context hints (capped, with a compact mode), targeting, ad copy, review status, and the UTM parameters a click carries |
 | `get_chatgpt_performance` | Spend, impressions, clicks, CTR, CPC, CPM, conversions, CPA, ROAS per account/campaign/ad group/ad, optional breakdown (date, country, device, platform), compact mode with insights |
 | `get_chatgpt_conversions` | Goal conversions split into click-through and view-through, plus every attributed event, including events that are not a campaign goal |
 | `get_chatgpt_conversion_setup` | Audit of the conversion chain (pixel, events, attached goals, recent fires) with a verdict and pass/warn/fail checks |
@@ -288,7 +288,7 @@ ChatGPT Ads (OpenAI Ads Manager) through the OpenAI Advertiser API, with the sam
 | `search_chatgpt_locations` | Location ids by name for targeting |
 | `pause_chatgpt_entity` / `enable_chatgpt_entity` / `archive_chatgpt_entity` | Status changes through the preview gate (archive is permanent and double-confirmed; OpenAI has no delete) |
 | `update_chatgpt_campaign` / `update_chatgpt_ad_group` / `update_chatgpt_ad` | Budget (daily or lifetime), dates, locations, platforms, tracking, conversion events, bid strategy and max bid, context hints, ad copy, landing page and image, with old → new previews, the budget cap and the bid-increase cap |
-| `draft_chatgpt_campaign` / `draft_chatgpt_ad_group` / `draft_chatgpt_ad` | Create campaign → ad group → chat-card ad. Everything is created **paused**, each with an idempotency key, so a retried apply cannot create a duplicate. |
+| `draft_chatgpt_campaign` / `draft_chatgpt_ad_group` / `draft_chatgpt_ad` | Create campaign → ad group → chat-card ad. Everything is created **paused**, each with an `Idempotency-Key`: OpenAI returns the existing object for a repeated create once it can see the first one. Images are checksummed at the draft and uploaded at apply as the same bytes. |
 
 > **Setup for ChatGPT Ads tools** — In OpenAI Ads Manager open **Settings → API keys** ([ads.openai.com/settings](https://ads.openai.com/settings)) and create an Advertiser API key (a platform.openai.com key does not work). Put it in `chatgpt_ads.api_key` in `~/.adloop/config.yaml`, or set `OPENAI_ADS_API_KEY`; agencies add further accounts under `chatgpt_ads.accounts`. OpenAI has no validate-only mode for single resources, so `confirm_and_apply(dry_run=true)` re-reads the target, refuses when a field the plan changes was edited since the preview, and re-checks the budget cap, the bid-increase cap, the landing page and that the key still belongs to the previewed account.
 

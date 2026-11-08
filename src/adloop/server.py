@@ -51,6 +51,14 @@ TOOLSETS: dict[str, str] = {
     "chatgpt_ads": "ChatGPT Ads (OpenAI) reads, campaign management and conversion diagnostics",
 }
 
+# Tools that need two platforms carry both toolset tags, so a filter that
+# hides an unconfigured platform's tools hides them too. Every other tool
+# carries exactly one.
+CROSS_PLATFORM_TOOLS: dict[str, frozenset[str]] = {
+    # ChatGPT Ads clicks against GA4 sessions and key events.
+    "chatgpt_attribution_check": frozenset({"chatgpt_ads", "ga4"}),
+}
+
 # Finer selections inside "ads" (issue #56): every ads tool also carries
 # exactly one of these, derived in _tool() from its annotations, so "ads"
 # keeps its meaning and a smaller session can ask for just the part it
@@ -5890,6 +5898,14 @@ def confirm_and_apply(
     Reddit plans: Reddit has no validate-only mode, so the dry run re-reads
     the target entity and re-checks the safety caps (returned as `checks`).
 
+    ChatGPT Ads plans: OpenAI has no validate-only mode either. The dry run
+    re-reads the target by id, confirms that what the plan sends was not
+    edited since the preview, and re-checks the budget cap, the bid cap, the
+    landing page and the image's checksum. When an answer from OpenAI was
+    lost, the error says the outcome is unknown; confirming the same plan
+    again sends nothing for a change that is already in place, and repeats a
+    create with the same Idempotency-Key.
+
     A DRY_RUN_FAILED result means the change does not go through as previewed.
     The real apply fails the same way, unless Google rejected only part of the
     request: then it carries out the rest and reports those operations again.
@@ -8331,10 +8347,9 @@ def remove_microsoft_entity(ad_account_id: str = "", entity_type: str = "", enti
 def _chatgpt_ads_configured() -> bool:
     import os
 
+    from adloop.auth import get_credentials_provider
     from adloop.chatgpt_ads.client import API_KEY_ENV
     from adloop.runtime import deployment_mode
-
-    from adloop.auth import get_credentials_provider
 
     if deployment_mode() == "server":
         # Hosted: the provider supplies keys; one without ChatGPT support
@@ -8393,15 +8408,17 @@ def get_chatgpt_campaigns(ad_account_id: str = "", include_archived: bool = Fals
 @_tool(title="ChatGPT Ads ad groups", annotations=_READONLY, tags={"chatgpt_ads"})
 @_safe
 def get_chatgpt_ad_groups(
-    ad_account_id: str = "", campaign_id: str = "", include_archived: bool = False
+    ad_account_id: str = "", campaign_id: str = "", include_archived: bool = False, compact: bool = False
 ) -> dict:
     """List ChatGPT Ads ad groups with bids, context hints and serving state, plus their campaign's status.
 
     Bids are in account currency with their meaning: maximum per click,
     per impression, or the target cost per conversion of an oCPC campaign.
     Context hints are the free-text descriptions that steer which
-    conversations an ad group appears in. Insights flag ad groups without
-    ads, active ad groups that cannot serve and ad groups without hints.
+    conversations an ad group appears in; an ad group can hold up to 2,000,
+    so each lists at most 50 and context_hint_count has the total. Insights
+    flag ad groups without ads, active ad groups that cannot serve and ad
+    groups without hints.
 
     Args:
         ad_account_id: ChatGPT ad account id (adacct_...) whose API key to
@@ -8409,6 +8426,8 @@ def get_chatgpt_ad_groups(
         campaign_id: Campaign id (cmpn_..., from get_chatgpt_campaigns) to
             limit the list to; empty lists every campaign's ad groups.
         include_archived: Include archived ad groups and campaigns.
+        compact: Leave the context hint lists out (counts only), for
+            account overviews.
     """
     from adloop.chatgpt_ads.read import get_chatgpt_ad_groups as _impl
 
@@ -8417,6 +8436,7 @@ def get_chatgpt_ad_groups(
         ad_account_id=ad_account_id,
         campaign_id=campaign_id,
         include_archived=include_archived,
+        compact=compact,
     )
 
 
@@ -8661,7 +8681,7 @@ def get_chatgpt_change_history(
     )
 
 
-@_tool(title="ChatGPT Ads vs Analytics check", annotations=_READONLY, tags={"chatgpt_ads"})
+@_tool(title="ChatGPT Ads vs Analytics check", annotations=_READONLY, tags={"chatgpt_ads", "ga4"})
 @_safe
 def chatgpt_attribution_check(
     ad_account_id: str = "",
@@ -8903,8 +8923,9 @@ def update_chatgpt_ad(
 
     Copy, landing page or image edits submit a new version for OpenAI's
     review; the ad serves again once approved. The landing page is checked
-    for reachability; a new image is uploaded at apply. Multi-image ads keep
-    their images. The returned plan_id is applied with confirm_and_apply.
+    for reachability; a new image is checksummed now and uploaded at apply as
+    the same bytes. Multi-image ads keep their images. The returned plan_id
+    is applied with confirm_and_apply.
 
     Args:
         ad_account_id: ChatGPT ad account id whose key to use; empty uses the default key.
@@ -8950,7 +8971,8 @@ def draft_chatgpt_campaign(
     ad ids, so Google Analytics can tell its clicks from unpaid ChatGPT
     referrals. Conversion bidding needs exactly one active standard event
     setting. The returned plan_id is applied with confirm_and_apply; the
-    apply sends an idempotency key, so a retry cannot create a duplicate.
+    apply sends an Idempotency-Key, and OpenAI returns the existing campaign
+    for a repeated create once it can see the first one.
 
     Args:
         ad_account_id: ChatGPT ad account id whose key to use; empty uses the default key.
@@ -9029,9 +9051,11 @@ def draft_chatgpt_ad(
 
     Checks the copy limits (title 3–50, body up to 100 characters), that the
     landing page is reachable and that the image is a JPEG, PNG or WebP.
-    The image is uploaded at apply; file_id reuses an image already in the
-    account. Every new ad goes through OpenAI's review. The returned plan_id
-    is applied with confirm_and_apply.
+    The image is fetched and checksummed now; the dry run and the apply read
+    it again and refuse different bytes, and the apply uploads exactly those
+    bytes. file_id reuses an image already in the account. Every new ad goes
+    through OpenAI's review. The returned plan_id is applied with
+    confirm_and_apply.
 
     Args:
         ad_account_id: ChatGPT ad account id whose key to use; empty uses the default key.
