@@ -2,11 +2,17 @@
 
 import pytest
 from fastmcp import Client
+from fastmcp.client.elicitation import ElicitResult
 from mcp.client import advertise
 
 from adloop import runtime, server
 from adloop.config import AdLoopConfig, SafetyConfig
-from adloop.safety.approval import UI_EXTENSION_ID, confirmation_message
+from adloop.safety.approval import (
+    UI_EXTENSION_ID,
+    ApplyConfirmation,
+    IrreversibleConfirmation,
+    confirmation_message,
+)
 from adloop.safety.preview import ChangePlan, store_plan
 
 pytestmark = pytest.mark.asyncio
@@ -54,7 +60,7 @@ def _answering(answer, asked):
     return handler
 
 
-async def _apply(plan_id, *, answer=None, mode="auto", extensions=None, dry_run=False):
+async def _call(plan_id, *, answer=None, mode="auto", extensions=None, dry_run=False):
     asked: list[str] = []
     kwargs = {"mode": mode}
     if answer is not None:
@@ -65,7 +71,12 @@ async def _apply(plan_id, *, answer=None, mode="auto", extensions=None, dry_run=
         result = await client.call_tool(
             "confirm_and_apply", {"plan_id": plan_id, "dry_run": dry_run}, raise_on_error=False
         )
-    return (result.structured_content or {}).get("status"), asked
+    return result.structured_content or {}, asked
+
+
+async def _apply(plan_id, **kwargs):
+    result, asked = await _call(plan_id, **kwargs)
+    return result.get("status"), asked
 
 
 @pytest.mark.parametrize("mode", ["auto", "legacy"])
@@ -74,22 +85,35 @@ async def test_a_confirmed_dialog_applies(fake_apply, mode):
     status, asked = await _apply(plan_id, answer={"apply": True}, mode=mode)
 
     assert status == "APPLIED"
-    assert asked and "AdLoop: apply this change in Google Ads?" in asked[0]
+    assert asked and asked[0].startswith("AdLoop: pause campaign 123 in Google Ads?")
     assert fake_apply == [(plan_id, False)]
 
 
 @pytest.mark.parametrize("mode", ["auto", "legacy"])
 async def test_a_declined_dialog_changes_nothing(fake_apply, mode):
-    status, asked = await _apply(_plan(), answer={"apply": False}, mode=mode)
+    result, asked = await _call(_plan(), answer=ElicitResult(action="decline"), mode=mode)
 
-    assert status == "NOT_CONFIRMED"
+    assert result["status"] == "NOT_CONFIRMED"
+    assert result["reason"] == "declined"
     assert asked
     assert fake_apply == []
 
 
+@pytest.mark.parametrize("mode", ["auto", "legacy"])
+async def test_accept_without_the_tick_says_so(fake_apply, mode):
+    """Seen live 2026-11-08: Accept with the box unticked looked like a decline."""
+    result, _ = await _call(_plan(), answer={"apply": False}, mode=mode)
+
+    assert result["status"] == "NOT_CONFIRMED"
+    assert result["reason"] == "apply_not_ticked"
+    assert '"Yes, apply this change"' in result["message"]
+    assert fake_apply == []
+
+
 async def test_irreversible_changes_need_both_ticks(fake_apply):
-    status, _ = await _apply(_plan(requires_double_confirm=True), answer={"apply": True})
-    assert status == "NOT_CONFIRMED"
+    result, _ = await _call(_plan(requires_double_confirm=True), answer={"apply": True})
+    assert result["status"] == "NOT_CONFIRMED"
+    assert result["reason"] == "undo_not_ticked"
 
     status, asked = await _apply(
         _plan(requires_double_confirm=True), answer={"apply": True, "cannot_be_undone": True}
@@ -142,16 +166,50 @@ async def test_stable_keys_still_seal_the_round_trip(fake_apply):
     assert asked
 
 
-def test_the_message_names_the_change_and_truncates_long_values():
+def test_the_first_two_lines_carry_the_change():
+    """Claude Code shows two lines and folds the rest ("+16 more lines"), so the
+    question, the target, the account and the status change come first."""
+    plan = ChangePlan(
+        operation="pause_entity", entity_type="campaign", entity_id="23659847975",
+        changes={
+            "entity_name": "NH - Subunternehmer v2", "account": "NachweisHub (700-552-6737)",
+            "current_status": "ENABLED", "target_status": "PAUSED",
+        },
+    )
+    first, second = confirmation_message(plan).splitlines()[:2]
+    assert first == 'AdLoop: pause campaign "NH - Subunternehmer v2" in Google Ads?'
+    assert second == "Account NachweisHub (700-552-6737) · ENABLED → PAUSED"
+
+
+def test_a_create_names_the_platform_and_the_key_values():
+    plan = ChangePlan(
+        operation="reddit_create_campaign", entity_type="campaign", platform="reddit",
+        customer_id="a2_x", changes={
+            "entity_name": "Spring", "status_on_create": "PAUSED", "objective": "CLICKS",
+            "daily_budget": 20, "currency": "EUR",
+        },
+    )
+    first, second = confirmation_message(plan).splitlines()[:2]
+    assert first == 'AdLoop: create campaign "Spring" in Reddit Ads?'
+    assert second == "Account a2_x · created paused · objective: CLICKS · daily budget: 20"
+
+
+def test_the_message_truncates_long_values_and_counts_the_rest():
     plan = ChangePlan(
         operation="reddit_update_ad_group", entity_type="ad_group", entity_id="9",
-        changes={"name": "x" * 400, **{f"field_{i}": i for i in range(12)}},
+        changes={"name": "x" * 400, "note": "y" * 400, **{f"field_{i}": i for i in range(12)}},
     )
     message = confirmation_message(plan)
-    assert message.startswith("AdLoop: apply this change in Reddit Ads?")
-    assert "Update ad group (ad group 9)" in message
-    assert "x" * 157 + "..." in message
+    assert message.startswith('AdLoop: update ad group "' + "x" * 59 + '…" in Reddit Ads?')
+    assert "y" * 159 + "…" in message
     assert "3 more fields in the preview" in message
+
+
+def test_the_boxes_carry_their_meaning():
+    schema = IrreversibleConfirmation.model_json_schema()["properties"]
+    assert schema["apply"]["title"] == "Yes, apply this change"
+    assert schema["cannot_be_undone"]["title"] == "I understand it cannot be undone"
+    assert ApplyConfirmation.model_json_schema()["properties"].keys() == {"apply"}
 
 
 async def test_an_unanswered_dialog_does_not_hang_the_next_call(fake_apply):

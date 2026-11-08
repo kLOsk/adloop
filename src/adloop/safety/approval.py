@@ -28,13 +28,15 @@ import contextvars
 import hashlib
 import hmac
 import json
+import re
 import secrets
-from dataclasses import dataclass
 from collections.abc import Iterator
 from contextlib import contextmanager
 from functools import lru_cache
 from importlib import resources
 from typing import TYPE_CHECKING, Any
+
+from pydantic import BaseModel, Field
 
 if TYPE_CHECKING:
     from adloop.safety.preview import ChangePlan
@@ -242,15 +244,20 @@ DIALOG_KEY = "adloop_confirm"
 _MAX_DIALOG_FIELDS = 10
 
 
-@dataclass
-class ApplyConfirmation:
-    apply: bool = False
+# The tick stays even though the dialog has an Accept button: without a field,
+# apps put the cursor on Accept, and one reflexive Enter would apply. The titles
+# are what the dialog shows next to each box.
+_APPLY_TITLE = "Yes, apply this change"
+_UNDO_TITLE = "I understand it cannot be undone"
 
 
-@dataclass
-class IrreversibleConfirmation:
-    apply: bool = False
-    cannot_be_undone: bool = False
+class ApplyConfirmation(BaseModel):
+    apply: bool = Field(False, title=_APPLY_TITLE)
+
+
+class IrreversibleConfirmation(BaseModel):
+    apply: bool = Field(False, title=_APPLY_TITLE)
+    cannot_be_undone: bool = Field(False, title=_UNDO_TITLE)
 
 
 def _confirmation_type(plan: ChangePlan) -> type:
@@ -274,43 +281,137 @@ def client_can_elicit() -> bool:
     return form is not None or url is None
 
 
+_PLATFORM_LABELS = {
+    "google": "Google Ads",
+    "reddit": "Reddit Ads",
+    "gtm": "Google Tag Manager",
+    "ga4": "Google Analytics",
+    "microsoft": "Microsoft Advertising",
+    "chatgpt": "ChatGPT Ads",
+}
+_OPERATION_PREFIX = re.compile(r"^(?:%s)_" % "|".join(p for p in _PLATFORM_LABELS if p != "google"))
+# Where a plan keeps the name of what it changes, most specific first.
+_NAME_KEYS = ("entity_name", "name", "campaign_name", "ad_group_name", "list_name",
+              "tag_name", "trigger_name", "variable_name")
+# Shown in the dialog's first two lines already, or noise in a summary.
+_HEADER_KEYS = frozenset({*_NAME_KEYS, "account", "account_name", "customer_id",
+                          "current_status", "target_status", "status_on_create"})
+_SUMMARY_SKIP = frozenset({"currency", "time_zone", "fingerprint", "warnings"})
+_MAX_SUMMARY_FACTS = 3
+
+
 def _platform_label(plan: ChangePlan) -> str:
+    if plan.platform in _PLATFORM_LABELS:
+        return _PLATFORM_LABELS[plan.platform]
     op = plan.operation
-    if op.startswith("reddit_"):
-        return "Reddit Ads"
-    if op.startswith("gtm_"):
-        return "Google Tag Manager"
+    for prefix, label in _PLATFORM_LABELS.items():
+        if op.startswith(prefix + "_"):
+            return label
     if "key_event" in op:
         return "Google Analytics"
     return "Google Ads"
 
 
-def confirmation_message(plan: ChangePlan) -> str:
-    """The dialog text: what changes, where, and what confirming does."""
-    title = plan.operation.replace("reddit_", "").replace("gtm_", "").replace("_", " ")
-    target = " ".join(
-        part for part in (plan.entity_type.replace("_", " "), plan.entity_id) if part
+def _clip(text: str, limit: int) -> str:
+    return text if len(text) <= limit else text[: limit - 1] + "…"
+
+
+def _headline(plan: ChangePlan) -> str:
+    """'create campaign "Spring sale"', 'pause campaign 123': the action and its target."""
+    action = _OPERATION_PREFIX.sub("", plan.operation).replace("_", " ")
+    noun = plan.entity_type.replace("_", " ")
+    if noun and action.endswith(" entity"):
+        action = action[: -len("entity")] + noun
+    name = next(
+        (v.strip() for k in _NAME_KEYS
+         if isinstance(v := plan.changes.get(k), str) and v.strip()),
+        "",
     )
-    lines = [f"AdLoop: apply this change in {_platform_label(plan)}?", ""]
-    lines.append(title.capitalize() + (f" ({target})" if target else ""))
-    for key, value in list(plan.changes.items())[:_MAX_DIALOG_FIELDS]:
+    if name:
+        return f'{action} "{_clip(name, 60)}"'
+    if plan.entity_id:
+        return f"{action} {plan.entity_id}" if action.endswith(noun) else f"{action} ({noun} {plan.entity_id})"
+    return action
+
+
+def _fact(key: str, value: Any) -> str:
+    """One short 'key: value' for the summary line, or '' when it isn't one."""
+    if isinstance(value, dict) and len(value) == 1:
+        value = next(iter(value.values()))
+    if isinstance(value, list) and 0 < len(value) <= 3 and all(
+        isinstance(v, (str, int, float)) for v in value
+    ):
+        value = ", ".join(str(v) for v in value)
+    if isinstance(value, bool) or value in (None, "", []) or not isinstance(value, (str, int, float)):
+        return ""
+    text = str(value)
+    return f"{key.replace('_', ' ')}: {text}" if len(text) <= 40 else ""
+
+
+def _summary(plan: ChangePlan) -> str:
+    """The dialog's second line: account, status change and the first few facts.
+
+    Apps such as Claude Code show only the first lines of the message and fold
+    the rest, so this line has to carry what the person is approving.
+    """
+    changes = plan.changes
+    parts = []
+    account = next(
+        (a for a in (changes.get("account"), changes.get("account_name"), plan.customer_id)
+         if isinstance(a, (str, int)) and not isinstance(a, bool) and str(a).strip()),
+        "",
+    )
+    if account:
+        parts.append(f"account {account}")
+    current, target = changes.get("current_status"), changes.get("target_status")
+    if target:
+        parts.append(f"{current} → {target}" if current else f"→ {target}")
+    elif created := changes.get("status_on_create"):
+        parts.append(f"created {str(created).lower()}")
+    facts = 0
+    for key, value in changes.items():
+        if facts == _MAX_SUMMARY_FACTS:
+            break
+        if key in _HEADER_KEYS or key in _SUMMARY_SKIP or key.endswith(("_id", "_ids")):
+            continue
+        if fact := _fact(key, value):
+            parts.append(fact)
+            facts += 1
+    return _clip(" · ".join(parts), 160)
+
+
+def confirmation_message(plan: ChangePlan) -> str:
+    """The dialog text: the question and a one-line summary first, then the details.
+
+    Some apps show only the first two lines until the person expands the
+    dialog, so those two lines name the change, the platform, the account and
+    the key values on their own.
+    """
+    lines = [f"AdLoop: {_headline(plan)} in {_platform_label(plan)}?"]
+    if summary := _summary(plan):
+        lines.append(summary[0].upper() + summary[1:])
+    details = [(k, v) for k, v in plan.changes.items() if k not in _HEADER_KEYS]
+    if details:
+        lines.append("")
+    for key, value in details[:_MAX_DIALOG_FIELDS]:
         text = value if isinstance(value, str) else json.dumps(value, default=str)
-        if len(text) > 160:
-            text = text[:157] + "..."
-        lines.append(f"- {key.replace('_', ' ')}: {text}")
-    if len(plan.changes) > _MAX_DIALOG_FIELDS:
-        lines.append(f"- ... {len(plan.changes) - _MAX_DIALOG_FIELDS} more fields in the preview")
+        lines.append(f"- {key.replace('_', ' ')}: {_clip(text, 160)}")
+    if (more := len(details) - _MAX_DIALOG_FIELDS) > 0:
+        lines.append(f"- … {more} more field{'s' if more > 1 else ''} in the preview")
     lines.append("")
     if plan.requires_double_confirm:
-        lines.append("This cannot be undone. Tick both boxes to apply it for real.")
+        lines.append(
+            f'This cannot be undone. Tick "{_APPLY_TITLE}" and "{_UNDO_TITLE}", then Accept.'
+        )
     else:
-        lines.append("Tick the box to apply it for real. Declining changes nothing.")
+        lines.append(f'Tick "{_APPLY_TITLE}", then Accept. Decline changes nothing.')
     return "\n".join(lines)
 
 
-def _accepted(plan: ChangePlan, action: str | None, content: Any) -> bool:
+def _refusal(plan: ChangePlan, action: str | None, content: Any) -> str:
+    """Why the dialog's answer does not allow the apply; "" when it does."""
     if action != "accept":
-        return False
+        return "declined"
     if content is None:
         data: dict = {}
     elif isinstance(content, dict):
@@ -318,20 +419,37 @@ def _accepted(plan: ChangePlan, action: str | None, content: Any) -> bool:
     else:
         data = vars(content)
     if not data.get("apply"):
-        return False
-    return not plan.requires_double_confirm or bool(data.get("cannot_be_undone"))
+        return "apply_not_ticked"
+    if plan.requires_double_confirm and not data.get("cannot_be_undone"):
+        return "undo_not_ticked"
+    return ""
 
 
-def _not_confirmed(plan: ChangePlan) -> dict:
-    return {
-        "status": "NOT_CONFIRMED",
-        "plan_id": plan.plan_id,
-        "operation": plan.operation,
-        "message": (
+def _not_confirmed(plan: ChangePlan, reason: str = "declined") -> dict:
+    if reason == "apply_not_ticked":
+        message = (
+            f'The user chose Accept in the confirmation dialog without ticking "{_APPLY_TITLE}", '
+            "so nothing was changed. Tell them the box has to be ticked, and ask whether "
+            "to try again. The preview stays pending."
+        )
+    elif reason == "undo_not_ticked":
+        message = (
+            f'The user chose Accept without ticking "{_UNDO_TITLE}", which this irreversible '
+            "change requires, so nothing was changed. Tell them both boxes have to be "
+            "ticked, and ask whether to try again. The preview stays pending."
+        )
+    else:
+        message = (
             "The user did not confirm the change in the confirmation dialog, so "
             "nothing was changed. Do not retry on your own; ask the user what "
             "they want to do. The preview stays pending."
-        ),
+        )
+    return {
+        "status": "NOT_CONFIRMED",
+        "reason": reason,
+        "plan_id": plan.plan_id,
+        "operation": plan.operation,
+        "message": message,
     }
 
 
@@ -479,6 +597,6 @@ async def confirm_in_dialog(context: Any, plan_id: str) -> Any | None:
         action = getattr(answer, "action", None)
         content = getattr(answer, "data", None)
 
-    if _accepted(plan, action, content):
+    if not (reason := _refusal(plan, action, content)):
         return None
-    return ToolResult(structured_content=_not_confirmed(plan))
+    return ToolResult(structured_content=_not_confirmed(plan, reason))
