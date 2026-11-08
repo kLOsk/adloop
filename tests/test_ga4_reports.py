@@ -375,3 +375,192 @@ class TestListKeyEvents:
             assert list_key_events(config, property_id="123456")["total"] == 0
             assert "numeric" in list_key_events(config, property_id="abc")["error"]
             assert "required" in list_key_events(config, property_id="")["error"]
+
+
+class TestFilterGroups:
+    def test_any_of_becomes_an_or_group(self, config):
+        _, request = _run(
+            config, dimensions=["sessionSource"], metrics=["sessions"],
+            dimension_filter=[{"any_of": [
+                {"field": "sessionSource", "value": "google"},
+                {"field": "sessionSource", "value": "bing"},
+            ]}],
+        )
+        group = request.dimension_filter.or_group.expressions
+        assert [e.filter.string_filter.value for e in group] == ["google", "bing"]
+
+    def test_groups_nest_and_negate_next_to_plain_conditions(self, config):
+        _, request = _run(
+            config, dimensions=["country", "deviceCategory"], metrics=["sessions"],
+            dimension_filter=[
+                {"field": "country", "value": "Germany"},
+                {"not": True, "any_of": [
+                    {"field": "deviceCategory", "value": "tablet"},
+                    {"all_of": [
+                        {"field": "deviceCategory", "value": "mobile"},
+                        {"field": "country", "op": "CONTAINS", "value": "x"},
+                    ]},
+                ]},
+            ],
+        )
+        top = request.dimension_filter.and_group.expressions
+        assert top[0].filter.field_name == "country"
+        negated = top[1].not_expression.or_group.expressions
+        assert negated[0].filter.string_filter.value == "tablet"
+        assert len(negated[1].and_group.expressions) == 2
+
+    def test_single_item_group_is_just_the_condition(self, config):
+        _, request = _run(
+            config, metrics=["sessions"],
+            metric_filter=[{"any_of": [{"field": "sessions", "op": ">", "value": 5}]}],
+        )
+        assert request.metric_filter.filter.field_name == "sessions"
+
+    @pytest.mark.parametrize("bad, message", [
+        ({"any_of": [], }, "non-empty list"),
+        ({"any_of": [{"field": "country", "value": "DE"}], "all_of": []}, "not both"),
+        ({"any_of": [{"field": "country", "value": "DE"}], "or": True}, "unknown key"),
+        ({"any_of": [{"any_of": [{"any_of": [{"any_of": [{"field": "country", "value": "DE"}]}]}]}]}, "at most 3 levels"),
+        ({"any_of": [{"field": "country", "op": "NOPE", "value": "DE"}]}, "dimension_filter[0].any_of[0]"),
+    ])
+    def test_invalid_groups_are_refused_before_sending(self, config, bad, message):
+        result, request = _run(config, dimensions=["country"], metrics=["sessions"], dimension_filter=[bad])
+        assert result["error"] == "Validation failed"
+        assert message in " ".join(result["details"])
+        assert request is None
+
+
+class TestDateRangesAndCurrency:
+    def test_named_ranges_are_sent_and_listed(self, config):
+        result, request = _run(
+            config, dimensions=["country"], metrics=["sessions"],
+            date_ranges=[
+                {"start": "2026-10-01", "end": "2026-10-31", "name": "october"},
+                {"start": "2025-10-01", "end": "2025-10-31"},
+            ],
+        )
+        assert [(r.name, r.start_date) for r in request.date_ranges] == [
+            ("october", "2026-10-01"), ("range_2", "2025-10-01"),
+        ]
+        assert result["date_ranges"] == {
+            "october": {"start": "2026-10-01", "end": "2026-10-31"},
+            "range_2": {"start": "2025-10-01", "end": "2025-10-31"},
+        }
+        assert result["date_range"] == {"start": "2026-10-01", "end": "2026-10-31"}
+
+    @pytest.mark.parametrize("ranges, extra, message", [
+        ([{"start": "1daysAgo", "end": "today"}] * 5, {}, "at most 4"),
+        ([{"start": "1daysAgo", "end": "today", "name": "date_range_x"}], {}, "reserved"),
+        ([{"start": "1daysAgo", "end": "today", "name": "a"}, {"start": "2daysAgo", "end": "today", "name": "a"}], {}, "different name"),
+        ([{"start": "1daysAgo"}], {}, "needs both"),
+        ([{"start": "1daysAgo", "end": "today"}], {"compare_start": "9daysAgo", "compare_end": "8daysAgo"}, "not both"),
+    ])
+    def test_invalid_ranges_are_refused(self, config, ranges, extra, message):
+        result, request = _run(config, metrics=["sessions"], date_ranges=ranges, **extra)
+        assert message in " ".join(result["details"])
+        assert request is None
+
+    def test_currency_code_is_sent_and_checked(self, config):
+        result, request = _run(config, metrics=["totalRevenue"], currency_code="eur")
+        assert request.currency_code == "EUR"
+        assert result["currency_code"] == "EUR"
+
+        result, request = _run(config, metrics=["totalRevenue"], currency_code="EURO")
+        assert "three-letter" in " ".join(result["details"])
+
+    def test_every_report_asks_for_the_quota(self, config):
+        _, request = _run(config, metrics=["sessions"])
+        assert request.return_property_quota is True
+
+
+class TestDataQualityInsights:
+    def _with(self, metadata=None, quota=None):
+        response = _response(["country"], ["sessions"], [["DE", "10"]])
+        response.metadata = metadata
+        response.property_quota = quota
+        return response
+
+    def test_clean_report_has_no_insights(self, config):
+        meta = SimpleNamespace(subject_to_thresholding=False, data_loss_from_other_row=False,
+                               sampling_metadatas=[], empty_reason="")
+        result, _ = _run(config, self._with(meta), dimensions=["country"], metrics=["sessions"])
+        assert "insights" not in result
+
+    def test_thresholding_other_row_and_sampling_are_named(self, config):
+        meta = SimpleNamespace(
+            subject_to_thresholding=True, data_loss_from_other_row=True, empty_reason="",
+            sampling_metadatas=[SimpleNamespace(samples_read_count=250_000, sampling_space_size=1_000_000)],
+        )
+        result, _ = _run(config, self._with(meta), dimensions=["country"], metrics=["sessions"])
+        text = " ".join(result["insights"])
+        assert "thresholds" in text
+        assert '"(other)"' in text
+        assert "250,000 of 1,000,000 events read (25%)" in text
+
+    def test_low_quota_is_flagged(self, config):
+        quota = SimpleNamespace(
+            tokens_per_day=SimpleNamespace(consumed=190_000, remaining=10_000),
+            tokens_per_hour=SimpleNamespace(consumed=10, remaining=39_990),
+            tokens_per_project_per_hour=None,
+        )
+        result, _ = _run(config, self._with(None, quota), dimensions=["country"], metrics=["sessions"])
+        assert result["insights"] == [
+            "This property is close to its GA4 API quota (daily: 10,000 of 200,000 tokens left). "
+            "Fewer dimensions, shorter date ranges and smaller limits use fewer tokens."
+        ]
+
+
+def _run_realtime(config, response=None, **kwargs):
+    client = MagicMock()
+    client.run_realtime_report.return_value = response or _response([], [], [])
+    with patch("adloop.ga4.client.get_data_client", return_value=client):
+        result = reports.run_realtime_report(config, property_id="properties/123456", **kwargs)
+    request = client.run_realtime_report.call_args.args[0] if client.run_realtime_report.called else None
+    return result, request
+
+
+class TestRealtime:
+    def test_plain_call_keeps_the_old_shape(self, config):
+        response = _response(["country"], ["activeUsers"], [["DE", "3"]])
+        result, request = _run_realtime(config, response, dimensions=["country"])
+        assert [m.name for m in request.metrics] == ["activeUsers"]
+        assert not request.minute_ranges and not request.order_bys and request.limit == 0
+        assert result["rows"] == [{"country": "DE", "activeUsers": "3"}]
+        assert "insights" not in result
+
+    def test_filter_order_limit_and_minute_ranges_are_sent(self, config):
+        result, request = _run_realtime(
+            config, dimensions=["eventName"], metrics=["eventCount"],
+            dimension_filter=[{"field": "eventName", "value": "purchase"}],
+            order_by=[{"field": "eventCount", "desc": True}], limit=5,
+            minute_ranges=[
+                {"start_minutes_ago": 4, "end_minutes_ago": 0, "name": "last_5"},
+                {"start_minutes_ago": 29, "end_minutes_ago": 5},
+            ],
+        )
+        assert request.dimension_filter.filter.string_filter.value == "purchase"
+        assert request.order_bys[0].metric.metric_name == "eventCount"
+        assert request.limit == 5
+        assert [(r.start_minutes_ago, r.end_minutes_ago, r.name) for r in request.minute_ranges] == [
+            (4, 0, "last_5"), (29, 5, ""),
+        ]
+        assert result["minute_ranges"][0] == {"start_minutes_ago": 4, "end_minutes_ago": 0, "name": "last_5"}
+
+    def test_empty_filtered_result_explains_the_usual_causes(self, config):
+        result, _ = _run_realtime(
+            config, dimensions=["eventName"], metrics=["eventCount"],
+            dimension_filter=[{"field": "eventName", "value": "purchase"}],
+        )
+        assert "get_tracking_events" in result["insights"][0]
+        assert "cookies" in result["insights"][0]
+
+    @pytest.mark.parametrize("ranges, message", [
+        ([{"start_minutes_ago": 3, "end_minutes_ago": 5}], "end_minutes_ago <= start_minutes_ago"),
+        ([{"start_minutes_ago": 60}], "<= 59"),
+        ([{"start_minutes_ago": 1}] * 3, "at most 2"),
+        ([{"start_minutes_ago": "5"}], "whole numbers"),
+    ])
+    def test_invalid_minute_ranges_are_refused(self, config, ranges, message):
+        result, request = _run_realtime(config, minute_ranges=ranges)
+        assert message in " ".join(result["details"])
+        assert request is None

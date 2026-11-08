@@ -865,6 +865,8 @@ def run_ga4_report(
     offset: int = 0,
     compare_start: str = "",
     compare_end: str = "",
+    date_ranges: _DictListOpt = None,
+    currency_code: str = "",
 ) -> dict:
     """Run a custom GA4 report with optional filters, ordering, paging and a comparison period.
 
@@ -875,7 +877,10 @@ def run_ga4_report(
     comparison period is a second date range: every row then carries a
     dateRange value of "current" or "comparison", and date_ranges maps both
     labels to their dates. Invalid filters or ordering return "Validation
-    failed" with details, before anything is sent.
+    failed" with details, before anything is sent. insights[] says when GA4
+    thresholded or sampled the data, grouped rows into "(other)", or the
+    property is close to its API quota, because each makes numbers differ
+    from the GA4 interface.
 
     Queries the GA4 Data API. Dimensions and metrics:
     https://developers.google.com/analytics/devguides/reporting/data/v1/api-schema
@@ -900,12 +905,17 @@ def run_ga4_report(
             [<strings>]. Optional keys: "case_sensitive" (default false) and
             "not": true to exclude matches. Example: [{"field":
             "sessionDefaultChannelGroup", "op": "EXACT", "value": "Paid
-            Search"}].
+            Search"}]. For OR, put a group in the list: {"any_of":
+            [<conditions>]} matches when any holds, {"all_of": [...]} when
+            all hold; groups take "not" too and nest up to three levels.
+            Example: [{"any_of": [{"field": "sessionSource", "value":
+            "google"}, {"field": "sessionSource", "value": "bing"}]}].
         metric_filter: Conditions on metrics, applied after aggregation, all
             of which must hold (AND). Each is {"field": <metric>, "op": <op>,
             "value": <number>}; op is EQUAL, LESS_THAN, LESS_THAN_OR_EQUAL,
             GREATER_THAN, GREATER_THAN_OR_EQUAL (or =, <, <=, >, >=), or
-            BETWEEN with "value": [from, to]. Optional "not": true.
+            BETWEEN with "value": [from, to]. Optional "not": true. Groups
+            work as in dimension_filter.
             Example: [{"field": "sessions", "op": ">", "value": 100}].
         order_by: Sort order as [{"field": <name>, "desc": true|false}]; each
             field must be one of the requested dimensions or metrics.
@@ -914,6 +924,14 @@ def run_ga4_report(
         compare_start: Start of the comparison period (same formats as
             date_range_start). Set together with compare_end.
         compare_end: End of the comparison period.
+        date_ranges: Up to four named periods in one report, replacing
+            date_range_start/end (not combinable with compare_start/end):
+            [{"start": "2026-10-01", "end": "2026-10-31", "name": "october"},
+            {"start": "2025-10-01", "end": "2025-10-31", "name":
+            "october_last_year"}]. Rows then carry a dateRange value with the
+            name. Names default to range_1, range_2, ...
+        currency_code: ISO 4217 code (e.g. "EUR") to report revenue and cost
+            metrics in that currency instead of the property's own.
     """
     from adloop.ga4.reports import run_ga4_report as _impl
 
@@ -931,6 +949,8 @@ def run_ga4_report(
         offset=offset,
         compare_start=compare_start,
         compare_end=compare_end,
+        date_ranges=date_ranges,
+        currency_code=currency_code,
     )
 
 
@@ -940,20 +960,38 @@ def run_realtime_report(
     dimensions: _StrListOpt = None,
     metrics: _StrListOpt = None,
     property_id: str = "",
+    dimension_filter: _DictListOpt = None,
+    metric_filter: _DictListOpt = None,
+    order_by: _DictListOpt = None,
+    limit: int = 0,
+    minute_ranges: _DictListOpt = None,
 ) -> dict:
     """Run a GA4 realtime report showing current active users and events.
 
-    Useful for checking if tracking is firing correctly after code changes.
-    Returns the dimension and metric headers and one row per dimension
-    combination over the realtime window (the last 30 minutes).
+    Useful for checking if tracking is firing correctly after code changes:
+    filter on the event that just shipped, or compare the last few minutes
+    with the minutes before. Returns the dimension and metric headers and one
+    row per dimension combination over the realtime window (the last 30
+    minutes unless minute_ranges says otherwise). When a filter matches
+    nothing, insights[] lists the usual causes.
 
     Args:
         dimensions: GA4 realtime dimension API names, e.g. unifiedScreenName,
-            eventName, country, deviceCategory.
-        metrics: GA4 realtime metric API names, e.g. activeUsers, eventCount.
-            Defaults to ["activeUsers"].
+            eventName, country, deviceCategory, minutesAgo.
+        metrics: GA4 realtime metric API names, e.g. activeUsers, eventCount,
+            keyEvents. Defaults to ["activeUsers"].
         property_id: GA4 property as "properties/123456789" (see
             get_account_summaries). If empty, uses the default from config.
+        dimension_filter: Same format as in run_ga4_report, e.g.
+            [{"field": "eventName", "value": "purchase"}].
+        metric_filter: Same format as in run_ga4_report.
+        order_by: [{"field": <requested dimension or metric>, "desc": true}].
+        limit: Maximum rows; 0 uses GA4's default.
+        minute_ranges: Up to two windows, e.g. [{"start_minutes_ago": 4,
+            "end_minutes_ago": 0, "name": "last_5"}, {"start_minutes_ago": 29,
+            "end_minutes_ago": 5, "name": "before"}]. start_minutes_ago is at
+            most 29 on standard properties (59 on 360). With two windows rows
+            carry a dateRange value with the window's name.
     """
     from adloop.ga4.reports import run_realtime_report as _impl
 
@@ -962,6 +1000,41 @@ def run_realtime_report(
         property_id=property_id or current_config().ga4.property_id,
         dimensions=dimensions,
         metrics=metrics,
+        dimension_filter=dimension_filter,
+        metric_filter=metric_filter,
+        order_by=order_by,
+        limit=limit,
+        minute_ranges=minute_ranges,
+    )
+
+
+@_tool(title="Analytics property overview", annotations=_READONLY, tags={"ga4"})
+@_safe
+def get_ga4_property(property_id: str = "") -> dict:
+    """Show a GA4 property's configuration in one call: details, linked Google Ads accounts, data streams and data retention.
+
+    Returns the property's display name, time zone, currency, industry,
+    service level (standard or 360), type and create time; every linked
+    Google Ads account (customer ID, whether it is a manager account,
+    personalized advertising); every data stream with its measurement ID or
+    app ID; how many months event and user data are kept; and the number of
+    key events. insights[] flags settings that cost data: two-month
+    retention, no Google Ads link while key events exist, the configured Ads
+    account not being linked, a property in the trash. A part the user may
+    not read is listed under unavailable instead of failing the call. Reads
+    the GA4 Admin API (properties.get, googleAdsLinks.list, dataStreams.list,
+    getDataRetentionSettings, keyEvents.list).
+
+    Args:
+        property_id: GA4 property as "properties/123456789" or the bare
+            numeric ID (see get_account_summaries). If empty, uses the
+            default from config.
+    """
+    from adloop.ga4.admin import get_ga4_property as _impl
+
+    return _impl(
+        current_config(),
+        property_id=property_id or current_config().ga4.property_id,
     )
 
 

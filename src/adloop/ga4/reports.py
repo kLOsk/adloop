@@ -105,7 +105,7 @@ def _numeric_value(raw, *, where: str, errors: list[str]):
     return None
 
 
-def _build_filter(condition, *, kind: str, index: int, errors: list[str]):
+def _build_filter(condition, *, kind: str, where: str, errors: list[str]):
     """One condition dict -> GA4 FilterExpression, or None (errors appended).
 
     ``kind`` is "dimension" (string match or in-list) or "metric" (numeric
@@ -113,7 +113,6 @@ def _build_filter(condition, *, kind: str, index: int, errors: list[str]):
     """
     from google.analytics.data_v1beta.types import Filter, FilterExpression
 
-    where = f"{kind}_filter[{index}]"
     if not isinstance(condition, dict):
         errors.append(f"{where}: each condition must be an object like "
                       '{"field": ..., "op": ..., "value": ...}')
@@ -200,6 +199,53 @@ def _build_filter(condition, *, kind: str, index: int, errors: list[str]):
     return expression
 
 
+# GA4 accepts deeper trees, but three levels already express any sensible
+# "(a or b) and not (c or d)" and keep error messages readable.
+_MAX_FILTER_DEPTH = 3
+
+
+def _build_node(node, *, kind: str, where: str, errors: list[str], depth: int = 0):
+    """A condition, or a group {"any_of": [...]} / {"all_of": [...]}, -> FilterExpression."""
+    from google.analytics.data_v1beta.types import FilterExpression, FilterExpressionList
+
+    if not (isinstance(node, dict) and ("any_of" in node or "all_of" in node)):
+        return _build_filter(node, kind=kind, where=where, errors=errors)
+
+    if "any_of" in node and "all_of" in node:
+        errors.append(f"{where}: a group takes either 'any_of' or 'all_of', not both")
+        return None
+    key = "any_of" if "any_of" in node else "all_of"
+    unknown = set(node) - {key, "not"}
+    if unknown:
+        errors.append(f"{where}: a group takes only '{key}' and optionally 'not'; unknown key(s) {sorted(unknown)}")
+        return None
+    if depth >= _MAX_FILTER_DEPTH:
+        errors.append(f"{where}: groups nest at most {_MAX_FILTER_DEPTH} levels deep")
+        return None
+    items = node[key]
+    if not isinstance(items, (list, tuple)) or not items:
+        errors.append(f"{where}: '{key}' needs a non-empty list of conditions")
+        return None
+
+    before = len(errors)
+    children = [
+        _build_node(item, kind=kind, where=f"{where}.{key}[{i}]", errors=errors, depth=depth + 1)
+        for i, item in enumerate(items)
+    ]
+    if len(errors) > before:
+        return None
+    if len(children) == 1:
+        expression = children[0]
+    else:
+        group = FilterExpressionList(expressions=children)
+        expression = (
+            FilterExpression(or_group=group) if key == "any_of" else FilterExpression(and_group=group)
+        )
+    if node.get("not"):
+        expression = FilterExpression(not_expression=expression)
+    return expression
+
+
 def build_filter_expression(conditions, *, kind: str, errors: list[str]):
     """A list of conditions (AND semantics) -> one GA4 FilterExpression.
 
@@ -217,7 +263,7 @@ def build_filter_expression(conditions, *, kind: str, errors: list[str]):
         return None
     before = len(errors)
     expressions = [
-        _build_filter(c, kind=kind, index=i, errors=errors)
+        _build_node(c, kind=kind, where=f"{kind}_filter[{i}]", errors=errors)
         for i, c in enumerate(conditions)
     ]
     if len(errors) > before:
@@ -266,6 +312,123 @@ def build_order_bys(order_by, *, dimensions: list[str], metrics: list[str], erro
     return result
 
 
+# GA4 allows four date ranges per request and reserves these name prefixes.
+_MAX_DATE_RANGES = 4
+_RESERVED_RANGE_PREFIXES = ("date_range_", "RESERVED_")
+
+
+def _named_date_ranges(date_ranges, errors: list[str]) -> list[tuple[str, str, str]]:
+    """``[{"start", "end", "name"?}]`` -> [(name, start, end)], validated."""
+    if isinstance(date_ranges, dict):
+        date_ranges = [date_ranges]
+    if not isinstance(date_ranges, (list, tuple)) or not date_ranges:
+        errors.append('date_ranges must be a list like [{"start": "28daysAgo", "end": "today", "name": "recent"}]')
+        return []
+    if len(date_ranges) > _MAX_DATE_RANGES:
+        errors.append(f"date_ranges takes at most {_MAX_DATE_RANGES} ranges (a GA4 limit)")
+        return []
+    result = []
+    for i, item in enumerate(date_ranges):
+        where = f"date_ranges[{i}]"
+        if not isinstance(item, dict):
+            errors.append(f'{where}: must be an object like {{"start": "28daysAgo", "end": "today"}}')
+            continue
+        unknown = set(item) - {"start", "end", "name"}
+        if unknown:
+            errors.append(f"{where}: unknown key(s) {sorted(unknown)}")
+            continue
+        start, end = str(item.get("start") or "").strip(), str(item.get("end") or "").strip()
+        if not start or not end:
+            errors.append(f"{where}: needs both 'start' and 'end'")
+            continue
+        name = str(item.get("name") or "").strip() or f"range_{i + 1}"
+        if name.startswith(_RESERVED_RANGE_PREFIXES):
+            errors.append(f"{where}: name {name!r} may not start with 'date_range_' or 'RESERVED_' (reserved by GA4)")
+            continue
+        result.append((name, start, end))
+    names = [n for n, _, _ in result]
+    if len(set(names)) != len(names):
+        errors.append("date_ranges: every range needs a different name")
+    return result
+
+
+def _quota_note(quota) -> str:
+    """An insight when the property has used 90% of an API token quota."""
+    if quota is None:
+        return ""
+    low = []
+    for field, label in (
+        ("tokens_per_day", "daily"),
+        ("tokens_per_hour", "hourly"),
+        ("tokens_per_project_per_hour", "hourly per project"),
+    ):
+        status = getattr(quota, field, None)
+        if status is None:
+            continue
+        consumed = int(getattr(status, "consumed", 0) or 0)
+        remaining = int(getattr(status, "remaining", 0) or 0)
+        total = consumed + remaining
+        if total and remaining < total * 0.1:
+            low.append(f"{label}: {remaining:,} of {total:,} tokens left")
+    if not low:
+        return ""
+    return (
+        "This property is close to its GA4 API quota (" + "; ".join(low) + "). "
+        "Fewer dimensions, shorter date ranges and smaller limits use fewer tokens."
+    )
+
+
+def response_insights(response) -> list[str]:
+    """What GA4 says about the data quality of a report, in plain words.
+
+    Thresholding, the "(other)" row and sampling all make numbers differ
+    from the GA4 interface or from other reports; saying so up front saves
+    a debugging session.
+    """
+    insights: list[str] = []
+    meta = getattr(response, "metadata", None)
+    if meta is not None:
+        if getattr(meta, "subject_to_thresholding", False):
+            insights.append(
+                "GA4 applied data thresholds: rows with very few users are withheld, usually because "
+                "Google signals or demographic data are involved, so totals can be lower than in other reports."
+            )
+        if getattr(meta, "data_loss_from_other_row", False):
+            insights.append(
+                'Some rows were grouped into "(other)" because the report reached GA4\'s row limit for '
+                "this data; fewer dimensions or a shorter date range return exact rows."
+            )
+        for sampling in list(getattr(meta, "sampling_metadatas", None) or []):
+            read = int(getattr(sampling, "samples_read_count", 0) or 0)
+            space = int(getattr(sampling, "sampling_space_size", 0) or 0)
+            if space:
+                insights.append(
+                    f"GA4 sampled this report: {read:,} of {space:,} events read ({read / space:.0%}). "
+                    "The numbers are estimates; a shorter date range reduces sampling."
+                )
+        empty_reason = str(getattr(meta, "empty_reason", "") or "")
+        if empty_reason:
+            insights.append(f"GA4 returned no rows: {empty_reason}")
+    note = _quota_note(getattr(response, "property_quota", None))
+    if note:
+        insights.append(note)
+    return insights
+
+
+def _rows(response) -> tuple[list[str], list[str], list[dict]]:
+    dim_headers = [h.name for h in response.dimension_headers]
+    met_headers = [h.name for h in response.metric_headers]
+    rows = []
+    for row in response.rows:
+        r = {}
+        for i, val in enumerate(row.dimension_values):
+            r[dim_headers[i]] = val.value
+        for i, val in enumerate(row.metric_values):
+            r[met_headers[i]] = val.value
+        rows.append(r)
+    return dim_headers, met_headers, rows
+
+
 def run_ga4_report(
     config: AdLoopConfig,
     *,
@@ -281,12 +444,16 @@ def run_ga4_report(
     offset: int = 0,
     compare_start: str = "",
     compare_end: str = "",
+    date_ranges: list[dict] | None = None,
+    currency_code: str = "",
 ) -> dict:
     """Run a GA4 report with specified dimensions, metrics, and date range.
 
-    Optional filters (AND-combined conditions), ordering, paging offset and
-    a comparison period (sent as a second named date range; GA4 then labels
-    every row with a ``dateRange`` value of "current" or "comparison").
+    Optional filters (conditions combined with AND, groups for OR), ordering,
+    paging offset, a comparison period (sent as a second named date range;
+    GA4 then labels every row with a ``dateRange`` value of "current" or
+    "comparison") or up to four named ``date_ranges``, and a reporting
+    currency.
     """
     from google.analytics.data_v1beta.types import (
         DateRange,
@@ -304,6 +471,7 @@ def run_ga4_report(
     metrics = list(metrics or [])
     compare_start = (compare_start or "").strip()
     compare_end = (compare_end or "").strip()
+    currency_code = (currency_code or "").strip().upper()
 
     errors: list[str] = []
     if isinstance(limit, bool) or not isinstance(limit, int) or limit < 1:
@@ -312,6 +480,13 @@ def run_ga4_report(
         errors.append("offset must be 0 or a positive integer")
     if bool(compare_start) != bool(compare_end):
         errors.append("compare_start and compare_end must be given together")
+    named_ranges: list[tuple[str, str, str]] = []
+    if date_ranges:
+        if compare_start:
+            errors.append("use either date_ranges or compare_start/compare_end, not both")
+        named_ranges = _named_date_ranges(date_ranges, errors)
+    if currency_code and not (len(currency_code) == 3 and currency_code.isalpha()):
+        errors.append("currency_code must be a three-letter ISO 4217 code such as EUR or USD")
     dim_expr = build_filter_expression(dimension_filter, kind="dimension", errors=errors)
     met_expr = build_filter_expression(metric_filter, kind="metric", errors=errors)
     order_bys = build_order_bys(order_by, dimensions=dimensions, metrics=metrics, errors=errors)
@@ -319,24 +494,29 @@ def run_ga4_report(
         return {"error": "Validation failed", "details": errors}
 
     comparing = bool(compare_start)
-    date_ranges = [
-        DateRange(
-            start_date=date_range_start,
-            end_date=date_range_end,
-            name=CURRENT_RANGE if comparing else "",
-        )
-    ]
-    if comparing:
-        date_ranges.append(
-            DateRange(start_date=compare_start, end_date=compare_end, name=COMPARISON_RANGE)
-        )
+    if named_ranges:
+        request_ranges = [DateRange(start_date=start, end_date=end, name=name) for name, start, end in named_ranges]
+    else:
+        request_ranges = [
+            DateRange(
+                start_date=date_range_start,
+                end_date=date_range_end,
+                name=CURRENT_RANGE if comparing else "",
+            )
+        ]
+        if comparing:
+            request_ranges.append(
+                DateRange(start_date=compare_start, end_date=compare_end, name=COMPARISON_RANGE)
+            )
 
     request_kwargs = {
         "property": property_id,
         "dimensions": [Dimension(name=d) for d in dimensions],
         "metrics": [Metric(name=m) for m in metrics],
-        "date_ranges": date_ranges,
+        "date_ranges": request_ranges,
         "limit": limit,
+        # Costs nothing extra and lets the result warn before the quota runs out.
+        "return_property_quota": True,
     }
     if offset:
         request_kwargs["offset"] = offset
@@ -346,25 +526,21 @@ def run_ga4_report(
         request_kwargs["metric_filter"] = met_expr
     if order_bys:
         request_kwargs["order_bys"] = order_bys
+    if currency_code:
+        request_kwargs["currency_code"] = currency_code
 
     client = get_data_client(config)
     response = client.run_report(RunReportRequest(**request_kwargs))
+    dim_headers, met_headers, rows = _rows(response)
 
-    dim_headers = [h.name for h in response.dimension_headers]
-    met_headers = [h.name for h in response.metric_headers]
-
-    rows = []
-    for row in response.rows:
-        r = {}
-        for i, val in enumerate(row.dimension_values):
-            r[dim_headers[i]] = val.value
-        for i, val in enumerate(row.metric_values):
-            r[met_headers[i]] = val.value
-        rows.append(r)
-
+    if named_ranges:
+        _, first_start, first_end = named_ranges[0]
+        date_range = {"start": first_start, "end": first_end}
+    else:
+        date_range = {"start": date_range_start, "end": date_range_end}
     result = {
         "property": property_id,
-        "date_range": {"start": date_range_start, "end": date_range_end},
+        "date_range": date_range,
         "dimensions": dim_headers,
         "metrics": met_headers,
         "rows": rows,
@@ -378,10 +554,18 @@ def run_ga4_report(
             CURRENT_RANGE: result["date_range"],
             COMPARISON_RANGE: result["comparison_date_range"],
         }
+    elif len(named_ranges) > 1:
+        # GA4 adds a ``dateRange`` dimension holding one of these names.
+        result["date_ranges"] = {name: {"start": start, "end": end} for name, start, end in named_ranges}
+    if currency_code:
+        result["currency_code"] = currency_code
     if offset:
         result["offset"] = offset
     if response.row_count and offset + len(rows) < response.row_count:
         result["next_offset"] = offset + len(rows)
+    insights = response_insights(response)
+    if insights:
+        result["insights"] = insights
     return result
 
 
@@ -466,14 +650,67 @@ def get_ga4_metadata(
     return result
 
 
+# Realtime covers the last 30 minutes on standard properties, 60 on 360.
+_MAX_MINUTES_AGO = 59
+_MAX_MINUTE_RANGES = 2
+
+
+def _minute_ranges(minute_ranges, errors: list[str]) -> list:
+    """``[{"start_minutes_ago", "end_minutes_ago", "name"?}]`` -> MinuteRange list."""
+    from google.analytics.data_v1beta.types import MinuteRange
+
+    if isinstance(minute_ranges, dict):
+        minute_ranges = [minute_ranges]
+    if not isinstance(minute_ranges, (list, tuple)) or not minute_ranges:
+        errors.append('minute_ranges must be a list like [{"start_minutes_ago": 4, "end_minutes_ago": 0}]')
+        return []
+    if len(minute_ranges) > _MAX_MINUTE_RANGES:
+        errors.append(f"minute_ranges takes at most {_MAX_MINUTE_RANGES} ranges (a GA4 limit)")
+        return []
+    result = []
+    for i, item in enumerate(minute_ranges):
+        where = f"minute_ranges[{i}]"
+        if not isinstance(item, dict):
+            errors.append(f"{where}: must be an object with start_minutes_ago and end_minutes_ago")
+            continue
+        unknown = set(item) - {"start_minutes_ago", "end_minutes_ago", "name"}
+        if unknown:
+            errors.append(f"{where}: unknown key(s) {sorted(unknown)}")
+            continue
+        start, end = item.get("start_minutes_ago", 29), item.get("end_minutes_ago", 0)
+        if any(isinstance(v, bool) or not isinstance(v, int) for v in (start, end)):
+            errors.append(f"{where}: start_minutes_ago and end_minutes_ago must be whole numbers")
+            continue
+        if not 0 <= end <= start <= _MAX_MINUTES_AGO:
+            errors.append(
+                f"{where}: needs 0 <= end_minutes_ago <= start_minutes_ago <= {_MAX_MINUTES_AGO} "
+                "(standard properties reach back 29 minutes, 360 properties 59)"
+            )
+            continue
+        name = str(item.get("name") or "").strip()
+        if name.startswith(_RESERVED_RANGE_PREFIXES):
+            errors.append(f"{where}: name {name!r} may not start with 'date_range_' or 'RESERVED_'")
+            continue
+        kwargs = {"start_minutes_ago": start, "end_minutes_ago": end}
+        if name:
+            kwargs["name"] = name
+        result.append(MinuteRange(**kwargs))
+    return result
+
+
 def run_realtime_report(
     config: AdLoopConfig,
     *,
     property_id: str = "",
     dimensions: list[str] | None = None,
     metrics: list[str] | None = None,
+    dimension_filter: list[dict] | None = None,
+    metric_filter: list[dict] | None = None,
+    order_by: list[dict] | None = None,
+    limit: int = 0,
+    minute_ranges: list[dict] | None = None,
 ) -> dict:
-    """Run a GA4 realtime report."""
+    """Run a GA4 realtime report, optionally filtered, sorted and per minute range."""
     from google.analytics.data_v1beta.types import (
         Dimension,
         Metric,
@@ -482,32 +719,61 @@ def run_realtime_report(
 
     from adloop.ga4.client import get_data_client
 
-    client = get_data_client(config)
+    dimensions = list(dimensions or [])
+    metrics = list(metrics or ["activeUsers"])
 
-    request = RunRealtimeReportRequest(
-        property=property_id,
-        dimensions=[Dimension(name=d) for d in (dimensions or [])],
-        metrics=[Metric(name=m) for m in (metrics or ["activeUsers"])],
-    )
+    errors: list[str] = []
+    if isinstance(limit, bool) or not isinstance(limit, int) or limit < 0:
+        errors.append("limit must be 0 (GA4's default) or a positive integer")
+    dim_expr = build_filter_expression(dimension_filter, kind="dimension", errors=errors)
+    met_expr = build_filter_expression(metric_filter, kind="metric", errors=errors)
+    order_bys = build_order_bys(order_by, dimensions=dimensions, metrics=metrics, errors=errors)
+    ranges = _minute_ranges(minute_ranges, errors) if minute_ranges else []
+    if errors:
+        return {"error": "Validation failed", "details": errors}
 
-    response = client.run_realtime_report(request)
+    request_kwargs = {
+        "property": property_id,
+        "dimensions": [Dimension(name=d) for d in dimensions],
+        "metrics": [Metric(name=m) for m in metrics],
+        "return_property_quota": True,
+    }
+    if dim_expr is not None:
+        request_kwargs["dimension_filter"] = dim_expr
+    if met_expr is not None:
+        request_kwargs["metric_filter"] = met_expr
+    if order_bys:
+        request_kwargs["order_bys"] = order_bys
+    if limit:
+        request_kwargs["limit"] = limit
+    if ranges:
+        request_kwargs["minute_ranges"] = ranges
 
-    dim_headers = [h.name for h in response.dimension_headers]
-    met_headers = [h.name for h in response.metric_headers]
+    response = get_data_client(config).run_realtime_report(RunRealtimeReportRequest(**request_kwargs))
+    dim_headers, met_headers, rows = _rows(response)
 
-    rows = []
-    for row in response.rows:
-        r = {}
-        for i, val in enumerate(row.dimension_values):
-            r[dim_headers[i]] = val.value
-        for i, val in enumerate(row.metric_values):
-            r[met_headers[i]] = val.value
-        rows.append(r)
-
-    return {
+    result = {
         "property": property_id,
         "dimensions": dim_headers,
         "metrics": met_headers,
         "rows": rows,
         "row_count": len(rows),
     }
+    if ranges:
+        result["minute_ranges"] = [
+            {"start_minutes_ago": r.start_minutes_ago, "end_minutes_ago": r.end_minutes_ago, **({"name": r.name} if r.name else {})}
+            for r in ranges
+        ]
+    insights = []
+    if not rows and (dim_expr is not None or met_expr is not None):
+        insights.append(
+            "Nothing matches the filter in this window. Realtime data arrives within seconds, so after a "
+            "deploy check the event name against get_tracking_events, and remember that a test visit "
+            "which declined analytics cookies is not recorded."
+        )
+    note = _quota_note(getattr(response, "property_quota", None))
+    if note:
+        insights.append(note)
+    if insights:
+        result["insights"] = insights
+    return result
