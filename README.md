@@ -646,7 +646,8 @@ src/adloop/
 │   ├── auth.py        # Entra sign-in (browser auth code + PKCE, device-code fallback), refresh tokens
 │   ├── client.py      # REST v13 client — Campaign Management, Customer Management, Reporting services
 │   ├── read.py        # Accounts, campaigns, ad groups, keywords, ads, reports, search terms, conversion audit
-│   ├── manage.py      # Drafts, preflight and apply for campaigns, targeting, keywords, negatives, ads, extensions
+│   ├── manage/        # Drafts, dry-run checks and applies per area (campaigns, targeting, ad groups, negatives,
+│   │                  #   ads, extensions, removal), one operation → handler table
 │   └── write.py       # Budget and status drafts; routes every microsoft_ plan to its preflight and apply
 ├── oauth_redirect.py  # Localhost listener for sign-in redirects (free port, waits for its state)
 └── safety/

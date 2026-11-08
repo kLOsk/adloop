@@ -1838,3 +1838,19 @@ class TestReviewValidation:
         eight = seven + [{"day_of_week": "Monday", "start_hour": 20, "end_hour": 21}]
         assert "At most 7 ad_schedule windows on Monday" in _text(
             manage.update_microsoft_campaign_targeting(config, campaign_id=CAMPAIGN, ad_schedule=eight))
+
+
+class TestHandlerTable:
+    def test_every_operation_has_a_check_and_an_apply(self):
+        assert manage.OPERATIONS == frozenset(manage.HANDLERS)
+        for op, handler in manage.HANDLERS.items():
+            assert op.startswith("microsoft_") and callable(handler.preflight) and callable(handler.apply)
+
+    def test_an_unknown_operation_is_refused(self, config):
+        from adloop.safety.preview import ChangePlan
+
+        plan = ChangePlan(operation="microsoft_unknown", apply_only_payload={"ad_account_id": ACCOUNT})
+        with pytest.raises(ValueError, match="Unknown Microsoft operation"):
+            manage.preflight(config, plan)
+        with pytest.raises(ValueError, match="Unknown Microsoft operation"):
+            manage.apply_plan(config, plan)
