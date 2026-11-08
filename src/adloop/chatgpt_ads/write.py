@@ -98,6 +98,11 @@ _MAX_CONTEXT_HINTS = 2000
 # A preview lists this many hints; the rest are counted.
 _SHOWN_HINTS = 20
 _MAX_LOCATIONS = 2500
+# OpenAI's spec allows daily_spend_limit_micros from 1,000,000, but the API
+# refuses less: "Daily campaign budget must be at least 25000000 micros"
+# (seen live, USD account, 2026-11-08). Refusing at the draft keeps a dry run
+# from passing a create the apply cannot make.
+_MIN_DAILY_BUDGET = 25.0
 _MIN_IMAGE_SIDE = 640
 
 
@@ -460,6 +465,13 @@ def _check_flight_budget(budget: dict, start: Any, end: Any, config: AdLoopConfi
     return daily
 
 
+def _min_daily_text(amount: Any) -> str:
+    return (
+        f"daily_budget {float(amount):g} is below OpenAI's minimum daily campaign budget of "
+        f"{_MIN_DAILY_BUDGET:g} (in the account currency); OpenAI refuses the create or update."
+    )
+
+
 def _budget_cap(daily: float | None, config: AdLoopConfig) -> None:
     from adloop.safety.guards import check_budget_cap
 
@@ -513,6 +525,8 @@ def update_chatgpt_campaign(
     for label, amount in (("daily_budget", daily_budget), ("lifetime_budget", lifetime_budget)):
         if amount is not None and float(amount) <= 0:
             errors.append(f"{label} must be a positive amount in the account currency.")
+    if daily_budget is not None and 0 < float(daily_budget) < _MIN_DAILY_BUDGET:
+        errors.append(_min_daily_text(daily_budget))
     start = _parse_day(start_date, "start_date", errors)
     end = _parse_day(end_date, "end_date", errors)
     loc_ids, ctry = _clean_list(location_ids), _clean_list(countries)
@@ -759,6 +773,8 @@ def draft_chatgpt_campaign(
         errors.append("Pass exactly one of daily_budget or lifetime_budget (a positive amount in the account currency).")
     if lifetime and lifetime < 1:
         errors.append("lifetime_budget must be at least 1 in the account currency.")
+    if 0 < daily < _MIN_DAILY_BUDGET:
+        errors.append(_min_daily_text(daily))
     locations = _geo_from_args(_clean_list(location_ids), _clean_list(countries), errors, "locations")
     if not locations:
         errors.append("Location targeting is required: pass location_ids (search_chatgpt_locations) or countries.")

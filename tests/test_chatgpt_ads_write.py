@@ -349,7 +349,7 @@ class TestCampaignUpdate:
     def test_daily_to_lifetime_is_refused_lifetime_to_daily_allowed(self, api, config):
         refused = write.update_chatgpt_campaign(config, campaign_id="cmpn_1", lifetime_budget=500)
         assert "daily budget to a lifetime budget" in _text(refused)
-        allowed = write.update_chatgpt_campaign(config, campaign_id="cmpn_2", daily_budget=20)
+        allowed = write.update_chatgpt_campaign(config, campaign_id="cmpn_2", daily_budget=25)
         assert any("lifetime to a daily budget" in w for w in allowed["warnings"])
 
     def test_lifetime_budget_capped_by_its_daily_equivalent(self, api, config):
@@ -427,7 +427,7 @@ class TestCampaignUpdate:
 
     def test_nothing_to_change_and_archived(self, api, config):
         assert "Nothing to change" in write.update_chatgpt_campaign(config, campaign_id="cmpn_1", name="Springfield Core")["error"]
-        assert "archived" in write.update_chatgpt_campaign(config, campaign_id="cmpn_3", daily_budget=5)["error"]
+        assert "archived" in write.update_chatgpt_campaign(config, campaign_id="cmpn_3", daily_budget=30)["error"]
 
 
 # ---------------------------------------------------------------------------
@@ -557,21 +557,21 @@ class TestCreates:
         assert result["status"] == "APPLIED"
 
     def test_campaign_guards(self, api, config):
-        assert "Location targeting is required" in _text(write.draft_chatgpt_campaign(config, name="No geo", daily_budget=10))
-        assert "exactly one of daily_budget" in _text(write.draft_chatgpt_campaign(config, name="Two", daily_budget=10, lifetime_budget=100, countries=["US"]))
+        assert "Location targeting is required" in _text(write.draft_chatgpt_campaign(config, name="No geo", daily_budget=30))
+        assert "exactly one of daily_budget" in _text(write.draft_chatgpt_campaign(config, name="Two", daily_budget=30, lifetime_budget=100, countries=["US"]))
         assert "exceeds maximum" in write.draft_chatgpt_campaign(config, name="Big", daily_budget=500, countries=["US"])["error"]
         assert "needs an end_date" in _text(write.draft_chatgpt_campaign(config, name="Life", lifetime_budget=300, countries=["US"]))
         assert "exactly one conversion_event_setting_id" in _text(
-            write.draft_chatgpt_campaign(config, name="Conv", bidding_type="conversions", daily_budget=20, countries=["US"]))
+            write.draft_chatgpt_campaign(config, name="Conv", bidding_type="conversions", daily_budget=30, countries=["US"]))
         assert "standard event" in _text(
-            write.draft_chatgpt_campaign(config, name="Conv", bidding_type="conversions", daily_budget=20, countries=["US"],
+            write.draft_chatgpt_campaign(config, name="Conv", bidding_type="conversions", daily_budget=30, countries=["US"],
                                          conversion_event_setting_ids=["ces_custom"]))
-        warn = write.draft_chatgpt_campaign(config, name="Clicks only", daily_budget=20, countries=["us"])
+        warn = write.draft_chatgpt_campaign(config, name="Clicks only", daily_budget=30, countries=["us"])
         assert any("report 0 conversions" in w for w in warn["warnings"])
         assert _payload(warn)["body"]["targeting"]["locations"] == {"countries": ["US"]}
 
     def test_retried_create_does_not_duplicate(self, api, config):
-        preview = write.draft_chatgpt_campaign(config, name="Retry me", daily_budget=10, countries=["US"])
+        preview = write.draft_chatgpt_campaign(config, name="Retry me", daily_budget=30, countries=["US"])
         plan = preview_store.get_plan(preview["plan_id"])
         first = write.apply_plan(config, plan)
         second = write.apply_plan(config, plan)
@@ -709,7 +709,7 @@ class TestRoundThreeFindings:
 
     def test_key_moved_to_another_account_after_the_dry_run_sends_nothing(self, api, config):
         # Finding 1: the preview named account A; the key now answers for B.
-        preview = write.draft_chatgpt_campaign(config, name="Pinned", daily_budget=10, countries=["US"])
+        preview = write.draft_chatgpt_campaign(config, name="Pinned", daily_budget=30, countries=["US"])
         assert preview["customer_id"] == "adacct_1"
         dry = ads_write.confirm_and_apply(config, plan_id=preview["plan_id"], dry_run=True)
         assert dry["status"] == "DRY_RUN_SUCCESS"
@@ -906,9 +906,20 @@ class TestMaintainerReview:
         assert preview["changes"]["display"]["daily_spend"] == {"from": 16.13, "to": 100.0, "currency": "USD"}
 
     def test_lifetime_to_a_similar_daily_budget_is_not(self, api, config):
-        preview = write.update_chatgpt_campaign(config, campaign_id="cmpn_2", daily_budget=20)
+        # 750 over 31 days is about 24.19 a day; a daily 25 is about 1.0x that.
+        api.campaigns["cmpn_2"]["budget"] = {"lifetime_spend_limit_micros": 750_000_000}
+        preview = write.update_chatgpt_campaign(config, campaign_id="cmpn_2", daily_budget=25)
         assert preview["requires_double_confirm"] is False
-        assert any("about 1.2x the daily spend" in w for w in preview["warnings"])
+        assert any("about 1.0x the daily spend" in w for w in preview["warnings"])
+
+    def test_daily_budgets_under_the_openai_minimum_are_refused(self, api, config):
+        # Seen live: "Daily campaign budget must be at least 25000000 micros", though the
+        # spec's minimum is 1,000,000. A dry run must not pass what the apply cannot make.
+        for result in (
+            write.draft_chatgpt_campaign(config, name="Small", daily_budget=10, countries=["US"]),
+            write.update_chatgpt_campaign(config, campaign_id="cmpn_1", daily_budget=20),
+        ):
+            assert "minimum daily campaign budget of 25" in _text(result) and "plan_id" not in result
 
     def test_shortening_a_lifetime_flight_counts_as_a_raise(self, api, config):
         # 500 over 31 days → over 16 days is about 31 a day: nearly twice the daily spend.
@@ -976,7 +987,7 @@ class TestMaintainerReview:
         assert [c["path"] for c in api.writes()] == ["campaigns/cmpn_1/pause"]
 
     def test_lost_create_answer_explains_the_idempotency_key(self, api, config):
-        preview = write.draft_chatgpt_campaign(config, name="Lost answer", daily_budget=10, countries=["US"])
+        preview = write.draft_chatgpt_campaign(config, name="Lost answer", daily_budget=30, countries=["US"])
         api.lose_next_response = True
         first = ads_write.confirm_and_apply(config, plan_id=preview["plan_id"], dry_run=False)
         assert "may have created the campaign" in first["error"] and "Idempotency-Key" in first["error"]

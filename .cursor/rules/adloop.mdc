@@ -351,7 +351,7 @@ ChatGPT Ads (OpenAI Ads Manager, ads.openai.com) through the OpenAI Advertiser A
 | `draft_chatgpt_ad_group` | New ad group, paused | `campaign_id`, `name`, `context_hints`, `strategy`, `max_bid` |
 | `draft_chatgpt_ad` | New chat-card ad, paused; the image is checksummed at the draft and uploaded at apply as the same bytes | `ad_group_id`, `title`, `body`, `target_url`, `image_url` / `image_path` / `file_id` |
 
-- **Budgets:** daily budgets (and a lifetime budget's daily equivalent over its dates) are capped by `max_daily_budget`; raising one by more than half needs a double confirmation. OpenAI allows lifetime → daily but not daily → lifetime, and `bidding_type` never changes after creation.
+- **Budgets:** OpenAI refuses daily campaign budgets under 25 in the account currency (the draft refuses them too); daily budgets (and a lifetime budget's daily equivalent over its dates) are capped by `max_daily_budget`; raising one by more than half needs a double confirmation. OpenAI allows lifetime → daily but not daily → lifetime, and `bidding_type` never changes after creation.
 - **Bids** follow the campaign's bidding type: impressions take a fixed bid per impression, clicks a fixed CPC or maximize_clicks, conversions a target CPA (fixed) or maximize_conversions. Automatic strategies need a daily campaign budget and drop audience bid multipliers. Fixed-bid raises are capped by `max_bid_increase_pct`.
 - **Targeting** is replaced as a whole: pass the full location list. Custom audiences are kept. Never leave a campaign without locations.
 - **Tracking:** keep `utm_source=chatgpt&utm_medium=cpc` (the default for new campaigns) so `chatgpt_attribution_check` can separate ad clicks from unpaid ChatGPT referrals.
