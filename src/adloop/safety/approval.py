@@ -296,7 +296,7 @@ _NAME_KEYS = ("entity_name", "name", "campaign_name", "ad_group_name", "list_nam
 # Shown in the dialog's first two lines already, or noise in a summary.
 _HEADER_KEYS = frozenset({*_NAME_KEYS, "account", "account_name", "customer_id",
                           "current_status", "target_status", "status_on_create"})
-_SUMMARY_SKIP = frozenset({"currency", "time_zone", "fingerprint", "warnings"})
+_SUMMARY_SKIP = frozenset({"currency", "time_zone", "fingerprint", "warnings", "display", "patch"})
 _MAX_SUMMARY_FACTS = 3
 
 
@@ -369,6 +369,16 @@ def _summary(plan: ChangePlan) -> str:
     elif created := changes.get("status_on_create"):
         parts.append(f"created {str(created).lower()}")
     facts = 0
+    # Updates that keep a before/after per field ({"name": {"from": a, "to": b}},
+    # Reddit's "display") say the change itself, so it goes first.
+    display = changes.get("display")
+    for field_name, change in (display.items() if isinstance(display, dict) else ()):
+        if facts == _MAX_SUMMARY_FACTS:
+            break
+        if isinstance(change, dict) and {"from", "to"} <= change.keys():
+            old, new = (_clip(str(change[k]), 45) for k in ("from", "to"))
+            parts.append(f"{field_name.replace('_', ' ')}: {old} → {new}")
+            facts += 1
     for key, value in changes.items():
         if facts == _MAX_SUMMARY_FACTS:
             break

@@ -194,6 +194,21 @@ def test_a_create_names_the_platform_and_the_key_values():
     assert second == "Account a2_x · created paused · objective: CLICKS · daily budget: 20"
 
 
+def test_an_update_shows_before_and_after_in_the_summary():
+    """Seen live 2026-11-08: a Reddit rename showed only the account on line two."""
+    plan = ChangePlan(
+        operation="reddit_update_campaign", entity_type="campaign", platform="reddit",
+        customer_id="a2_x", changes={
+            "campaign_name": "Spring", "is_campaign_budget_optimization": False,
+            "patch": {"name": "Spring sale"},
+            "display": {"name": {"from": "Spring", "to": "Spring sale"},
+                        "spend_cap": {"from": None, "to": 50}},
+        },
+    )
+    second = confirmation_message(plan).splitlines()[1]
+    assert second == "Account a2_x · name: Spring → Spring sale · spend cap: None → 50"
+
+
 def test_the_message_truncates_long_values_and_counts_the_rest():
     plan = ChangePlan(
         operation="reddit_update_ad_group", entity_type="ad_group", entity_id="9",
