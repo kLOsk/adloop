@@ -90,7 +90,8 @@ class FakeMicrosoft:
         self.in_store_pilot = True
         self.calls: list[dict] = []
         self.fail: dict[tuple, Exception] = {}
-        # Whether Microsoft refuses one "Targets" query for every criterion type.
+        # Whether Microsoft refuses one query for several criterion types
+        # ("Location,LocationIntent,..."). It always refuses "Targets" there.
         self.refuse_targets_query = False
         self._next = 5000
 
@@ -140,11 +141,12 @@ class FakeMicrosoft:
                 out.append(c)
             return {"Campaigns": out}
         if path == "CampaignCriterions/QueryByIds":
-            kind = body["CriterionType"]
-            if kind == "Targets" and self.refuse_targets_query:
-                raise MicrosoftAdsApiError("InvalidCriterionType", status=400, codes=["InvalidCriterionType"])
+            kinds = body["CriterionType"].split(",")
+            if "Targets" in kinds or (len(kinds) > 1 and self.refuse_targets_query):
+                # Seen live: 4503 CampaignCriterionTypeInvalid for "Targets" in a query.
+                raise MicrosoftAdsApiError("CampaignCriterionTypeInvalid", status=400, codes=["4503"])
             return {"CampaignCriterions": [copy.deepcopy(c) for c in self.criteria.get(str(body["CampaignId"]), [])
-                                           if kind == "Targets" or c["Criterion"]["Type"].replace("Criterion", "") == kind]}
+                                           if c["Criterion"]["Type"].replace("Criterion", "") in kinds]}
         if path == "AdGroups/QueryByCampaignId":
             return {"AdGroups": [self._pub(g) for g in self.ad_groups.values() if g["_campaign"] == str(body["CampaignId"])]}
         if path == "Keywords/QueryByAdGroupId":
@@ -1793,14 +1795,14 @@ class TestReviewAccountScans:
     def test_campaign_reads_ask_once_per_campaign_for_its_targeting(self, api, config):
         read.get_microsoft_campaigns(config)
         queries = [c["body"] for c in api.calls if c["path"] == "CampaignCriterions/QueryByIds"]
-        assert [q["CriterionType"] for q in queries] == ["Targets"] * len(api.campaigns)
+        assert [q["CriterionType"] for q in queries] == ["Location,LocationIntent,Radius"] * len(api.campaigns)
 
     def test_a_refused_targets_query_falls_back_to_one_per_type(self, api, config):
         api.refuse_targets_query = True
         rows = {r["campaign_id"]: r for r in read.get_microsoft_campaigns(config)["campaigns"]}
         assert rows[CAMPAIGN]["locations"]["included"] == ["Springfield, Illinois"]
         kinds = [c["body"]["CriterionType"] for c in api.calls if c["path"] == "CampaignCriterions/QueryByIds"]
-        assert kinds.count("Targets") == 1 and kinds.count("Location") == len(api.campaigns)
+        assert kinds.count("Location,LocationIntent,Radius") == 1 and kinds.count("Location") == len(api.campaigns)
 
 
 class TestReviewReads:

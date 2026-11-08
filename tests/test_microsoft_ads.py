@@ -198,10 +198,10 @@ def _fake_api(extra: dict | None = None, reports: dict | None = None):
         if key == ("campaign", "Campaigns/QueryByAccountId"):
             return _CAMPAIGNS
         if key == ("campaign", "CampaignCriterions/QueryByIds"):
-            if body["CriterionType"] == "Targets":
-                return {"CampaignCriterions": [c for (cid, _kind), rows in _CRITERIONS.items()
-                                               if cid == body["CampaignId"] for c in rows]}
-            return {"CampaignCriterions": _CRITERIONS.get((body["CampaignId"], body["CriterionType"]), [])}
+            # Like Microsoft: several types joined by commas in one query.
+            kinds = body["CriterionType"].split(",")
+            return {"CampaignCriterions": [c for (cid, kind), rows in _CRITERIONS.items()
+                                           if cid == body["CampaignId"] and kind in kinds for c in rows]}
         if key == ("campaign", "AdGroups/QueryByCampaignId"):
             return {"AdGroups": _AD_GROUPS.get(body["CampaignId"], [])}
         if key == ("campaign", "Keywords/QueryByAdGroupId"):

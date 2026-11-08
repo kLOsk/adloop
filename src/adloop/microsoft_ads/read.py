@@ -404,9 +404,12 @@ def is_negative(c: dict) -> bool:
 
 
 TARGET_KINDS = ("Location", "LocationIntent", "Radius", "DayTime")
-# One "Targets" query returns every target criterion of a campaign instead of
-# one call per type. If Microsoft ever refuses it, the per-type queries take
-# over for the rest of the process.
+# One query with the types joined by commas ("Location,LocationIntent,...")
+# returns every target criterion of a campaign instead of one call per type.
+# QueryByIds refuses the "Targets" shorthand that adds, updates and deletes
+# accept (seen live: 4503 CampaignCriterionTypeInvalid, "Invalid API Campaign
+# Criterion Type : Targets on API tier"). If Microsoft ever refuses the
+# joined form, the per-type queries take over for the rest of the process.
 _targets_query = {"refused": False}
 
 
@@ -415,7 +418,7 @@ def target_criterions(config: AdLoopConfig, account: str, customer: str, campaig
     """A campaign's target criteria by kind, in one call where Microsoft allows it."""
     if not _targets_query["refused"]:
         try:
-            rows = _criterions(config, account, customer, campaign_id, "Targets")
+            rows = _criterions(config, account, customer, campaign_id, ",".join(kinds))
         except MicrosoftAdsApiError as exc:
             if exc.status != 400:
                 raise
