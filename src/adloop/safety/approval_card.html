@@ -56,6 +56,8 @@
   dt { color: var(--fg-2); font-size: 12px; overflow-wrap: anywhere; }
   dd { margin: 0; overflow-wrap: anywhere; white-space: pre-wrap; }
   dd.mono { font: 12px/1.4 var(--mono); }
+  dd ul { margin: 0; padding-left: 1.1em; white-space: normal; }
+  dd li + li { margin-top: 4px; }
   .more { grid-column: 1 / -1; color: var(--fg-2); font-size: 12px; }
   .note { margin-top: 10px; padding: 8px 10px; border-radius: 8px; font-size: 13px; overflow-wrap: anywhere; }
   .note.warn { color: var(--warn); background: var(--warn-bg); }
@@ -124,7 +126,7 @@
       gone: "Diese Änderung ist nicht mehr offen (angewendet, verworfen oder abgelaufen).",
     },
   };
-  const PLATFORMS = { google: "Google Ads", reddit: "Reddit Ads", ga4: "Google Analytics", gtm: "Tag Manager" };
+  const PLATFORMS = { google: "Google Ads", reddit: "Reddit Ads", ga4: "Google Analytics", gtm: "Tag Manager", google_ga4: "Google Ads · Analytics" };
   const MAX_ROWS = 14;
 
   let lang = "en";
@@ -168,6 +170,7 @@
 
   function platformOf(preview) {
     const op = String(preview.operation || "");
+    if (op === "conversion_tracking_setup") return "google_ga4";
     if (preview.platform === "reddit" || op.startsWith("reddit_")) return "reddit";
     if (op.startsWith("gtm_")) return "gtm";
     if (preview.platform === "ga4" || op.startsWith("ga4_") || op.includes("key_event")) return "ga4";
@@ -188,6 +191,18 @@
     const dt = document.createElement("dt");
     dt.textContent = String(key).replace(/_/g, " ");
     const dd = document.createElement("dd");
+    if (Array.isArray(value) && value.length > 1 && value.every((v) => typeof v === "string")) {
+      // Several steps or names: one bullet each, so wrapped lines stay apart.
+      const ul = document.createElement("ul");
+      for (const item of value) {
+        const li = document.createElement("li");
+        li.textContent = item;
+        ul.append(li);
+      }
+      dd.append(ul);
+      dl.append(dt, dd);
+      return;
+    }
     const v = formatValue(value);
     dd.textContent = v.text;
     if (v.mono) dd.classList.add("mono");
@@ -223,7 +238,12 @@
     const dl = $("changes");
     dl.replaceChildren();
     const SHOWN_ELSEWHERE = new Set(["account", "entity_name", "warnings"]);
-    const entries = Object.entries(ch).filter(([k]) => !SHOWN_ELSEWHERE.has(k));
+    // Bookkeeping for the apply, not for the reader: the before/after rows
+    // already show what "after" holds, and the fingerprint is a hash.
+    const INTERNAL = new Set(["fingerprint", "after"]);
+    // A labelled "property" row already names the ID.
+    if (ch.property) INTERNAL.add("property_id");
+    const entries = Object.entries(ch).filter(([k]) => !SHOWN_ELSEWHERE.has(k) && !INTERNAL.has(k));
     entries.slice(0, MAX_ROWS).forEach(([k, v]) => row(dl, k, v));
     if (entries.length > MAX_ROWS) {
       const more = document.createElement("div");

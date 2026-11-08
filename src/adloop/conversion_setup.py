@@ -199,7 +199,7 @@ def draft_conversion_tracking_setup(
         if skipped:
             warnings.append(
                 f"Left out because they did not fire in the last 28 days: {', '.join(skipped)}. "
-                "Pass them in `events` to include them."
+                "Ask for them by name to include them anyway."
             )
     if counts is None:
         warnings.append("Could not read the event counts from GA4, so it is unchecked whether the events fire.")
@@ -224,7 +224,7 @@ def draft_conversion_tracking_setup(
                 "with Google Ads."
                 if ads_personalization else
                 "Personalized advertising stays off for the link, so GA4 does not share audiences or "
-                "remarketing data with Google Ads; pass ads_personalization=true to turn it on."
+                "remarketing data with Google Ads. Ask for personalized advertising to turn it on."
             )
         )
 
@@ -322,8 +322,8 @@ def draft_conversion_tracking_setup(
             if retention.read_settings(config, pid)["event_data_retention"] == "TWO_MONTHS":
                 warnings.append(
                     "GA4 keeps event data for 2 months, its default, which cuts explorations and funnels "
-                    "short. Pass data_retention=14 to include the change (update your privacy policy if it "
-                    "names a period)."
+                    "short. Ask to include 14 months of retention in this setup (and update your privacy "
+                    "policy if it names a period)."
                 )
         except Exception:  # noqa: BLE001 - a hint, not part of the plan
             pass
