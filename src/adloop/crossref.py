@@ -789,3 +789,135 @@ def audit_event_coverage(
         "insights": insights,
         "date_range": {"start": start, "end": end},
     }
+
+
+# ---------------------------------------------------------------------------
+# Tool: check_key_event_imports
+# ---------------------------------------------------------------------------
+
+# Below this many key events from Google Ads traffic, an empty import is
+# plausibly just a quiet period, not a broken one.
+_IMPORT_SILENCE_THRESHOLD = 5
+
+
+def check_key_event_imports(
+    config: AdLoopConfig,
+    *,
+    customer_id: str = "",
+    property_id: str = "",
+    date_range_start: str = "",
+    date_range_end: str = "",
+) -> dict:
+    """GA4 key events against the Google Ads conversion actions that import them.
+
+    Matches by GA4 property and event name (conversion_action.
+    google_analytics_4_settings), and compares GA4's key events from
+    Google Ads traffic (google / cpc) with the conversions Google Ads
+    recorded for each import over the same dates.
+    """
+    from adloop.ads.client import normalize_customer_id
+    from adloop.ads.gaql import execute_query
+    from adloop.ga4.reports import run_ga4_report
+    from adloop.ga4.tracking import list_key_events, normalize_property
+
+    start, end = _default_date_range(date_range_start, date_range_end)
+    prop = normalize_property(property_id)
+    pid = prop.removeprefix("properties/")
+    if not pid.isdigit():
+        return {"error": "property_id is required (a numeric GA4 property ID)"}
+    if not normalize_customer_id(customer_id):
+        return {"error": "customer_id is required (falls back to the configured Google Ads account)"}
+
+    key_events = list_key_events(config, property_id=prop)
+    if "error" in key_events:
+        return key_events
+    names = [k["event_name"] for k in key_events.get("key_events", [])]
+
+    from_ads = {}
+    if names:
+        ga4 = run_ga4_report(
+            config, property_id=prop, dimensions=["eventName"], metrics=[GA4_KEY_EVENTS_METRIC],
+            date_range_start=start, date_range_end=end, limit=len(names),
+            dimension_filter=[
+                {"field": "sessionSourceMedium", "value": "google / cpc"},
+                {"field": "eventName", "op": "IN_LIST", "values": names},
+            ],
+        )
+        if "error" in ga4:
+            return ga4
+        from_ads = {r.get("eventName"): int(float(r.get(GA4_KEY_EVENTS_METRIC) or 0)) for r in ga4.get("rows", [])}
+
+    actions = execute_query(config, customer_id, (
+        "SELECT conversion_action.id, conversion_action.name, conversion_action.status, "
+        "conversion_action.primary_for_goal, "
+        "conversion_action.google_analytics_4_settings.event_name, "
+        "conversion_action.google_analytics_4_settings.property_id "
+        "FROM conversion_action "
+        "WHERE conversion_action.type IN ('GOOGLE_ANALYTICS_4_CUSTOM', 'GOOGLE_ANALYTICS_4_PURCHASE') "
+        "AND conversion_action.status != 'REMOVED'"
+    ))
+    recorded_rows = execute_query(config, customer_id, (
+        "SELECT segments.conversion_action, metrics.all_conversions FROM customer "
+        f"WHERE segments.date BETWEEN '{start}' AND '{end}'"
+    ))
+    recorded: dict[str, float] = {}
+    for row in recorded_rows:
+        action_id = str(row.get("segments.conversion_action") or "").rsplit("/", 1)[-1]
+        recorded[action_id] = recorded.get(action_id, 0) + float(row.get("metrics.all_conversions") or 0)
+
+    imports: dict[str, list[dict]] = {}
+    other_properties, orphans = [], []
+    for action in actions:
+        event = action.get("conversion_action.google_analytics_4_settings.event_name") or ""
+        source = str(action.get("conversion_action.google_analytics_4_settings.property_id") or "")
+        entry = {
+            "conversion_action_id": str(action.get("conversion_action.id")),
+            "name": action.get("conversion_action.name"),
+            "status": str(action.get("conversion_action.status") or ""),
+            "primary_for_goal": bool(action.get("conversion_action.primary_for_goal")),
+            "event_name": event,
+            "ads_conversions": round(recorded.get(str(action.get("conversion_action.id")), 0.0), 2),
+        }
+        if source and source != pid:
+            other_properties.append({**entry, "ga4_property": f"properties/{source}"})
+        elif event in names:
+            imports.setdefault(event, []).append(entry)
+        else:
+            orphans.append(entry)
+
+    rows, insights = [], []
+    for name in names:
+        ga4_count = from_ads.get(name, 0)
+        linked = imports.get(name, [])
+        rows.append({"event_name": name, "ga4_key_events_from_google_ads": ga4_count, "imports": linked})
+        if not linked:
+            insights.append(
+                f"'{name}' is a GA4 key event ({ga4_count} from Google Ads traffic) but no Google Ads "
+                "conversion action imports it, so Google Ads cannot report or bid on it."
+            )
+            continue
+        if not any(i["primary_for_goal"] for i in linked):
+            insights.append(f"'{name}' is imported only as a secondary conversion: reported in Google Ads, not used for bidding.")
+        if ga4_count >= _IMPORT_SILENCE_THRESHOLD and not any(i["ads_conversions"] for i in linked):
+            insights.append(
+                f"GA4 counted {ga4_count} '{name}' key events from Google Ads traffic, but Google Ads recorded "
+                "none for its import: check the link between this GA4 property and the Ads account, and "
+                "auto-tagging."
+            )
+    for entry in orphans:
+        insights.append(
+            f"Google Ads imports '{entry['event_name']}' ({entry['name']}), which is not a key event in "
+            f"{prop}: that import receives no new conversions."
+        )
+
+    result = {
+        "property": prop,
+        "customer_id": normalize_customer_id(customer_id),
+        "date_range": {"start": start, "end": end},
+        "key_events": rows,
+        "imports_without_key_event": orphans,
+        "insights": insights,
+    }
+    if other_properties:
+        result["imports_from_other_properties"] = other_properties
+    return result

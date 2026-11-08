@@ -1263,6 +1263,35 @@ def run_ga4_attribution(
     )
 
 
+@_tool(title="Analytics setup audit", annotations=_READONLY, tags={"ga4"})
+@_safe
+def audit_ga4_property(property_id: str = "") -> dict:
+    """Audit a GA4 property's setup in one call: the settings that quietly cost data or conversions.
+
+    Checks data retention (two months is GA4's default and cuts
+    explorations short), the Google Ads link (and whether the configured
+    Ads account is linked), each data stream's activity in the last 7 days,
+    key events that never fired in 28 days or no key events at all,
+    enhanced measurement per web stream, Google signals (and the
+    thresholding they cause), the custom dimension and metric limits, and a
+    property in the trash. Returns checks with status warn, info or ok
+    (warnings first), a summary count, and the warnings as insights[]; a
+    check the user may not read is listed under unavailable. Reads GA4 only
+    (Admin API, part v1alpha, and two small Data API reports); for whether
+    Google Ads imports the key events, run check_key_event_imports.
+
+    Args:
+        property_id: GA4 property as "properties/123456789" or the bare
+            numeric ID. If empty, uses the default from config.
+    """
+    from adloop.ga4.audit import audit_ga4_property as _impl
+
+    return _impl(
+        current_config(),
+        property_id=property_id or current_config().ga4.property_id,
+    )
+
+
 @_tool(title="List Analytics annotations", annotations=_READONLY, tags={"ga4"})
 @_safe
 def list_ga4_annotations(
@@ -2283,6 +2312,46 @@ def attribution_check(
         date_range_start=date_range_start,
         date_range_end=date_range_end,
         conversion_events=conversion_events,
+    )
+
+
+@_tool(title="Key event import check", annotations=_READONLY, tags={"tracking", "ads:read"})
+@_safe
+def check_key_event_imports(
+    date_range_start: str = "",
+    date_range_end: str = "",
+    customer_id: str = "",
+    property_id: str = "",
+) -> dict:
+    """Check that every GA4 key event reaches Google Ads: imported, used for bidding, and actually receiving conversions.
+
+    Matches the property's key events with the Google Ads conversion actions
+    that import them (by GA4 property and event name), and compares GA4's
+    key events from Google Ads traffic (google / cpc) with the conversions
+    Google Ads recorded for each import. insights[] names key events no
+    conversion action imports, imports that are only secondary (reported,
+    not bid on), imports that stay at zero while GA4 counts Google Ads
+    conversions (a broken link or auto-tagging), and imports of events that
+    are no longer key events. Imports from other GA4 properties are listed
+    separately.
+
+    Args:
+        date_range_start: Start date as "YYYY-MM-DD". Both dates must be set
+            to apply a range; if either is empty, the last 30 days are used.
+        date_range_end: End date as "YYYY-MM-DD" (inclusive).
+        customer_id: Google Ads customer ID, digits with or without dashes.
+            Defaults to the configured ads.customer_id.
+        property_id: GA4 property as "properties/123456789" or the bare
+            numeric ID. If empty, uses the default from config.
+    """
+    from adloop.crossref import check_key_event_imports as _impl
+
+    return _impl(
+        current_config(),
+        customer_id=customer_id or current_config().ads.customer_id,
+        property_id=property_id or current_config().ga4.property_id,
+        date_range_start=date_range_start,
+        date_range_end=date_range_end,
     )
 
 
