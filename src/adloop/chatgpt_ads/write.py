@@ -193,19 +193,33 @@ def _hint_sample(hints: list[str]) -> list[str]:
 
 
 def find_entity(config: AdLoopConfig, account: str, entity_type: str, entity_id: str) -> dict | None:
-    """The entity with its campaign (and ad group), archived ones included.
+    """The entity (read by id) with its campaign (and ad group), archived ones included.
 
-    Ad groups and ads do not carry their parent's id, so this scans the
-    account; drafts use it for the parent names a preview shows. The dry run
-    and the apply read the target by id instead (:func:`_get`).
+    Ad groups and ads do not carry their parent's id, so the parents come
+    from a scan of the account; drafts use it for the names a preview shows.
+    The list endpoints lag a few minutes behind a create (seen live: a new
+    campaign was missing from GET /campaigns right after POST /campaigns), so
+    the entity itself is read by id and a scan that misses it only leaves
+    the parents unknown (``parents_unknown``). The dry run and the apply
+    read by id only (:func:`_get`).
     """
-    entity_id = str(entity_id)
+    entity = _get(config, account, entity_type, entity_id)
+    if entity is None:
+        return None
+    if entity_type == "campaign":
+        return {"entity": entity, "campaign": entity}
+    found = _scan_for(config, account, entity_type, str(entity_id))
+    if found is None:
+        return {"entity": entity, "campaign": {}, "ad_group": entity if entity_type == "ad_group" else {},
+                "parents_unknown": True}
+    found["entity"] = entity
+    return found
+
+
+def _scan_for(config: AdLoopConfig, account: str, entity_type: str, entity_id: str) -> dict | None:
+    """Find an ad group or ad in the account lists, with its parents."""
     campaigns = api_get_all(config, "campaigns", {"include[]": ["serving_issues"]}, ad_account_id=account)
     for campaign in campaigns:
-        if entity_type == "campaign":
-            if str(campaign.get("id")) == entity_id:
-                return {"entity": campaign, "campaign": campaign}
-            continue
         groups = api_get_all(
             config, "ad_groups", {"campaign_id": campaign["id"], "include[]": ["serving_issues"]},
             ad_account_id=account,
@@ -323,9 +337,14 @@ def _draft_status(
     if current == target:
         warnings.append(f"'{entity.get('name')}' is already {target}; applying changes nothing.")
     if target == "active":
+        if found.get("parents_unknown"):
+            warnings.append(
+                "OpenAI's account lists do not show it yet (they lag a few minutes behind a create), so "
+                "the status of its campaign and ad group could not be checked."
+            )
         for level in ("campaign", "ad_group"):
             parent = found.get(level)
-            if parent is not None and parent is not entity and parent.get("status") != "active":
+            if parent and parent is not entity and parent.get("status") != "active":
                 warnings.append(
                     f"Its {level.replace('_', ' ')} '{parent.get('name')}' is {parent.get('status')}, "
                     "so it still will not serve."
@@ -977,6 +996,12 @@ def update_chatgpt_ad_group(
     found = find_entity(config, account, "ad_group", ad_group_id)
     if not found:
         return {"error": f"ChatGPT Ads ad group '{ad_group_id}' was not found in {meta['ad_account_id']}."}
+    if found.get("parents_unknown"):
+        return {"error": (
+            f"Ad group '{ad_group_id}' exists, but OpenAI's account lists do not show it yet (they lag a "
+            "few minutes behind a create), and its campaign's bidding is needed to check the change. "
+            "Try again in a few minutes."
+        )}
     group, campaign = found["entity"], found["campaign"]
     if group.get("status") == "archived":
         return {"error": f"Ad group '{group.get('name')}' is archived and cannot be changed."}

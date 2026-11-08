@@ -38,6 +38,8 @@ class FakeOpenAIAds:
     """In-memory Advertiser API: lists, single-resource updates, status endpoints, creates, uploads."""
 
     def __init__(self):
+        # Ids the list endpoints do not show yet (they lag behind a create).
+        self.unlisted: set[str] = set()
         self.account = {"id": "adacct_1", "name": "Example Plumbing", "timezone": TZ, "currency_code": "USD", "status": "active"}
         self.campaigns = {
             "cmpn_1": {
@@ -134,9 +136,10 @@ class FakeOpenAIAds:
             if path == "ad_account":
                 return dict(self.account)
             if path == "campaigns":
-                return page([self._public(c) for c in self.campaigns.values()])
+                return page([self._public(c) for c in self.campaigns.values() if c["id"] not in self.unlisted])
             if path == "ad_groups":
-                return page([self._public(g) for g in self.ad_groups.values() if g["_campaign"] == params.get("campaign_id")])
+                return page([self._public(g) for g in self.ad_groups.values()
+                             if g["_campaign"] == params.get("campaign_id") and g["id"] not in self.unlisted])
             if path == "ads":
                 return page([self._public(a) for a in self.ads.values() if a["_group"] == params.get("ad_group_id")])
             if path == "conversions/event_settings":
@@ -702,6 +705,34 @@ class TestGateFindings:
         result = ads_write.confirm_and_apply(config, plan_id=preview["plan_id"], dry_run=False)
         assert result["status"] == "BLOCKED" and not api.writes()
         assert ads_write.confirm_and_apply(config, plan_id=preview["plan_id"], dry_run=True)["status"] == "BLOCKED"
+
+
+class TestListsLagBehindCreates:
+    """Seen live: a campaign created a moment ago was missing from GET /campaigns."""
+
+    def test_an_ad_group_can_be_drafted_in_a_campaign_the_list_does_not_show_yet(self, api, config):
+        api.unlisted.add("cmpn_1")
+        preview = write.draft_chatgpt_ad_group(config, campaign_id="cmpn_1", name="Fresh", context_hints=["leaking pipe"],
+                                              strategy="fixed_bid", max_bid=1.0)
+        assert "plan_id" in preview, preview
+
+    def test_a_status_change_names_what_it_could_not_check(self, api, config):
+        api.unlisted.add("adgrp_1")
+        preview = write.pause_chatgpt_entity(config, entity_type="ad_group", entity_id="adgrp_1")
+        assert "plan_id" in preview, preview
+        api.unlisted.add("adgrp_2")
+        enable = write.enable_chatgpt_entity(config, entity_type="ad_group", entity_id="adgrp_2")
+        assert "plan_id" in enable
+        assert any("could not be checked" in w for w in enable["warnings"])
+        assert not any("'None'" in w for w in enable["warnings"])
+
+    def test_an_ad_group_update_waits_until_its_campaign_is_known(self, api, config):
+        api.unlisted.add("adgrp_1")
+        result = write.update_chatgpt_ad_group(config, ad_group_id="adgrp_1", max_bid=1.5)
+        assert "Try again in a few minutes" in result["error"]
+
+    def test_an_entity_that_is_gone_is_still_not_found(self, api, config):
+        assert "was not found" in write.pause_chatgpt_entity(config, entity_type="campaign", entity_id="cmpn_404")["error"]
 
 
 class TestRoundThreeFindings:
