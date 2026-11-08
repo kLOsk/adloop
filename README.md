@@ -272,6 +272,26 @@ The same management rules as Google Ads apply: broad match is refused unless the
 
 > **Setup for Microsoft Advertising tools** — You need a developer token (Microsoft Advertising → **Settings → Developer settings**, or [developers.ads.microsoft.com](https://developers.ads.microsoft.com/Account)) and an app registration in Microsoft Entra ID: allow public client flows, add the delegated `msads.manage` permission of Microsoft Advertising, and add `http://localhost/callback` as a mobile and desktop redirect URI (the sign-in listens on a free port; Entra ignores the port of localhost redirects). Put the token and the app's client id under `microsoft_ads` in `~/.adloop/config.yaml`, then run `adloop microsoft-login` and sign in with the user that has access to the ad accounts. It stores the refresh token at `~/.adloop/microsoft_token.json`. Directories with security defaults block the device-code flow (sign-in error 530035), so `adloop microsoft-login --device-code` is only a fallback. Signing in with a Google identity is not supported yet: if the account's users sign in to Microsoft Advertising with Google, invite a Microsoft account or work (Entra) user to the ad account and sign in as that user. Microsoft has no validate-only mode, so `confirm_and_apply(dry_run=true)` re-reads the target, refuses one that changed since the draft and re-checks the caps; the real apply runs the same checks again first.
 
+### ChatGPT Ads Tools
+
+ChatGPT Ads (OpenAI Ads Manager) through the OpenAI Advertiser API, with the same safety model. The connection is an Advertiser API key: no OAuth, no developer token. Each key belongs to one ad account, so a tool's `ad_account_id` only picks which configured key to use.
+
+| Tool | What It Does |
+|------|-------------|
+| `get_chatgpt_ads_account` | Account name, currency, time zone, brand and integrity reviews, spending limits, and account-level blockers (payment, identity verification) |
+| `get_chatgpt_campaigns` / `get_chatgpt_ad_groups` / `get_chatgpt_ads` | Structure with status and serving state (OpenAI's `serving_issues`), budgets, bids and what they mean per bidding type, context hints, targeting, ad copy, review status, and the UTM parameters a click carries |
+| `get_chatgpt_performance` | Spend, impressions, clicks, CTR, CPC, CPM, conversions, CPA, ROAS per account/campaign/ad group/ad, optional breakdown (date, country, device, platform), compact mode with insights |
+| `get_chatgpt_conversions` | Goal conversions split into click-through and view-through, plus every attributed event, including events that are not a campaign goal |
+| `get_chatgpt_conversion_setup` | Audit of the conversion chain (pixel, events, attached goals, recent fires) with a verdict and pass/warn/fail checks |
+| `get_chatgpt_change_history` | Who changed what and when, with before/after values |
+| `chatgpt_attribution_check` | ChatGPT Ads clicks and conversions against GA4 sessions and key events, separating paid clicks from unpaid ChatGPT referrals |
+| `search_chatgpt_locations` | Location ids by name for targeting |
+| `pause_chatgpt_entity` / `enable_chatgpt_entity` / `archive_chatgpt_entity` | Status changes through the preview gate (archive is permanent and double-confirmed; OpenAI has no delete) |
+| `update_chatgpt_campaign` / `update_chatgpt_ad_group` / `update_chatgpt_ad` | Budget (daily or lifetime), dates, locations, platforms, tracking, conversion events, bid strategy and max bid, context hints, ad copy, landing page and image, with old → new previews, the budget cap and the bid-increase cap |
+| `draft_chatgpt_campaign` / `draft_chatgpt_ad_group` / `draft_chatgpt_ad` | Create campaign → ad group → chat-card ad. Everything is created **paused**, each with an idempotency key, so a retried apply cannot create a duplicate. |
+
+> **Setup for ChatGPT Ads tools** — In OpenAI Ads Manager open **Settings → API keys** ([ads.openai.com/settings](https://ads.openai.com/settings)) and create an Advertiser API key (a platform.openai.com key does not work). Put it in `chatgpt_ads.api_key` in `~/.adloop/config.yaml`, or set `OPENAI_ADS_API_KEY`; agencies add further accounts under `chatgpt_ads.accounts`. OpenAI has no validate-only mode for single resources, so `confirm_and_apply(dry_run=true)` re-reads the target, refuses when a field the plan changes was edited since the preview, and re-checks the budget cap, the bid-increase cap, the landing page and that the key still belongs to the previewed account.
+
 ### Image Uploads
 
 An image on your computer, or one you attached in the chat, has no public URL, and an AI app cannot hand the file to a tool. `upload_images` gives it a way in.
@@ -575,6 +595,9 @@ All configuration lives in `~/.adloop/config.yaml`. See [`config.yaml.example`](
 | `microsoft_ads` | `customer_id` | *(empty)* | Manager account id (the CustomerId header) |
 | `microsoft_ads` | `ad_account_id` | *(empty)* | Default ad account for every Microsoft tool |
 | `microsoft_ads` | `token_path` | `~/.adloop/microsoft_token.json` | Where `adloop microsoft-login` stores the refresh token |
+| `chatgpt_ads` | `api_key` | *(empty)* | Advertiser API key from OpenAI Ads Manager → Settings → API keys; empty reads `OPENAI_ADS_API_KEY` |
+| `chatgpt_ads` | `ad_account_id` | *(empty)* | Optional: the default key's ad account id; a call for another account id is then refused instead of reading this one |
+| `chatgpt_ads` | `accounts` | `{}` | Further ad accounts, one key per `adacct_...` id; a tool's `ad_account_id` picks the key |
 | `safety` | `max_daily_budget` | `50.00` | Maximum allowed daily budget per campaign |
 | `safety` | `require_dry_run` | `true` | Force all writes to dry-run mode |
 | `safety` | `two_phase_apply` | `false` | Refuse real applies until the plan had a dry-run pass |
@@ -599,6 +622,7 @@ Most MCP clients (claude.ai, ChatGPT, Cursor, …) load **every tool schema into
 | `merchant` | Merchant Center feed health |
 | `reddit` | Reddit Ads reads, writes, and planning |
 | `microsoft_ads` | Microsoft Advertising reads and campaign management |
+| `chatgpt_ads` | ChatGPT Ads reads, campaign management and conversion diagnostics |
 
 Google Ads can be narrowed further. Use one of these instead of `ads`:
 
@@ -652,6 +676,10 @@ src/adloop/
 │   │                  #   ads, extensions, removal), one operation → handler table
 │   └── write.py       # Budget and status drafts; routes every microsoft_ plan to its preflight and apply
 ├── oauth_redirect.py  # Localhost listener for sign-in redirects (free port, waits for its state)
+├── chatgpt_ads/
+│   ├── client.py      # OpenAI Advertiser API REST client — per-account keys, pagination, rate limits
+│   ├── read.py        # Account, campaigns, ad groups, ads, performance, conversions, setup audit, GA4 cross-check
+│   └── write.py       # Draft/preflight/apply for status, campaign, ad group and ad changes, paused creation
 └── safety/
     ├── guards.py      # Budget caps, bid limits, blocked operations, Broad Match safety
     ├── preview.py     # Change plans and previews

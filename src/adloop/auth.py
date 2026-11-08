@@ -93,6 +93,8 @@ class CredentialsProvider(Protocol):
 
     def microsoft_ads_credentials(self, config: AdLoopConfig) -> MicrosoftCredentials: ...
 
+    def chatgpt_ads_api_key(self, config: AdLoopConfig, ad_account_id: str) -> str: ...
+
 
 class LocalFileCredentialsProvider:
     """OSS default: local credential files + interactive OAuth.
@@ -151,6 +153,15 @@ class LocalFileCredentialsProvider:
         from adloop.microsoft_ads.auth import local_credentials
 
         return local_credentials(config)
+
+    def chatgpt_ads_api_key(self, config: AdLoopConfig, ad_account_id: str) -> str:
+        # Advertiser API keys are static bearer keys, one per ad account:
+        # chatgpt_ads.accounts[<id>] for a named account, else the default
+        # chatgpt_ads.api_key, else OPENAI_ADS_API_KEY from the environment.
+        self._guard_local_only()
+        from adloop.chatgpt_ads.client import local_api_key
+
+        return local_api_key(config, ad_account_id)
 
 
 _active_provider: CredentialsProvider = LocalFileCredentialsProvider()
@@ -310,6 +321,18 @@ def get_microsoft_ads_credentials(config: AdLoopConfig) -> MicrosoftCredentials:
             "the provider implements microsoft_ads_credentials()."
         )
     return provider.microsoft_ads_credentials(config)
+
+
+def get_chatgpt_ads_api_key(config: AdLoopConfig, ad_account_id: str = "") -> str:
+    """Return the Advertiser API key for a ChatGPT Ads account."""
+    provider = _active_provider
+    if not hasattr(provider, "chatgpt_ads_api_key"):
+        raise RuntimeError(
+            "This deployment's credentials provider does not support "
+            "ChatGPT Ads. ChatGPT Ads tools are only available where the "
+            "provider implements chatgpt_ads_api_key()."
+        )
+    return provider.chatgpt_ads_api_key(config, ad_account_id)
 
 
 def _requested_scopes(config: AdLoopConfig) -> list[str]:
