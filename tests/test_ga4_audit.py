@@ -210,5 +210,5 @@ def test_hidden_imports_from_linking_are_not_imported_yet():
     assert result["insights"] == [
         "'sign_up' is not imported yet: Google Ads created 'getadloop.com (web) sign_up' when the property "
         "was linked, but it stays hidden and records no conversions until it is imported "
-        "(Google Ads → Goals → Conversions → New conversion action → Import → Google Analytics 4)."
+        "(Google Ads → Goals → Summary → Create conversion action → Conversions on a website, with the GA4 property as data source → tick the event)."
     ]
