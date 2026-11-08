@@ -17,7 +17,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any
 
 from adloop.ads.currency import get_currency_code
-from adloop.ads.read import _date_clause, _enrich_cost_fields
+from adloop.ads.read import _date_clause, _drop_idle_removed, _enrich_cost_fields
 
 if TYPE_CHECKING:
     from adloop.config import AdLoopConfig
@@ -750,12 +750,13 @@ def get_pmax_performance(
                segments.ad_network_type
         FROM campaign
         WHERE campaign.advertising_channel_type = 'PERFORMANCE_MAX'
-          AND campaign.status != 'REMOVED'
           {date_clause}
         ORDER BY metrics.cost_micros DESC
     """
 
-    campaigns = execute_query(config, customer_id, campaign_query)
+    campaigns = _drop_idle_removed(
+        execute_query(config, customer_id, campaign_query), "campaign.status"
+    )
     currency_code = get_currency_code(config, customer_id)
     _enrich_cost_fields(campaigns, currency_code)
 
