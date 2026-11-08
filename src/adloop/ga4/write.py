@@ -315,8 +315,10 @@ def preflight(config: AdLoopConfig, plan) -> dict | None:
     fail, or would act on something that changed since the preview. Nothing
     is changed.
     """
-    from adloop.ga4 import annotations, definitions
+    from adloop.ga4 import annotations, definitions, retention
 
+    if plan.operation in retention.APPLIERS:
+        return retention.preflight(config, plan)
     if plan.operation in annotations.APPLIERS:
         return annotations.preflight(config, plan)
     if plan.operation in definitions.APPLIERS:
@@ -371,7 +373,7 @@ def _apply_delete_key_event(config: AdLoopConfig, changes: dict) -> dict:
 
 
 def _all_appliers() -> dict:
-    from adloop.ga4 import annotations, definitions
+    from adloop.ga4 import annotations, definitions, retention
 
     return {
         "create_key_event": _apply_create_key_event,
@@ -379,6 +381,7 @@ def _all_appliers() -> dict:
         "delete_key_event": _apply_delete_key_event,
         **annotations.APPLIERS,
         **definitions.APPLIERS,
+        **retention.APPLIERS,
     }
 
 

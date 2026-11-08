@@ -2315,6 +2315,68 @@ def attribution_check(
     )
 
 
+@_tool(title="Set up conversion tracking", annotations=_WRITE, tags={"tracking", "ads:write"})
+@_safe
+def draft_conversion_tracking_setup(
+    events: _StrOrDictListOpt = None,
+    primary: bool = True,
+    data_retention: str = "",
+    ads_personalization: bool = False,
+    customer_id: str = "",
+    property_id: str = "",
+) -> dict:
+    """Set up conversion tracking from GA4 into Google Ads in one approved plan, returning a PREVIEW of only the missing steps.
+
+    Use it when the user wants their conversions (sign-ups, purchases,
+    leads) tracked and used for bidding, or after audit_ga4_property or
+    check_key_event_imports found a gap. It reads both products and plans
+    what is missing, in order: link the GA4 property to the Google Ads
+    account, mark the events as GA4 key events, turn on auto-tagging, import
+    the conversion actions Google Ads created for the key events (they start
+    hidden and record nothing), make them primary, and use their goal for
+    bidding. Steps already in place are listed under already_done. Google
+    Ads creates the conversion action for a newly linked property or new key
+    event by itself, not instantly: such events come back as "After this"
+    warnings, and running the tool again later imports them. NO_CHANGE when
+    everything is set up. The website must send the events; this tool
+    cannot add tracking code (see generate_tracking_code). Nothing changes
+    until confirm_and_apply applies it: the dry run validates the Google Ads
+    steps with validate_only and re-reads the GA4 ones, and every step skips
+    itself if already done, so confirming again after a failed step
+    continues where it stopped.
+
+    Args:
+        events: GA4 event names to track as conversions, e.g. ["sign_up"],
+            or objects {"event": "generate_lead", "counting_method":
+            "ONCE_PER_SESSION"} (counting applies when the event is not a
+            key event yet; default ONCE_PER_EVENT). Empty uses the
+            property's key events that fired in the last 28 days.
+        primary: True (default) makes the imports primary conversions that
+            Smart Bidding optimizes toward; False imports them as secondary
+            (reported only).
+        data_retention: Optional, e.g. 14: also lengthen GA4 event data
+            retention (months). Only lengthens; empty leaves it.
+        ads_personalization: Only for a new link. False (default) keeps
+            personalized advertising off, so GA4 shares no audiences or
+            remarketing data with Google Ads.
+        customer_id: Google Ads customer ID, digits with or without dashes.
+            Defaults to the configured ads.customer_id.
+        property_id: GA4 property as "properties/123456789" or the bare
+            numeric ID. If empty, uses the default from config.
+    """
+    from adloop.conversion_setup import draft_conversion_tracking_setup as _impl
+
+    return _impl(
+        current_config(),
+        customer_id=customer_id or current_config().ads.customer_id,
+        property_id=property_id or current_config().ga4.property_id,
+        events=events,
+        primary=primary,
+        data_retention=data_retention,
+        ads_personalization=ads_personalization,
+    )
+
+
 @_tool(title="Key event import check", annotations=_READONLY, tags={"tracking", "ads:read"})
 @_safe
 def check_key_event_imports(
@@ -7303,6 +7365,48 @@ def draft_ga4_custom_metric(
         measurement_unit=measurement_unit,
         restricted_metric_type=restricted_metric_type,
         custom_metric=custom_metric,
+    )
+
+
+@_tool(title="Draft an Analytics data retention change", annotations=_DESTRUCTIVE, tags={"ga4"})
+@_safe
+def draft_ga4_data_retention(
+    event_data_retention: str = "",
+    user_data_retention: str = "",
+    reset_user_data_on_new_activity: bool | None = None,
+    property_id: str = "",
+) -> dict:
+    """Draft a change to how long GA4 keeps event- and user-level data, returning a PREVIEW.
+
+    GA4 defaults to 2 months, which cuts explorations, funnels and other
+    user-level reports short; standard properties allow 14 months, GA4 360
+    up to 50. Standard reports are aggregated and not affected. Lengthening
+    applies from now on (data already deleted does not come back);
+    shortening deletes older data for good and needs a double confirmation.
+    The preview shows before and after and reminds the user that a privacy
+    policy naming a retention period must match. NO_CHANGE when the settings
+    already match. Nothing changes until confirm_and_apply applies it; the
+    dry run re-reads the settings and refuses if they changed in GA4 after
+    the preview.
+
+    Args:
+        event_data_retention: Months to keep event-level data: 2, 14, 26, 38
+            or 50 (or TWO_MONTHS, FOURTEEN_MONTHS, ...). Empty leaves it.
+        user_data_retention: Months to keep user-level data, same values.
+            Empty leaves it.
+        reset_user_data_on_new_activity: True restarts a user's retention
+            period with each new event from that user. Empty leaves it.
+        property_id: Numeric GA4 property ID, with or without the
+            "properties/" prefix. If empty, uses the default from config.
+    """
+    from adloop.ga4.retention import draft_ga4_data_retention as _impl
+
+    return _impl(
+        current_config(),
+        property_id=property_id or current_config().ga4.property_id,
+        event_data_retention=event_data_retention,
+        user_data_retention=user_data_retention,
+        reset_user_data_on_new_activity=reset_user_data_on_new_activity,
     )
 
 

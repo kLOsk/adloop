@@ -2898,8 +2898,12 @@ def confirm_and_apply(
     # Google Ads calls without a validate_only field: the dry run re-reads the
     # target instead, like the platforms above.
     is_ads_reread = plan.operation == "dismiss_recommendations"
+    # Conversion tracking setup spans GA4 and Google Ads: its dry run sends
+    # the Ads steps with validate_only and re-reads the GA4 ones.
+    is_setup = plan.operation == "conversion_tracking_setup"
     platform_label = (
-        "Reddit Ads" if is_reddit
+        "Google Ads and Google Analytics" if is_setup
+        else "Reddit Ads" if is_reddit
         else "Google Tag Manager" if is_gtm
         else "Google Analytics" if is_ga4
         else "Google Ads"
@@ -2936,6 +2940,10 @@ def confirm_and_apply(
                 from adloop.ads.recommendations import preflight as rec_preflight
 
                 preflight_checks = rec_preflight(config, plan)
+            elif is_setup:
+                from adloop.conversion_setup import preflight as setup_preflight
+
+                preflight_checks = setup_preflight(config, plan)
             else:
                 # Google Ads checks the exact mutates with validate_only=True
                 # and executes nothing.
@@ -2970,7 +2978,10 @@ def confirm_and_apply(
                 error=error_message,
             )
             checked_against = (
-                f"re-checked the target against {platform_label}"
+                "checked each step (Google Ads in validate-only mode, Google "
+                "Analytics by re-reading the property)"
+                if is_setup
+                else f"re-checked the target against {platform_label}"
                 if is_reddit or is_gtm or is_ga4 or is_ads_reread
                 else "sent the change to Google Ads in validate-only mode"
             )
@@ -3019,7 +3030,14 @@ def confirm_and_apply(
             "operation": plan.operation,
             "changes": plan.changes,
         }
-        if preflight_checks is not None:
+        if preflight_checks is not None and is_setup:
+            response["checks"] = preflight_checks
+            response["note"] = (
+                "Google Ads validated its steps (validate_only) and the Google "
+                "Analytics steps were re-read, because the GA4 Admin API has no "
+                "validate-only mode. Nothing was changed."
+            )
+        elif preflight_checks is not None:
             response["checks"] = preflight_checks
             response["note"] = (
                 f"{platform_label} has no validate-only mode"
@@ -4511,6 +4529,13 @@ def _execute_plan(
         from adloop.gtm.write import apply_plan as apply_gtm_plan
 
         return apply_gtm_plan(config, plan)
+
+    # Conversion tracking setup runs its own GA4 and Ads steps in order.
+    if plan.operation == "conversion_tracking_setup":
+        from adloop.conversion_setup import apply_plan as apply_setup
+        from adloop.conversion_setup import preflight as setup_preflight
+
+        return setup_preflight(config, plan) if validate_only else apply_setup(config, plan)
 
     # GA4 plans dispatch before Ads client construction so they work for
     # GA4-only setups (no Ads credentials/developer token required).

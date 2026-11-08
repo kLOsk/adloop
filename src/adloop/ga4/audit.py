@@ -61,7 +61,8 @@ def audit_ga4_property(config: AdLoopConfig, *, property_id: str = "") -> dict:
         if months == 2:
             _check(checks, "data_retention", "warn",
                    "Event data is kept 2 months (GA4's default): explorations and funnels cannot look further "
-                   "back. Standard properties allow 14 months; the change only helps from now on.")
+                   "back. Standard properties allow 14 months (draft_ga4_data_retention); the change only helps from "
+                   "now on.")
         else:
             _check(checks, "data_retention", "ok", f"Event data is kept {months} months.")
 
@@ -72,7 +73,8 @@ def audit_ga4_property(config: AdLoopConfig, *, property_id: str = "") -> dict:
             _check(checks, "google_ads_link", "ok", f"Linked to Google Ads {ids}.")
         else:
             _check(checks, "google_ads_link", "warn" if overview.get("key_event_count") else "info",
-                   "No Google Ads account is linked: Google Ads cannot import key events or audiences from it.")
+                   "No Google Ads account is linked: Google Ads cannot import key events or audiences from it "
+                   "(draft_conversion_tracking_setup links it).")
     for insight in overview.get("insights", []):
         if "is not linked to this" in insight:
             _check(checks, "configured_ads_account", "warn", insight)

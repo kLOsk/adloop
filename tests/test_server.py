@@ -416,10 +416,14 @@ class TestToolsets:
                 writes = not (tool.annotations and tool.annotations.readOnlyHint)
                 assert ("ads:write" in subsets) == writes, f"{tool.name}: {subsets} vs readOnly"
             else:
-                # Only the Ads/Analytics cross-checks borrow ads:read.
-                assert subsets <= {"ads:read"}, f"{tool.name}: {subsets}"
+                # Only tracking tools borrow an Ads subset: the Ads/Analytics
+                # cross-checks ads:read, the conversion setup (which changes
+                # Google Ads) ads:write.
+                assert len(subsets) <= 1, f"{tool.name}: {subsets}"
                 if subsets:
                     assert "tracking" in tags, tool.name
+                    writes = not (tool.annotations and tool.annotations.readOnlyHint)
+                    assert subsets == ({"ads:write"} if writes else {"ads:read"}), f"{tool.name}: {subsets}"
 
     @pytest.mark.asyncio
     async def test_ads_read_selection_has_reports_and_cross_checks_but_no_writes(self, monkeypatch):

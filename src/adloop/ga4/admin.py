@@ -166,8 +166,9 @@ def _property_insights(config: AdLoopConfig, result: dict) -> list[str]:
     if retention.get("event_data_months") == 2:
         insights.append(
             "Event data is kept for 2 months, GA4's default. Explorations and funnel reports cannot look "
-            "further back than that; standard properties allow 14 months (Admin → Data collection and "
-            "modification → Data retention). The change applies from now on, lost months stay lost."
+            "further back than that; standard properties allow 14 months (draft_ga4_data_retention, or Admin → "
+            "Data collection and modification → Data retention). The change applies from now on, lost months "
+            "stay lost."
         )
 
     links = result.get("google_ads_links")

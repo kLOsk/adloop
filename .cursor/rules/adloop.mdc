@@ -116,10 +116,12 @@ Same draft → preview → `confirm_and_apply` gate as Google Ads. The GA4 Admin
 | `draft_ga4_annotation` | Create, change or delete an annotation (a note on a date or range in GA4's charts). Google's own annotations cannot be changed | `action` (create/update/delete), `title` (≤60), `date` (+ `end_date` for a range), `description` (≤150), `color`, `annotation` (ID for update/delete) |
 | `draft_ga4_custom_dimension` | Register an event parameter, user property or item parameter as a dimension; rename or archive one (archive cannot be undone) | `action` (create/update/archive), `parameter_name`, `scope` (EVENT/USER/ITEM), `display_name`, `description` |
 | `draft_ga4_custom_metric` | Register a numeric event parameter as a metric; change or archive one | `action`, `parameter_name`, `display_name`, `measurement_unit` (STANDARD, CURRENCY, ...), `restricted_metric_type` (required for CURRENCY) |
+| `draft_ga4_data_retention` | Change how long GA4 keeps event- and user-level data (default 2 months; standard properties allow 14, GA4 360 up to 50). Shortening deletes older data and needs a double confirmation | `event_data_retention` / `user_data_retention` (months: 2, 14, 26, 38, 50), `reset_user_data_on_new_activity` |
 
 - A new custom dimension or metric is filled only from now on: events sent before stay without it, and data can take a day or two to show. Say so before the user approves. `parameter_name` and scope cannot change later, so check the spelling against the code that sends the parameter.
 - Check `list_ga4_custom_definitions` before creating: the draft refuses a full property, a duplicate parameter and a taken display name, but the user should hear about the limit before asking.
 - Key events feed Google Ads. Before removing one, or changing how it counts, check with `check_key_event_imports` whether Google Ads imports it: that conversion action changes with it.
+- Data retention only limits explorations, funnels and other user-level reports; standard reports are not affected. Longer retention helps from now on only. Before the user approves, remind them that a privacy policy naming a retention period must match the new one.
 
 ### Cross-Reference Tools (GA4 + Ads combined)
 
@@ -128,9 +130,21 @@ Same draft → preview → `confirm_and_apply` gate as Google Ads. The GA4 Admin
 | `analyze_campaign_conversions` | "What's my real CPA?", paid vs organic comparison, GDPR gap analysis | `date_range_start`, `date_range_end`, `campaign_name` (optional filter) |
 | `landing_page_analysis` | "Which landing pages convert?", identify pages with traffic but no conversions | `date_range_start`, `date_range_end` |
 | `attribution_check` | "Are my conversions tracked correctly?", Ads vs GA4 conversion discrepancies | `date_range_start`, `date_range_end`, `conversion_events` (optional GA4 event names) |
-| `check_key_event_imports` | "Does Google Ads get my GA4 conversions?": every GA4 key event against the Ads conversion actions importing it — not imported, only secondary (not bid on), imported but receiving nothing while GA4 counts google / cpc key events, imports of events that are no longer key events | `date_range_start`, `date_range_end` |
+| `check_key_event_imports` | "Does Google Ads get my GA4 conversions?": every GA4 key event against the Ads conversion actions importing it — not imported (also hidden actions Google created when linking), only secondary (not bid on), imported but receiving nothing while GA4 counts google / cpc key events, imports of events that are no longer key events. Fix gaps with `draft_conversion_tracking_setup` | `date_range_start`, `date_range_end` |
 
 These tools call both APIs internally and return unified results with computed `insights[]`. They are read-only — no mutations. Each returns a `date_range` and auto-generates conditional warnings (GDPR gaps, zero conversions, attribution mismatches, orphaned URLs).
+
+### Conversion Tracking Setup (GA4 → Google Ads, requires safety confirmation)
+
+| Tool | What It Does | Key Parameters |
+|------|-------------|----------------|
+| `draft_conversion_tracking_setup` | Reads GA4 and Google Ads and plans only the missing steps between a GA4 event and Google Ads bidding, on one approval: link the property to the Ads account, mark key events, turn on auto-tagging, import the conversion actions Google Ads created for the key events (they start hidden and record nothing), make them primary, use their goal for bidding, optionally lengthen data retention. `NO_CHANGE` when all is in place | `events` (names, or `{"event", "counting_method"}`; empty = key events that fired in 28 days), `primary` (default true), `data_retention` (e.g. 14, only lengthens), `ads_personalization` (new link only, default false) |
+
+- Prefer it over walking the user through Google Ads and GA4 screens: "set up conversion tracking", "track sign-ups in Google Ads", or a gap found by `audit_ga4_property` / `check_key_event_imports`.
+- Google Ads creates the conversion action for a newly linked property or a new key event by itself, not instantly. Those events come back as warnings starting "After this:": tell the user to run the setup again later (a day is safe) to import them.
+- Present `steps` and `already_done` in full. Linking needs Editor on the property and admin access to the Ads account; personalized advertising stays off unless the user asks for it.
+- The dry run validates the Google Ads steps with validate_only and re-reads the GA4 ones. Each step skips itself when already done, so after a failed step (the error names it and what finished before it) confirming the same plan again continues.
+- It cannot make the website send events: if an event never fired, fix the tracking code first (`generate_tracking_code`, `validate_tracking`).
 
 ### Tracking Tools
 
@@ -588,7 +602,7 @@ Most websites (especially in the EU) use a GDPR cookie consent banner. This has 
 3. Call `validate_tracking` with the extracted event names — it compares codebase events against actual GA4 data and returns matched, missing, and unexpected events
 4. Review the `insights[]` from `validate_tracking` — missing events indicate code not deployed or behind untriggered conditions; unexpected events may come from tag managers
 5. If the user needs to add new tracking, use `generate_tracking_code` to produce the gtag snippet with recommended parameters
-6. For a full check of the GA4 setup (retention, Ads link, dead streams, silent key events), call `audit_ga4_property`; for whether Google Ads receives the key events, `check_key_event_imports`.
+6. For a full check of the GA4 setup (retention, Ads link, dead streams, silent key events), call `audit_ga4_property`; for whether Google Ads receives the key events, `check_key_event_imports`. Gaps in the link, key events, imports or auto-tagging are fixed in one approval with `draft_conversion_tracking_setup`; two-month retention with `draft_ga4_data_retention`.
 7. If an event FIRES in GA4 but is not marked as a key event (conversion), call `list_key_events` first to see what is already a key event, then propose `draft_key_event`. It goes through preview → confirm like every write. Remind the user it applies to future data only and Ads needs the GA4 link + conversion import to optimize on it
 8. To retire a key event (a duplicate, or one that no longer means a conversion), propose `draft_delete_key_event`. Before applying, check whether Google Ads imports it as a conversion action: removing it starves that conversion action and Smart Bidding of new conversions
 
