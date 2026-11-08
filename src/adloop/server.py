@@ -5656,16 +5656,21 @@ def confirm_and_apply(
     request: then it carries out the rest and reports those operations again.
 
     Returns a status with the plan_id and operation: DRY_RUN_SUCCESS,
-    DRY_RUN_FAILED, DRY_RUN_REQUIRED, APPLIED, PARTIAL_UPLOAD or
-    APPLY_IN_PROGRESS. APPLIED results carry the created or changed resource
+    DRY_RUN_FAILED, DRY_RUN_REQUIRED, BLOCKED, APPLIED, PARTIAL_UPLOAD,
+    PARTIAL_APPLY, UNKNOWN_OUTCOME or APPLY_IN_PROGRESS. BLOCKED means the
+    operation was added to safety.blocked_operations after the draft: nothing
+    ran and the plan stays pending. APPLIED results carry the created or changed resource
     names under 'result'. PARTIAL_UPLOAD belongs to the upload tools: the
     batches it lists are already in the account, so the plan is retired.
     'sent_total', 'accepted_total', 'rejected_total' and 'resume_from_line'
     say how far the upload got and at which CSV line a new draft continues;
     when a batch's fate is unknown, 'unknown_status', 'uncertain_lines' and
     'row_errors' name the rows whose outcome has to be checked first.
-    APPLY_IN_PROGRESS means an earlier call claimed this plan first, so this
-    call executed nothing.
+    PARTIAL_APPLY and UNKNOWN_OUTCOME come from platforms without
+    transactional writes: part of the change is in the account ('created'
+    names it), or a create was never answered. The plan is retired; read the
+    account back and draft only what is missing. APPLY_IN_PROGRESS means an
+    earlier call claimed this plan first, so this call executed nothing.
 
     Approval cards: in AI apps that show AdLoop's approval card with the
     preview, dry_run=false is REFUSED with status APPROVE_ON_CARD, because
