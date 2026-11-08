@@ -153,10 +153,10 @@ def _imports(actions, recorded, ga4_rows, key_events=("purchase", "sign_up", "ge
     return result, report
 
 
-def _action(action_id, event, primary=True, property_id="123456", name=None):
+def _action(action_id, event, primary=True, property_id="123456", name=None, status="ENABLED"):
     return {
         "conversion_action.id": action_id, "conversion_action.name": name or f"GA4 {event}",
-        "conversion_action.status": "ENABLED", "conversion_action.primary_for_goal": primary,
+        "conversion_action.status": status, "conversion_action.primary_for_goal": primary,
         "conversion_action.google_analytics_4_settings.event_name": event,
         "conversion_action.google_analytics_4_settings.property_id": property_id,
     }
@@ -201,3 +201,14 @@ def test_import_check_needs_both_accounts(kwargs, message):
 
     result = crossref.check_key_event_imports(AdLoopConfig(), **kwargs)
     assert message in result["error"]
+
+
+def test_hidden_imports_from_linking_are_not_imported_yet():
+    # Seen live: linking GA4 created both actions as HIDDEN and not primary.
+    actions = [_action(1, "sign_up", primary=False, status="HIDDEN", name="getadloop.com (web) sign_up")]
+    result, _ = _imports(actions, [], [{"eventName": "sign_up", "keyEvents": "0"}], key_events=("sign_up",))
+    assert result["insights"] == [
+        "'sign_up' is not imported yet: Google Ads created 'getadloop.com (web) sign_up' when the property "
+        "was linked, but it stays hidden and records no conversions until it is imported "
+        "(Google Ads → Goals → Conversions → New conversion action → Import → Google Analytics 4)."
+    ]

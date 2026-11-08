@@ -896,9 +896,19 @@ def check_key_event_imports(
                 "conversion action imports it, so Google Ads cannot report or bid on it."
             )
             continue
-        if not any(i["primary_for_goal"] for i in linked):
+        # Linking GA4 makes Google Ads create a HIDDEN conversion action per
+        # key event; it records nothing until someone imports it.
+        active = [i for i in linked if i["status"] == "ENABLED"]
+        if not active:
+            insights.append(
+                f"'{name}' is not imported yet: Google Ads created '{linked[0]['name']}' when the property "
+                "was linked, but it stays hidden and records no conversions until it is imported "
+                "(Google Ads → Goals → Conversions → New conversion action → Import → Google Analytics 4)."
+            )
+            continue
+        if not any(i["primary_for_goal"] for i in active):
             insights.append(f"'{name}' is imported only as a secondary conversion: reported in Google Ads, not used for bidding.")
-        if ga4_count >= _IMPORT_SILENCE_THRESHOLD and not any(i["ads_conversions"] for i in linked):
+        if ga4_count >= _IMPORT_SILENCE_THRESHOLD and not any(i["ads_conversions"] for i in active):
             insights.append(
                 f"GA4 counted {ga4_count} '{name}' key events from Google Ads traffic, but Google Ads recorded "
                 "none for its import: check the link between this GA4 property and the Ads account, and "
