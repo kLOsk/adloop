@@ -564,3 +564,18 @@ class TestRealtime:
         result, request = _run_realtime(config, minute_ranges=ranges)
         assert message in " ".join(result["details"])
         assert request is None
+
+
+def test_paging_with_several_ranges_counts_dimension_combinations(config):
+    # GA4: limit 2 returns 2 channels x 2 ranges = 4 rows; row_count counts the 5 channels.
+    response = _response(
+        ["sessionDefaultChannelGroup", "dateRange"], ["sessions"],
+        [["Direct", "recent", "9"], ["Direct", "before", "5"], ["Organic", "recent", "4"], ["Organic", "before", "3"]],
+        row_count=5,
+    )
+    result, _ = _run(
+        config, response, dimensions=["sessionDefaultChannelGroup"], metrics=["sessions"], limit=2,
+        date_ranges=[{"start": "28daysAgo", "end": "today", "name": "recent"},
+                     {"start": "56daysAgo", "end": "29daysAgo", "name": "before"}],
+    )
+    assert result["next_offset"] == 2

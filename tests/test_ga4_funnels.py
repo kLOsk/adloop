@@ -107,8 +107,9 @@ class TestFunnel:
         assert request.funnel_breakdown.breakdown_dimension.name == "deviceCategory"
 
     def test_next_actions_come_from_the_visualization(self, config):
+        # GA4 names the column funnelStepNextAction, not after the dimension asked for.
         visualization = _sub(
-            ["funnelStepName", "eventName"], ["activeUsers"],
+            ["funnelStepName", "funnelStepNextAction"], ["activeUsers"],
             [["1. view_item", "scroll", 300], ["1. view_item", "view_item_list", 120], ["1. view_item", "RESERVED_TOTAL", 600]],
         )
         result, request = _run_funnel(
@@ -229,3 +230,10 @@ class TestAttribution:
             result = attribution.run_ga4_attribution(config, property_id="123456")
         assert result["error"].endswith("403 This property is not eligible")
         assert "run_ga4_report with keyEvents" in result["hint"]
+
+
+def test_attribution_without_rows_says_so(config):
+    client = _alpha(_report(["defaultChannelGroup"], ["allConversionsByConversionDate"], []))
+    with patch("adloop.ga4.client.get_data_alpha_client", return_value=client):
+        result = attribution.run_ga4_attribution(config, property_id="123456", metrics=["allConversionsByConversionDate"])
+    assert "attributed no conversions" in result["insights"][0]

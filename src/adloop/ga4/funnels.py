@@ -226,7 +226,9 @@ def run_ga4_funnel(
     if next_action:
         actions: dict[str, list[dict]] = {}
         for row in _sub_report_rows(response.funnel_visualization):
-            value = row.get(next_action)
+            # GA4 names the column funnelStepNextAction, whatever dimension
+            # was asked for.
+            value = row.get("funnelStepNextAction", row.get(next_action))
             if value in (None, "", _TOTAL):
                 continue
             actions.setdefault(row.get("funnelStepName", ""), []).append(

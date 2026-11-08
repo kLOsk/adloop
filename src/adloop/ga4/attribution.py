@@ -160,6 +160,11 @@ def run_ga4_attribution(
     except Exception as e:  # noqa: BLE001 - v1alpha and a gradual rollout: explain instead of raising
         return _api_error(e)
 
+    if not result.get("rows"):
+        insights.append(
+            "GA4 attributed no conversions to these dimensions in this period. Check that key events "
+            "fired (get_tracking_events) and widen the dates; attribution can lag a day or two."
+        )
     if insights:
         result["insights"] = insights
     return result

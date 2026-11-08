@@ -569,8 +569,15 @@ def run_ga4_report(
         result["currency_code"] = currency_code
     if offset:
         result["offset"] = offset
-    if response.row_count and offset + len(rows) < response.row_count:
-        result["next_offset"] = offset + len(rows)
+    # With several date ranges GA4 pages and counts dimension combinations,
+    # and returns one row per combination and range.
+    combos = (
+        len({tuple(v for k, v in r.items() if k in dim_headers and k != "dateRange") for r in rows})
+        if "dateRange" in dim_headers
+        else len(rows)
+    )
+    if response.row_count and offset + combos < response.row_count:
+        result["next_offset"] = offset + combos
     insights = response_insights(response)
     if insights:
         result["insights"] = insights
