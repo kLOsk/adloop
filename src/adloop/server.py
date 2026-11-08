@@ -533,6 +533,16 @@ def _microsoft_ads_structured_error(exc: Exception) -> dict | None:
                 "microsoft_ads.developer_token."
             ),
             "missing_client": "Set microsoft_ads.client_id to the Entra app id, then run `adloop microsoft-login`.",
+            "not_an_account_user": (
+                "Invite a Microsoft account or a work (Entra) user to the ad account in Microsoft "
+                "Advertising, then run `adloop microsoft-login` as that user. Signing in with Google "
+                "is not supported yet."
+            ),
+            "google_identity": (
+                "This account's users sign in with Google, which AdLoop does not support yet. Invite a "
+                "Microsoft account or a work (Entra) user to the ad account, then run "
+                "`adloop microsoft-login` as that user."
+            ),
         }
         return {
             "error": str(exc),
@@ -547,7 +557,10 @@ def _microsoft_ads_structured_error(exc: Exception) -> dict | None:
         if exc.status == 429:
             return {
                 "error": str(exc),
-                "hint": "Wait for the reset before calling again; do not retry in a loop.",
+                "hint": (
+                    f"Wait {exc.retry_after or 60} seconds before calling Microsoft Advertising again; "
+                    "do not retry in a loop."
+                ),
                 "auth_error": "MICROSOFT_ADS_RATE_LIMITED",
                 "retry_after": exc.retry_after,
             }
@@ -7294,7 +7307,7 @@ def get_microsoft_keywords(ad_account_id: str = "", campaign_id: str = "", ad_gr
     """List Microsoft Advertising keywords with match type, bid, status and editorial review, plus the status of their ad group and campaign.
 
     Insights flag disapproved keywords and active broad-match keywords in
-    manual-bid campaigns.
+    campaigns without conversion-based bidding (manual bids or Maximize Clicks).
 
     Args:
         ad_account_id: Microsoft ad account id. Empty uses the config default.
@@ -7599,8 +7612,10 @@ def update_microsoft_campaign(
 
     Bid strategies: ManualCpc, EnhancedCpc, MaxClicks, MaxConversions (with
     an optional target_cpa; TargetCpa is accepted and becomes MaxConversions,
-    as Microsoft now does). Moving to manual bidding is refused while the
-    campaign has active broad-match keywords. The daily budget has its own
+    as Microsoft now does). Moving to a strategy that is not conversion-based
+    (manual bids or MaxClicks) is refused while the campaign has active
+    broad-match keywords, and moving to MaxConversions is refused while the
+    account has no active conversion goal. The daily budget has its own
     tool, update_microsoft_campaign_budget. The returned plan_id is applied
     with confirm_and_apply, which refuses if a changed setting was edited
     after the preview.
@@ -7677,8 +7692,10 @@ def draft_microsoft_campaign(
     """Draft a new Microsoft Advertising Search campaign, created PAUSED with its locations (preview only).
 
     Requires a daily budget (capped by max_daily_budget), languages and
-    included locations. Defaults to MaxConversions and PeopleIn; warns when
-    no conversion goal counts toward Conversions. The apply creates the
+    included locations (languages=["All"] is refused). Defaults to
+    MaxConversions and PeopleIn; MaxConversions is refused while no active
+    conversion goal counts toward Conversions, because Microsoft refuses the
+    campaign then (pass MaxClicks, EnhancedCpc or ManualCpc). The apply creates the
     campaign, then its location criteria, and names what was created if the
     second step fails. The returned plan_id is applied with confirm_and_apply.
 
@@ -7718,7 +7735,8 @@ def draft_microsoft_ad_group(
 
     The ad group is created active but serves only once one of its ads (new
     ads are paused) is enabled. Manual-bid campaigns need cpc_bid; broad
-    match is refused unless the campaign uses automated bidding. network
+    match is refused unless the campaign uses conversion-based bidding
+    (MaxConversions, MaxConversionValue or a target CPA/ROAS). network
     OwnedAndOperatedOnly (default) keeps ads off syndicated partner sites.
     The returned plan_id is applied with confirm_and_apply.
 
@@ -7773,7 +7791,8 @@ def draft_microsoft_keywords(ad_account_id: str = "", ad_group_id: str = "", key
     """Draft adding keywords to a Microsoft Advertising ad group (preview only).
 
     Keywords already in the ad group are skipped; broad match is refused
-    unless the campaign uses automated bidding. The returned plan_id is
+    unless the campaign uses conversion-based bidding (MaxConversions,
+    MaxConversionValue or a target CPA/ROAS). The returned plan_id is
     applied with confirm_and_apply.
 
     Args:
@@ -8129,7 +8148,10 @@ def remove_microsoft_entity(ad_account_id: str = "", entity_type: str = "", enti
     Removes a campaign, ad group, ad or keyword by id, or (by the remove_id
     the read tools return) a direct negative keyword, a negative list item,
     a location or schedule criterion, or an extension link (account,
-    campaign or ad group, image extensions included). Pausing keeps
+    campaign or ad group, image extensions included). A criterion is read
+    and named first; the last targeted location is refused (the campaign
+    would serve everywhere; update_microsoft_campaign_targeting replaces
+    the whole list). Pausing keeps
     history and can be undone. The returned plan_id is applied with
     confirm_and_apply.
 

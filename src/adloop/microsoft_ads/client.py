@@ -10,8 +10,10 @@ Every call goes through :func:`ms_request`:
   ``ApiFaultDetail`` (``OperationErrors`` / ``BatchErrors``) bodies; the
   codes and messages are folded into one :class:`MicrosoftAdsApiError`.
   An expired token (codes 105/109 or HTTP 401) is refreshed once.
-- **Throttling**: HTTP 429 or code 117 (CallRateExceeded) waits briefly and
-  retries; a long wait surfaces as an error instead of blocking the call.
+- **Throttling**: HTTP 429, code 117 (CallRateExceeded, a sliding 60-second
+  window per customer) and Reporting code 207 (ConcurrentRequestOverLimit)
+  raise at once with ``retry_after`` (60 s unless Microsoft names another
+  wait): retrying sooner only extends the window.
 
 Reports are asynchronous: :func:`run_report` submits, polls, downloads the
 zipped CSV and returns its rows as dicts keyed by column name.
@@ -38,11 +40,15 @@ HOSTS = {
 DEVELOPER_SETTINGS_URL = "https://developers.ads.microsoft.com/Account"
 
 _TIMEOUT_SECONDS = 60
-_MAX_THROTTLE_RETRIES = 3
-_MAX_THROTTLE_WAIT_SECONDS = 10
+# Microsoft counts calls in a sliding 60-second window; its guidance is to wait
+# that long before trying again.
+_THROTTLE_WAIT_SECONDS = 60
 # Codes that mean the access token is not (or no longer) accepted.
 _AUTH_CODES = {"105", "109", "AuthenticationTokenExpired", "InvalidCredentials"}
-_THROTTLE_CODES = {"117", "CallRateExceeded"}
+# Codes that mean the signed-in identity is the wrong kind for the account:
+# its users sign in to Microsoft Advertising with Google.
+_IDENTITY_CODES = {"GoogleAccountIsRequired", "IdentityTypeMismatch"}
+_THROTTLE_CODES = {"117", "CallRateExceeded", "207", "ConcurrentRequestOverLimit"}
 _MAX_MESSAGE = 500
 
 
@@ -139,7 +145,6 @@ def ms_request(
         headers["CustomerAccountId"] = str(account_id)
 
     refreshed = False
-    throttled = 0
     while True:
         headers["Authorization"] = f"Bearer {creds.token()}"
         try:
@@ -175,24 +180,26 @@ def ms_request(
 
         payload = _scrub(payload, secrets)
         codes, message, tracking = fault_details(payload)
+        if set(codes) & _IDENTITY_CODES:
+            raise MicrosoftAdsAuthError(_google_identity_message(message), error_code="google_identity")
         if (status == 401 or set(codes) & _AUTH_CODES) and not refreshed:
             refreshed = True
             creds.invalidate()
             continue
         if status == 429 or set(codes) & _THROTTLE_CODES:
-            throttled += 1
-            wait = _retry_after(response.headers)
-            wait = 5 if wait is None else wait
-            if throttled <= _MAX_THROTTLE_RETRIES and wait <= _MAX_THROTTLE_WAIT_SECONDS:
-                time.sleep(max(wait, 1))
-                continue
+            wait = max(_retry_after(response.headers) or 0, _THROTTLE_WAIT_SECONDS)
+            concurrent = bool(set(codes) & {"207", "ConcurrentRequestOverLimit"})
             raise MicrosoftAdsApiError(
-                "Microsoft Advertising rate limit reached"
-                + (f"; retry after {wait}s" if wait else "")
-                + ". Wait before calling again; do not retry in a loop.",
+                ("Microsoft Advertising is building too many reports for this customer at once"
+                 if concurrent else "Microsoft Advertising rate limit reached")
+                + f"; wait {wait}s before calling again, and do not retry in a loop.",
                 status=429, url=url, codes=codes, tracking_id=tracking, retry_after=wait,
             )
         if status == 401 or set(codes) & _AUTH_CODES:
+            if set(codes) & {"105", "InvalidCredentials"}:
+                # The sign-in itself worked (the token refreshed), so the
+                # identity behind it is not a user of this account.
+                raise MicrosoftAdsAuthError(_google_identity_message(message), error_code="not_an_account_user")
             raise MicrosoftAdsAuthError(
                 "Microsoft Advertising rejected the sign-in even after a refresh"
                 + (f": {message}" if message else "")
@@ -205,6 +212,20 @@ def ms_request(
             + (f" (tracking id {tracking})" if tracking else ""),
             status=status, url=url, codes=codes, tracking_id=tracking,
         )
+
+
+def _google_identity_message(message: str) -> str:
+    return (
+        "Microsoft Advertising does not accept the signed-in user for this account"
+        + (f" ({message})" if message else "")
+        + ". The sign-in itself worked, so the Microsoft identity AdLoop signed in with is not a user of "
+        "the ad account. A common cause: the account's users sign in to Microsoft Advertising with Google, "
+        "and a Microsoft account with the same email address is a different identity. AdLoop cannot sign "
+        "in with Google yet. Invite a Microsoft account or a work (Entra) user to the ad account "
+        "(Microsoft Advertising → Settings → Account access), accept the invitation, then run "
+        "`adloop microsoft-login` and sign in as that user. (Less often: microsoft_ads.developer_token is "
+        "wrong, or the ad account is inactive.)"
+    )
 
 
 # Response fields that carry errors, also inside a successful (2xx) answer.

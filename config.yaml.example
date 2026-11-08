@@ -104,9 +104,13 @@ microsoft_ads:
   #    Microsoft Advertising API permission msads.manage. Its application id:
   # 3. `adloop microsoft-login` once: the browser opens, sign in with the
   #    account that has access to the ad accounts; the refresh token lands in
-  #    token_path. The app needs http://localhost:8080/callback as a
-  #    mobile/desktop redirect URI. (--device-code is a fallback; directories
-  #    with security defaults block it with error 530035.)
+  #    token_path. The app needs http://localhost/callback as a
+  #    mobile/desktop redirect URI (the sign-in listens on a free port; Entra
+  #    ignores the port of localhost redirects). (--device-code is a fallback;
+  #    directories with security defaults block it with error 530035.)
+  #    Users who sign in to Microsoft Advertising with Google are not
+  #    supported yet: invite a Microsoft account or work (Entra) user to the
+  #    ad account and sign in as that user.
   developer_token: ""
   client_id: ""
   client_secret: ""   # only for confidential (web) apps

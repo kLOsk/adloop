@@ -7,8 +7,9 @@ refresh, so the new one must be stored each time (the local token file
 here; a hosted deployment overrides :meth:`MicrosoftCredentials.persist`).
 
 ``adloop microsoft-login`` signs in once in the browser (authorization code
-with PKCE; the redirect lands on ``http://localhost:8080/callback``, which
-the Entra app must list as a mobile/desktop redirect URI) and stores the
+with PKCE; the redirect lands on ``http://localhost:<free port>/callback``.
+The Entra app lists ``http://localhost/callback`` as a mobile/desktop
+redirect URI: Entra ignores the port of localhost redirects) and stores the
 refresh token in ``token_path``. Directories with security defaults block
 the device-code flow (sign-in error 530035), so it is only the fallback:
 ``adloop microsoft-login --device-code``. The Entra app must allow public
@@ -31,7 +32,8 @@ SCOPE = "https://ads.microsoft.com/msads.manage offline_access"
 _AUTHORITY = "https://login.microsoftonline.com/{tenant}/oauth2/v2.0"
 _EXPIRY_MARGIN_SECONDS = 120
 _TIMEOUT_SECONDS = 30
-BROWSER_REDIRECT_URI = "http://localhost:8080/callback"
+# What the Entra app registers; the sign-in itself uses a free port on it.
+BROWSER_REDIRECT_URI = "http://localhost/callback"
 _BROWSER_LOGIN_TIMEOUT_SECONDS = 300
 
 
@@ -195,13 +197,23 @@ class FileMicrosoftCredentials(MicrosoftCredentials):
 
 
 def write_token_file(path: Path, data: dict) -> None:
-    """Write the token file with owner-only permissions."""
+    """Write the token file with owner-only permissions.
+
+    The temporary file gets a fresh random name and is opened with O_EXCL, so
+    a file or symlink planted at that name is never written through.
+    """
+    import secrets
+
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(path.suffix + ".tmp")
-    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    with os.fdopen(fd, "w") as handle:
-        json.dump(data, handle)
-    os.replace(tmp, path)
+    tmp = path.with_name(f".{path.name}.{secrets.token_hex(8)}.tmp")
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0), 0o600)
+    try:
+        with os.fdopen(fd, "w") as handle:
+            json.dump(data, handle)
+        os.replace(tmp, path)
+    except BaseException:
+        tmp.unlink(missing_ok=True)
+        raise
 
 
 def _token_path(config: AdLoopConfig) -> Path:
@@ -342,12 +354,16 @@ def browser_login(
     config: AdLoopConfig,
     *,
     login_hint: str = "",
-    redirect_uri: str = BROWSER_REDIRECT_URI,
     say: Callable[[str], None] = print,
     open_browser: Callable[[str], Any] | None = None,
-    listen: Callable[[str], dict] | None = None,
+    listen: Callable[[str, str], dict] | None = None,
+    redirect_uri: str = "",
 ) -> Path:
-    """Sign in once in the browser (authorization code + PKCE) and store the refresh token."""
+    """Sign in once in the browser (authorization code + PKCE) and store the refresh token.
+
+    Without ``listen`` (tests pass one, with a ``redirect_uri``) a listener
+    binds a free localhost port first, and the redirect URI names that port.
+    """
     import secrets
 
     cfg = config.microsoft_ads
@@ -360,22 +376,28 @@ def browser_login(
         import webbrowser
 
         open_browser = webbrowser.open
+    listener = None
     if listen is None:
-        from adloop.oauth_redirect import RedirectTimeout, listen_once
+        from adloop.oauth_redirect import RedirectListener, RedirectTimeout
 
-        def listen(uri: str) -> dict:
+        try:
+            listener = RedirectListener(host="localhost", path="/callback", provider="Microsoft Advertising")
+        except OSError as exc:
+            raise MicrosoftAdsAuthError(
+                f"Cannot listen on localhost for the sign-in ({exc}); run "
+                "`adloop microsoft-login --device-code` instead.", error_code="port_in_use",
+            ) from None
+        redirect_uri = listener.redirect_uri
+
+        def listen(_uri: str, expected_state: str) -> dict:
             try:
-                return listen_once(uri, _BROWSER_LOGIN_TIMEOUT_SECONDS, provider="Microsoft Advertising")
+                return listener.wait(_BROWSER_LOGIN_TIMEOUT_SECONDS, state=expected_state)
             except RedirectTimeout:
                 raise MicrosoftAdsAuthError(
                     "No sign-in arrived within 5 minutes. Run the command again.", error_code="timeout",
                 ) from None
-            except OSError as exc:
-                raise MicrosoftAdsAuthError(
-                    f"Cannot listen on {uri} ({exc}); close whatever uses that port, or run "
-                    "`adloop microsoft-login --device-code`.", error_code="port_in_use",
-                ) from None
 
+    redirect_uri = redirect_uri or BROWSER_REDIRECT_URI
     state = secrets.token_urlsafe(16)
     verifier, challenge = _pkce_pair()
     url = authorize_url(config, state=state, challenge=challenge, redirect_uri=redirect_uri, login_hint=login_hint)
@@ -386,7 +408,11 @@ def browser_login(
         open_browser(url)
     except Exception:  # noqa: BLE001 — the URL is printed
         pass
-    query = listen(redirect_uri)
+    try:
+        query = listen(redirect_uri, state)
+    finally:
+        if listener is not None:
+            listener.close()
     if query.get("error"):
         description = str(query.get("error_description") or query["error"]).split("\r\n")[0]
         raise MicrosoftAdsAuthError(f"Microsoft did not complete the sign-in: {description}", error_code=str(query["error"]))

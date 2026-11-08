@@ -18,6 +18,11 @@ Microsoft's Campaign Management API has no validate-only mode, so:
 - **Multi-step applies** (a campaign and then its targeting, a list and then
   its attachments) report exactly what was created when a later step fails.
 
+A plan's ``changes`` hold what the person approves (names, before → after);
+request bodies, snapshots and ids live in ``ChangePlan.apply_only_payload``,
+which no preview, dialog, card or audit entry shows. The dry run and the
+apply read both through ``plan.apply_payload()``.
+
 REST conventions (learn.microsoft.com/advertising/campaign-management-service):
 add is POST, update PUT, delete DELETE on the collection path; polymorphic
 objects carry a ``Type`` discriminator; on update an omitted field stays as
@@ -35,26 +40,39 @@ from typing import TYPE_CHECKING, Any
 from adloop.microsoft_ads.auth import MicrosoftAdsApiError
 from adloop.microsoft_ads.client import campaign_request, fault_details
 from adloop.microsoft_ads.read import (
+    CONVERSION_BASED_STRATEGIES,
     _ad_groups,
     _ads,
     _bidding,
     _campaigns,
     _conversion_goals,
-    _criterions,
     _customer,
     _keywords,
     _money,
     account_meta,
+    is_negative,
+    target_criterions,
 )
-from adloop.microsoft_ads.write import _guard, _store, _validation_error, find_entity
+from adloop.microsoft_ads.write import _blocked as _guard
+from adloop.microsoft_ads.write import (
+    _validation_error,
+    find_entity,
+    store_plan_preview,
+)
 
 if TYPE_CHECKING:
     from adloop.config import AdLoopConfig
     from adloop.safety.preview import ChangePlan
 
+# The strategies a draft can set.
 STRATEGIES = ("ManualCpc", "EnhancedCpc", "MaxClicks", "MaxConversions")
-_SMART = {"MaxClicks", "MaxConversions"}
+# Broad match needs one of these (read.CONVERSION_BASED_STRATEGIES); Maximize
+# Clicks is automated but not conversion-based, so it does not count.
+_CONVERSION_BASED = CONVERSION_BASED_STRATEGIES
 _MANUAL = {"ManualCpc", "EnhancedCpc"}
+# Strategies that take a maximum CPC cap.
+_CAPPED = {"MaxClicks", "MaxConversions"}
+_ALTERNATIVES = "MaxClicks, EnhancedCpc or ManualCpc"
 MATCH_TYPES = ("Exact", "Phrase", "Broad")
 NEGATIVE_MATCH_TYPES = ("Exact", "Phrase")
 NETWORKS = ("OwnedAndOperatedOnly", "OwnedAndOperatedAndSyndicatedSearch")
@@ -210,16 +228,13 @@ class _Progress:
             raise
 
 
-def _base_changes(account: str, customer: str, **extra: Any) -> dict:
-    return {"ad_account_id": account, "customer_id": customer, **extra}
-
-
-def _plan(operation: str, entity_type: str, entity_id: str, account: str, changes: dict,
-          *, warnings: list[str] | None = None, double: bool = False) -> dict:
-    return _store(
-        {"operation": operation, "entity_type": entity_type, "entity_id": str(entity_id or ""),
-         "customer_id": account, "requires_double_confirm": double, "changes": changes},
-        warnings=warnings,
+def _plan(operation: str, entity_type: str, entity_id: str, account: str, customer: str, changes: dict,
+          payload: dict | None = None, *, warnings: list[str] | None = None, double: bool = False) -> dict:
+    """Store a plan: ``changes`` for the person approving, ``payload`` for the dry run and the apply."""
+    return store_plan_preview(
+        operation, entity_type, entity_id, account, changes,
+        {"ad_account_id": account, "customer_id": customer, **(payload or {})},
+        warnings=warnings, double=double,
     )
 
 
@@ -236,7 +251,7 @@ def bidding_scheme(strategy: str, *, target_cpa: float | None, max_cpc: float | 
     scheme: dict[str, Any] = {"Type": strategy}
     if strategy == "MaxConversions" and target_cpa is not None:
         scheme["TargetCpa"] = round(float(target_cpa), 2)
-    if strategy in _SMART and max_cpc is not None:
+    if strategy in _CAPPED and max_cpc is not None:
         scheme["MaxCpc"] = {"Amount": round(float(max_cpc), 2)}
     return scheme
 
@@ -251,6 +266,28 @@ def _counted_goals(config: AdLoopConfig, account: str, customer: str) -> int:
     except MicrosoftAdsApiError:
         return -1
     return sum(1 for g in goals if g.get("Status") == "Active" and not g.get("ExcludeFromBidding"))
+
+
+def _no_goal_refusal(strategy: str) -> str:
+    return (
+        f"{strategy} needs an active conversion goal that counts toward Conversions, and this account has "
+        "none: Microsoft refuses the campaign (ConversionGoalCriteriaNotMetForBiddingScheme). Set up a "
+        "conversion goal first (get_microsoft_conversion_setup shows what exists), or use "
+        f"{_ALTERNATIVES} for now."
+    )
+
+
+def _goals_unknown_warning(strategy: str) -> str:
+    return (f"The conversion goals could not be read; Microsoft refuses {strategy} without an active "
+            "conversion goal that counts toward Conversions.")
+
+
+def _broad_refusal(count: int, strategy: str) -> str:
+    return (
+        f"The campaign has {count} active broad-match keyword(s), and broad match needs conversion-based "
+        f"bidding (MaxConversions, MaxConversionValue or a target CPA/ROAS); {strategy} would buy whatever "
+        "a loose match brings. Change them to phrase or exact first."
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -288,6 +325,9 @@ def update_microsoft_campaign(
         errors.append(f"bidding_strategy must be one of {list(STRATEGIES)}.")
     if target_cpa is not None and (strategy or "") not in ("", "MaxConversions"):
         errors.append("target_cpa goes with MaxConversions.")
+    if max_cpc is not None and strategy and strategy not in _CAPPED:
+        errors.append(f"max_cpc caps {' or '.join(sorted(_CAPPED))} bids; a {strategy} campaign's bids are set "
+                      "on its ad groups and keywords.")
     template = None if tracking_url_template is None else tracking_url_template.strip()
     if template and not template.startswith(("http://", "https://", "{lpurl}", "{unescapedlpurl}")):
         errors.append("tracking_url_template must start with {lpurl}, {unescapedlpurl}, http:// or https://.")
@@ -314,8 +354,14 @@ def update_microsoft_campaign(
         chosen = strategy or _strategy_name(current_scheme)
         if chosen not in STRATEGIES:
             return _validation_error([f"The campaign uses {chosen or 'an unknown strategy'}; pass bidding_strategy explicitly."])
+        if target_cpa is not None and chosen != "MaxConversions":
+            return _validation_error([f"target_cpa goes with MaxConversions; this campaign uses {chosen}. Pass "
+                                      "bidding_strategy='MaxConversions' to switch."])
+        if max_cpc is not None and chosen not in _CAPPED:
+            return _validation_error([f"max_cpc caps {' or '.join(sorted(_CAPPED))} bids; this campaign uses "
+                                      f"{chosen}, whose bids are set on its ad groups and keywords."])
         has_cap = (current_scheme.get("MaxCpc") or {}).get("Amount") is not None
-        if max_cpc is not None and not has_cap and chosen in _SMART:
+        if max_cpc is not None and not has_cap and chosen in _CAPPED:
             return _validation_error([
                 "Microsoft no longer lets a campaign add a maximum CPC to automated bidding; it can "
                 "only change or remove an existing one."
@@ -329,23 +375,27 @@ def update_microsoft_campaign(
         update["BiddingScheme"] = scheme
         touched.append("BiddingScheme")
         shown["bidding"] = {"from": _bidding(current_scheme), "to": _bidding(scheme), "currency": meta["currency"]}
-        if chosen != _strategy_name(current_scheme):
+        switching = chosen != _strategy_name(current_scheme)
+        if switching:
             warnings.append("Changing the bid strategy restarts Microsoft's learning period; expect a week or two of unsettled results.")
-        if chosen == "MaxConversions" and _counted_goals(config, account, customer) == 0:
-            warnings.append("No active conversion goal counts toward Conversions: MaxConversions has nothing to optimize for.")
+        if chosen in _CONVERSION_BASED:
+            goals = _counted_goals(config, account, customer)
+            if goals == 0 and switching:
+                return _validation_error([_no_goal_refusal(chosen)])
+            if goals == 0:
+                warnings.append(f"No active conversion goal counts toward Conversions: {chosen} has nothing to optimize for.")
+            elif goals < 0:
+                warnings.append(_goals_unknown_warning(chosen))
         old_cap = (current_scheme.get("MaxCpc") or {}).get("Amount")
         new_cap = (scheme.get("MaxCpc") or {}).get("Amount")
         try:
             _check_bid(old_cap, new_cap, config)
         except Exception as e:  # SafetyViolation
             return {"error": f"Maximum CPC: {e}"}
-        if chosen in _MANUAL:
+        if chosen not in _CONVERSION_BASED:
             broad = _active_broad_keywords(config, account, customer, campaign_id)
             if broad:
-                return _validation_error([
-                    f"The campaign has {len(broad)} active broad-match keyword(s); manual bidding with broad "
-                    "match wastes spend. Change them to phrase or exact first."
-                ])
+                return _validation_error([_broad_refusal(len(broad), chosen)])
     for field, value, api_name in (("tracking_url_template", template, "TrackingUrlTemplate"),
                                    ("final_url_suffix", None if final_url_suffix is None else final_url_suffix.strip(), "FinalUrlSuffix")):
         if value is None or value == (campaign.get(api_name) or ""):
@@ -358,10 +408,9 @@ def update_microsoft_campaign(
     if len(update) == 1:
         return {"error": "Nothing to change: pass at least one setting that differs from the campaign."}
     return _plan(
-        operation, "campaign", campaign_id, account,
-        _base_changes(account, customer, entity_name=campaign.get("Name"), campaign_status=campaign.get("Status"),
-                      changes=shown, update=update,
-                      before={k: copy.deepcopy(campaign.get(k)) for k in sorted(set(touched))}),
+        operation, "campaign", campaign_id, account, customer,
+        {"entity_name": campaign.get("Name"), "campaign_status": campaign.get("Status"), "changes": shown},
+        {"update": update, "before": {k: copy.deepcopy(campaign.get(k)) for k in sorted(set(touched))}},
         warnings=warnings,
     )
 
@@ -372,16 +421,16 @@ def update_microsoft_campaign(
 
 
 def _current_targeting(config: AdLoopConfig, account: str, customer: str, campaign_id: str) -> dict:
-    locations = _criterions(config, account, customer, campaign_id, "Location")
+    found = target_criterions(config, account, customer, campaign_id, ("Location", "LocationIntent", "DayTime"))
     included = {}
     excluded = {}
-    for c in locations:
+    for c in found["Location"]:
         crit = c.get("Criterion") or {}
         entry = {"criterion_id": str(c.get("Id")), "name": crit.get("DisplayName") or str(crit.get("LocationId"))}
-        target = excluded if c.get("Type") == "NegativeCampaignCriterion" else included
+        target = excluded if is_negative(c) else included
         target[str(crit.get("LocationId"))] = entry
-    intent = _criterions(config, account, customer, campaign_id, "LocationIntent")
-    schedule = _criterions(config, account, customer, campaign_id, "DayTime")
+    intent = found["LocationIntent"]
+    schedule = found["DayTime"]
     return {
         "included": included,
         "excluded": excluded,
@@ -426,13 +475,13 @@ def _schedule_blocks(schedule: list, errors: list[str]) -> list[dict]:
                           b["ToHour"] * 60 + list(_MINUTES.values()).index(b["ToMinute"]) * 15) for b in items)
         if any(a[1] > b[0] for a, b in zip(minutes, minutes[1:])):
             errors.append(f"ad_schedule windows on {day} overlap.")
-        if len(items) > 6:
-            errors.append(f"At most 6 ad_schedule windows on {day}.")
+        if len(items) > _MAX_WINDOWS_PER_DAY:
+            errors.append(f"At most {_MAX_WINDOWS_PER_DAY} ad_schedule windows on {day} (Microsoft's limit).")
     return blocks
 
 
 # Microsoft: "the maximum number of day and time criteria per day that you
-# can set is seven" (per campaign or ad group).
+# can set is seven" (per campaign or ad group; DayTimeCriterion reference).
 _MAX_WINDOWS_PER_DAY = 7
 
 
@@ -600,9 +649,9 @@ def update_microsoft_campaign_targeting(
     if not any(v for k, v in plan_ops.items() if k != "schedule_kept"):
         return {"error": "Nothing to change: the targeting already matches."}
     return _plan(
-        operation, "campaign", campaign_id, account,
-        _base_changes(account, customer, entity_name=campaign.get("Name"), changes=shown, operations=plan_ops,
-                      before=current),
+        operation, "campaign", campaign_id, account, customer,
+        {"entity_name": campaign.get("Name"), "changes": shown},
+        {"operations": plan_ops, "before": current},
         warnings=warnings,
         double=bool(blocks) and not current["schedule"],
     )
@@ -648,9 +697,14 @@ def draft_microsoft_campaign(
     strategy = "MaxConversions" if bidding_strategy == "TargetCpa" else (bidding_strategy or "MaxConversions")
     if strategy not in STRATEGIES:
         errors.append(f"bidding_strategy must be one of {list(STRATEGIES)}.")
+    if target_cpa is not None and strategy != "MaxConversions":
+        errors.append(f"target_cpa goes with MaxConversions, not {strategy}.")
     langs = _clean(languages)
     if not langs:
         errors.append("languages is required, e.g. ['English']: without it ads reach every language.")
+    elif any(lang.lower() == "all" for lang in langs):
+        errors.append("languages=['All'] reaches every language; name the languages the ads are written in, "
+                      "e.g. ['English'].")
     include = _clean(location_ids)
     if not include:
         errors.append("location_ids is required (search_microsoft_locations): an untargeted campaign serves everywhere.")
@@ -670,8 +724,12 @@ def draft_microsoft_campaign(
     if name.lower() in existing:
         return _validation_error([f"A campaign named '{name}' already exists."])
     warnings: list[str] = []
-    if strategy == "MaxConversions" and _counted_goals(config, account, customer) == 0:
-        warnings.append("No active conversion goal counts toward Conversions: MaxConversions would have nothing to optimize for.")
+    if strategy in _CONVERSION_BASED:
+        goals = _counted_goals(config, account, customer)
+        if goals == 0:
+            return _validation_error([_no_goal_refusal(strategy)])
+        if goals < 0:
+            warnings.append(_goals_unknown_warning(strategy))
     if target_cpa is not None and target_cpa > 0 and budget < 5 * target_cpa:
         warnings.append(f"A daily budget below 5× the target CPA ({target_cpa}) gives bidding little to learn from.")
     campaign: dict[str, Any] = {
@@ -696,15 +754,22 @@ def draft_microsoft_campaign(
         + [{"Type": "BiddableCampaignCriterion",
             "Criterion": {"Type": "LocationIntentCriterion", "IntentOption": location_intent}}]
     )
+    # [AUD]: search campaigns reach the Microsoft Audience Network (Outlook,
+    # MSN) unless their AudienceAdsBidAdjustment is -100.
+    warnings.append("New search campaigns can also show on the Microsoft Audience Network (Outlook, MSN, Edge); "
+                    "set audience_ads_bid_adjustment=-100 on its ad groups (update_microsoft_ad_group) to keep "
+                    "it on search only.")
     return _plan(
-        operation, "campaign", "", account,
-        _base_changes(
-            account, customer, entity_name=name, status_on_create="Paused", daily_budget=budget,
-            currency=meta["currency"], monthly_maximum=round(budget * 30.4, 2), bidding=_bidding(campaign["BiddingScheme"]),
-            languages=langs, location_ids=include, excluded_location_ids=exclude, location_intent=location_intent,
-            time_zone=meta["time_zone"], tracking_url_template=campaign.get("TrackingUrlTemplate"),
-            final_url_suffix=campaign.get("FinalUrlSuffix"), campaign=campaign, criteria=criteria,
-        ),
+        operation, "campaign", "", account, customer,
+        {
+            "entity_name": name, "status_on_create": "Paused", "daily_budget": budget, "currency": meta["currency"],
+            "monthly_maximum": round(budget * 30.4, 2), "bidding": _bidding(campaign["BiddingScheme"]),
+            "languages": langs, "location_ids": include, "excluded_location_ids": exclude or None,
+            "location_intent": location_intent, "time_zone": meta["time_zone"],
+            "tracking_url_template": campaign.get("TrackingUrlTemplate"),
+            "final_url_suffix": campaign.get("FinalUrlSuffix"),
+        },
+        {"campaign": campaign, "criteria": criteria},
         warnings=warnings + [
             "Created paused. Add ad groups, keywords, ads and extensions, then enable it.",
         ],
@@ -753,13 +818,14 @@ def _check_bid(current: float | None, proposed: float | None, config) -> None:
         check_bid_increase(float(current), float(proposed), config.safety)
 
 
-def _refuse_broad_on_manual(rows: list[dict], campaign: dict, errors: list[str]) -> None:
+def _refuse_broad_without_conversion_bidding(rows: list[dict], campaign: dict, errors: list[str]) -> None:
     strategy = _strategy_name(campaign.get("BiddingScheme"))
     broad = [r["Text"] for r in rows if r["MatchType"] == "Broad"]
-    if broad and strategy not in _SMART:
+    if broad and strategy not in _CONVERSION_BASED:
         errors.append(
-            f"Broad match on a {strategy or 'manual'}-bid campaign wastes spend; use Phrase or Exact for "
-            f"{broad[:5]}, or move the campaign to MaxConversions first."
+            f"Broad match needs conversion-based bidding (MaxConversions, MaxConversionValue or a target "
+            f"CPA/ROAS); on a {strategy or 'manual'} campaign it buys whatever a loose match brings. Use Phrase "
+            f"or Exact for {broad[:5]}, or move the campaign to MaxConversions first."
         )
 
 
@@ -795,7 +861,7 @@ def draft_microsoft_ad_group(
     strategy = _strategy_name(campaign.get("BiddingScheme"))
     if strategy in _MANUAL and cpc_bid is None:
         errors.append(f"A {strategy} campaign needs cpc_bid for the ad group.")
-    _refuse_broad_on_manual(rows, campaign, errors)
+    _refuse_broad_without_conversion_bidding(rows, campaign, errors)
     names = {str(g.get("Name")).lower() for g in _ad_groups(config, account, customer, str(campaign_id))}
     if name.lower() in names:
         errors.append(f"The campaign already has an ad group named '{name}'.")
@@ -808,14 +874,14 @@ def draft_microsoft_ad_group(
     if network == "OwnedAndOperatedAndSyndicatedSearch":
         warnings.append("Syndicated search partners are included; their traffic is usually weaker.")
     return _plan(
-        operation, "ad_group", "", account,
-        _base_changes(account, customer, entity_name=name, campaign_id=str(campaign_id), campaign_name=campaign.get("Name"),
-                      campaign_status=campaign.get("Status"), cpc_bid=_money(group.get("CpcBid")), network=network,
-                      status_on_create="Active (its keywords too); nothing serves until an ad in it is enabled",
-                      currency=meta["currency"],
-                      keywords=[f"{r['Text']} [{r['MatchType']}]" + (f" bid {r['Bid']['Amount']}" if r.get("Bid") else "")
-                                for r in rows],
-                      ad_group=group, keyword_rows=rows),
+        operation, "ad_group", "", account, customer,
+        {"entity_name": name, "campaign_name": campaign.get("Name"), "campaign_status": campaign.get("Status"),
+         "cpc_bid": _money(group.get("CpcBid")), "network": network,
+         "status_on_create": "Active (its keywords too); nothing serves until an ad in it is enabled",
+         "currency": meta["currency"],
+         "keywords": [f"{r['Text']} [{r['MatchType']}]" + (f" bid {r['Bid']['Amount']}" if r.get("Bid") else "")
+                      for r in rows] or None},
+        {"campaign_id": str(campaign_id), "ad_group": group, "keyword_rows": rows},
         warnings=warnings,
     )
 
@@ -867,7 +933,7 @@ def update_microsoft_ad_group(
         update["CpcBid"] = {"Amount": round(float(cpc_bid), 2)}
         shown["cpc_bid"] = {"from": old, "to": round(float(cpc_bid), 2), "currency": meta["currency"]}
         touched.append("CpcBid")
-        if _strategy_name(campaign.get("BiddingScheme")) in _SMART:
+        if _strategy_name(campaign.get("BiddingScheme")) not in _MANUAL:
             warnings.append("The campaign uses automated bidding, which ignores the ad group's default bid.")
     if network and network != group.get("Network"):
         update["Network"] = network
@@ -875,19 +941,22 @@ def update_microsoft_ad_group(
         touched.append("Network")
     adjust = None
     if audience_ads_bid_adjustment is not None and int(audience_ads_bid_adjustment) != group.get("AudienceAdsBidAdjustment"):
+        from adloop.microsoft_ads.read import audience_network
+
         adjust = int(audience_ads_bid_adjustment)
         update["AudienceAdsBidAdjustment"] = adjust
-        shown["audience_network"] = {"from": group.get("AudienceAdsBidAdjustment"), "to": adjust,
+        now = audience_network(group, campaign)
+        was = ("off" if not now["on"] else f"{now['bid_adjustment'] or 0:+d}%") + f" (set on the {now['set_on']})"
+        shown["audience_network"] = {"from": was, "to": adjust,
                                      "meaning": "off" if adjust == -100 else f"{adjust:+d}% bids on the Audience Network"}
         touched.append("AudienceAdsBidAdjustment")
     if len(update) == 1:
         return {"error": "Nothing to change: pass at least one setting that differs from the ad group."}
     return _plan(
-        operation, "ad_group", str(ad_group_id), account,
-        _base_changes(account, customer, entity_name=group.get("Name"), campaign_id=str(campaign.get("Id")),
-                      campaign_name=campaign.get("Name"), changes=shown, update=update,
-                      update_audience_adjustment=adjust is not None,
-                      before={k: copy.deepcopy(group.get(k)) for k in sorted(set(touched))}),
+        operation, "ad_group", str(ad_group_id), account, customer,
+        {"entity_name": group.get("Name"), "campaign_name": campaign.get("Name"), "changes": shown},
+        {"campaign_id": str(campaign.get("Id")), "update": update, "update_audience_adjustment": adjust is not None,
+         "before": {k: copy.deepcopy(group.get(k)) for k in sorted(set(touched))}},
         warnings=warnings,
     )
 
@@ -911,7 +980,7 @@ def draft_microsoft_keywords(
     if not found:
         return {"error": f"Microsoft ad group '{ad_group_id}' was not found in account {account}."}
     group, campaign = found["entity"], found["campaign"]
-    _refuse_broad_on_manual(rows, campaign, errors)
+    _refuse_broad_without_conversion_bidding(rows, campaign, errors)
     if errors:
         return _validation_error(errors)
     existing = {(str(k.get("Text")).lower(), k.get("MatchType")) for k in _keywords(config, account, customer, str(ad_group_id))
@@ -936,13 +1005,12 @@ def draft_microsoft_keywords(
         warnings.append("The keywords are added Active and the ad group and campaign are active, so they can serve "
                         "as soon as this is applied (once the ad group has an enabled ad).")
     return _plan(
-        operation, "ad_group", str(ad_group_id), account,
-        _base_changes(account, customer, entity_name=group.get("Name"), campaign_name=campaign.get("Name"),
-                      status_on_create="Active", ad_group_status=group.get("Status"),
-                      campaign_status=campaign.get("Status"),
-                      keywords=[f"{r['Text']} [{r['MatchType']}]" + (f" bid {r['Bid']['Amount']}" if r.get("Bid") else "")
-                                for r in new_rows],
-                      keyword_rows=new_rows),
+        operation, "ad_group", str(ad_group_id), account, customer,
+        {"entity_name": group.get("Name"), "campaign_name": campaign.get("Name"), "status_on_create": "Active",
+         "ad_group_status": group.get("Status"), "campaign_status": campaign.get("Status"),
+         "keywords": [f"{r['Text']} [{r['MatchType']}]" + (f" bid {r['Bid']['Amount']}" if r.get("Bid") else "")
+                      for r in new_rows]},
+        {"campaign_id": str(campaign.get("Id")), "keyword_rows": new_rows},
         warnings=warnings,
     )
 
@@ -972,7 +1040,7 @@ def update_microsoft_keyword_bids(
     found = find_entity(config, account, customer, "ad_group", str(ad_group_id))
     if not found:
         return {"error": f"Microsoft ad group '{ad_group_id}' was not found in account {account}."}
-    group = found["entity"]
+    group, campaign = found["entity"], found["campaign"]
     keywords = {str(k.get("Id")): k for k in _keywords(config, account, customer, str(ad_group_id))}
     missing = [k for k in wanted if k not in keywords]
     if missing:
@@ -993,9 +1061,10 @@ def update_microsoft_keyword_bids(
                       "from": current, "to": bid if bid is not None else f"ad group default {default_bid}"})
         before[kid] = copy.deepcopy(keywords[kid].get("Bid"))
     return _plan(
-        operation, "ad_group", str(ad_group_id), account,
-        _base_changes(account, customer, entity_name=group.get("Name"), currency=meta["currency"], bids=shown,
-                      keyword_rows=rows, before=before, default_bid_before=copy.deepcopy(group.get("CpcBid"))),
+        operation, "ad_group", str(ad_group_id), account, customer,
+        {"entity_name": group.get("Name"), "currency": meta["currency"], "bids": shown},
+        {"campaign_id": str(campaign.get("Id")), "keyword_rows": rows, "before": before,
+         "default_bid_before": copy.deepcopy(group.get("CpcBid"))},
     )
 
 
@@ -1143,10 +1212,11 @@ def add_microsoft_negative_keywords(
     if conflicts:
         warnings.append(f"These negatives block active keywords: {conflicts[:10]}.")
     return _plan(
-        operation, kind, str(entity.get("Id")), account,
-        _base_changes(account, customer, entity_name=entity.get("Name"), entity_kind=entity_type,
-                      parent_id=str(campaign.get("Id")),
-                      negatives=[f"{r['Text']} [{r['MatchType']}]" for r in new_rows], negative_rows=new_rows),
+        operation, kind, str(entity.get("Id")), account, customer,
+        {"entity_name": entity.get("Name"),
+         "campaign_name": campaign.get("Name") if kind == "ad_group" else None,
+         "negatives": [f"{r['Text']} [{r['MatchType']}]" for r in new_rows]},
+        {"entity_kind": entity_type, "campaign_id": str(campaign.get("Id")), "negative_rows": new_rows},
         warnings=warnings,
     )
 
@@ -1191,9 +1261,10 @@ def propose_microsoft_negative_keyword_list(
     else:
         warnings.append("The list is attached to no campaign, so it blocks nothing until attached.")
     return _plan(
-        operation, "negative_keyword_list", "", account,
-        _base_changes(account, customer, entity_name=list_name, negatives=[f"{r['Text']} [{r['MatchType']}]" for r in rows],
-                      attach_to=[campaigns[c].get("Name") for c in cids], campaign_ids=cids, negative_rows=rows),
+        operation, "negative_keyword_list", "", account, customer,
+        {"entity_name": list_name, "negatives": [f"{r['Text']} [{r['MatchType']}]" for r in rows],
+         "attach_to": [campaigns[c].get("Name") for c in cids]},
+        {"campaign_ids": cids, "negative_rows": rows},
         warnings=warnings,
     )
 
@@ -1228,9 +1299,10 @@ def add_to_microsoft_negative_keyword_list(
     if conflicts:
         warnings.append(f"These negatives block active keywords: {conflicts[:10]}.")
     return _plan(
-        operation, "negative_keyword_list", str(list_id), account,
-        _base_changes(account, customer, entity_name=lists[str(list_id)].get("Name"), attached_campaigns=len(attached),
-                      negatives=[f"{r['Text']} [{r['MatchType']}]" for r in new_rows], negative_rows=new_rows),
+        operation, "negative_keyword_list", str(list_id), account, customer,
+        {"entity_name": lists[str(list_id)].get("Name"), "attached_campaigns": len(attached),
+         "negatives": [f"{r['Text']} [{r['MatchType']}]" for r in new_rows]},
+        {"negative_rows": new_rows},
         warnings=warnings,
     )
 
@@ -1260,9 +1332,9 @@ def _draft_list_link(config, *, attach: bool, ad_account_id: str, list_id: str, 
     if not attach:
         warnings.append("Detached campaigns stop blocking these negatives; the list itself stays.")
     return _plan(
-        operation, "negative_keyword_list", str(list_id), account,
-        _base_changes(account, customer, entity_name=lists[str(list_id)].get("Name"),
-                      campaigns=[campaigns[c].get("Name") for c in targets], campaign_ids=targets),
+        operation, "negative_keyword_list", str(list_id), account, customer,
+        {"entity_name": lists[str(list_id)].get("Name"), "campaigns": [campaigns[c].get("Name") for c in targets]},
+        {"campaign_ids": targets},
         warnings=warnings,
     )
 
@@ -1364,12 +1436,13 @@ def draft_microsoft_responsive_search_ad(
         ad.pop("Path2", None)
         warnings.append("No display paths: path1/path2 make the display URL more specific.")
     return _plan(
-        operation, "ad_group", str(ad_group_id), account,
-        _base_changes(account, customer, entity_name=group.get("Name"), campaign_name=campaign.get("Name"),
-                      status_on_create="Paused",
-                      headlines=[l["Asset"]["Text"] + (f" [pinned {l['PinnedField']}]" if l.get("PinnedField") else "") for l in fields["Headlines"]],
-                      descriptions=[l["Asset"]["Text"] for l in fields["Descriptions"]],
-                      final_url=fields["FinalUrls"][0], path1=ad.get("Path1"), path2=ad.get("Path2"), ad=ad),
+        operation, "ad_group", str(ad_group_id), account, customer,
+        {"entity_name": group.get("Name"), "campaign_name": campaign.get("Name"), "status_on_create": "Paused",
+         "headlines": [l["Asset"]["Text"] + (f" [pinned {l['PinnedField']}]" if l.get("PinnedField") else "")
+                       for l in fields["Headlines"]],
+         "descriptions": [l["Asset"]["Text"] for l in fields["Descriptions"]],
+         "final_url": fields["FinalUrls"][0], "path1": ad.get("Path1"), "path2": ad.get("Path2")},
+        {"campaign_id": str(campaign.get("Id")), "ad": ad},
         warnings=warnings,
     )
 
@@ -1394,7 +1467,7 @@ def update_microsoft_responsive_search_ad(
     found = find_entity(config, account, customer, "ad", str(ad_id))
     if not found:
         return {"error": f"Microsoft ad '{ad_id}' was not found in account {account}."}
-    ad, group = found["entity"], found["ad_group"]
+    ad, group, campaign = found["entity"], found["ad_group"], found["campaign"]
     if ad.get("Type") != "ResponsiveSearch":
         return _validation_error([f"Ad {ad_id} is a {ad.get('Type')} ad; only responsive search ads are edited here."])
     shown = {}
@@ -1406,11 +1479,12 @@ def update_microsoft_responsive_search_ad(
             shown[key.lower()] = {"from": ad.get(key), "to": value}
     warnings.append("Edited ads go back to Microsoft's editorial review.")
     return _plan(
-        operation, "ad", str(ad_id), account,
-        _base_changes(account, customer, entity_name=f"RSA {ad_id}", ad_group_id=str(group.get("Id")),
-                      ad_group_name=group.get("Name"), changes=shown,
-                      update={"Type": "ResponsiveSearch", "Id": str(ad_id), **fields},
-                      before={k: copy.deepcopy(ad.get(k)) for k in fields}),
+        operation, "ad", str(ad_id), account, customer,
+        {"entity_name": f"RSA {ad_id}", "ad_group_name": group.get("Name"), "campaign_name": campaign.get("Name"),
+         "changes": shown},
+        {"campaign_id": str(campaign.get("Id")), "ad_group_id": str(group.get("Id")),
+         "update": {"Type": "ResponsiveSearch", "Id": str(ad_id), **fields},
+         "before": {k: copy.deepcopy(ad.get(k)) for k in fields}},
         warnings=warnings,
     )
 
@@ -1484,9 +1558,9 @@ def _draft_extensions(config, *, ad_account_id, campaign_id, scope, operation, k
     if len(new) < len(extensions):
         warnings.append(f"Skipped {len(extensions) - len(new)} already on {where}.")
     return _plan(
-        operation, association.lower(), entity_id, account,
-        _base_changes(account, customer, entity_name=where, association_type=association, entity_id=entity_id,
-                      **shown, extensions=new),
+        operation, _ASSOCIATION_ENTITY[association], entity_id, account, customer,
+        {"entity_name": where, **shown},
+        {"association_type": association, "entity_id": entity_id, "extensions": new},
         warnings=warnings,
     )
 
@@ -1845,9 +1919,9 @@ def draft_microsoft_image_extension(
     shown["final_url"] = url or "the ad's own final URL"
     shown["layouts"] = layouts
     return _plan(
-        operation, _ASSOCIATION_ENTITY[association], entity_id, account,
-        _base_changes(account, customer, entity_name=where, association_type=association, entity_id=entity_id,
-                      **shown, image_payloads=images),
+        operation, _ASSOCIATION_ENTITY[association], entity_id, account, customer,
+        {"entity_name": where, **shown},
+        {"association_type": association, "entity_id": entity_id, "image_payloads": images},
         warnings=warnings,
     )
 
@@ -1987,6 +2061,50 @@ REMOVABLE = ("campaign", "ad_group", "ad", "keyword", "negative_keyword", "negat
              "campaign_criterion", "extension_association")
 
 
+# Criterion types a campaign_criterion remove_id can point at, looked up in
+# this order (one query each, until the criterion is found).
+_CRITERION_KINDS = ("Location", "Radius", "DayTime", "LocationIntent", "Age", "Gender", "Device")
+
+
+def _find_criterion(by_kind: dict[str, list[dict]], criterion_id: str) -> dict | None:
+    """The criterion with this id among a campaign's target criteria, with the others of its kind."""
+    for kind, rows in by_kind.items():
+        for row in rows:
+            if str(row.get("Id")) == str(criterion_id):
+                return {"criterion": row, "kind": kind, "siblings": rows}
+    return None
+
+
+def _criterion_label(row: dict, kind: str) -> str:
+    crit = row.get("Criterion") or {}
+    side = "excluded" if is_negative(row) else "targeted"
+    if kind == "Location":
+        return f"location {crit.get('DisplayName') or crit.get('LocationId')} ({side})"
+    if kind == "Radius":
+        return f"radius {crit.get('Name') or ''} {crit.get('Radius')} {crit.get('RadiusUnit') or ''} ({side})".replace("  ", " ")
+    if kind == "DayTime":
+        return f"ad schedule window {_block_label(crit)}"
+    if kind == "LocationIntent":
+        return f"location intent {crit.get('IntentOption')}"
+    return f"{kind.lower()} criterion {row.get('Id')}"
+
+
+def _positive_locations(rows: list[dict]) -> list[dict]:
+    return [r for r in rows if not is_negative(r)]
+
+
+def _criterion_refusal(campaign_name: str, found: dict, by_kind: dict[str, list[dict]]) -> str | None:
+    """Why removing this criterion must go through update_microsoft_campaign_targeting, or None."""
+    if found["kind"] not in ("Location", "Radius") or is_negative(found["criterion"]):
+        return None
+    positives = _positive_locations(by_kind.get("Location", []) + by_kind.get("Radius", []))
+    others = [r for r in positives if str(r.get("Id")) != str(found["criterion"].get("Id"))]
+    if others:
+        return None
+    return (f"This is the last targeted location of campaign '{campaign_name}': without it the campaign "
+            "serves everywhere. Use update_microsoft_campaign_targeting with the full location list instead.")
+
+
 def remove_microsoft_entity(config: AdLoopConfig, *, ad_account_id: str = "", entity_type: str = "", entity_id: str = "") -> dict:
     """Draft deleting an entity (irreversible; double confirmation)."""
     operation = "microsoft_remove_entity"
@@ -2001,15 +2119,20 @@ def remove_microsoft_entity(config: AdLoopConfig, *, ad_account_id: str = "", en
         return _validation_error(["entity_id is required."])
     meta, account, customer = _ctx(config, ad_account_id)
     shown: dict[str, Any] = {}
+    payload: dict[str, Any] = {}
     request: dict[str, Any]
+    warnings: list[str] = []
     if entity_type in ("campaign", "ad_group", "ad", "keyword"):
         found = find_entity(config, account, customer, entity_type, entity_id)
         if not found:
             return {"error": f"Microsoft {entity_type.replace('_', ' ')} '{entity_id}' was not found."}
         entity = found["entity"]
         label = entity.get("Name") or entity.get("Text") or f"{entity.get('Type')} ad {entity_id}"
-        shown = {"name": label, "campaign": found["campaign"].get("Name"),
-                 "ad_group": (found.get("ad_group") or {}).get("Name"), "current_status": entity.get("Status")}
+        shown = {"name": label, "campaign_name": found["campaign"].get("Name") if entity_type != "campaign" else None,
+                 "ad_group_name": (found.get("ad_group") or {}).get("Name") if entity_type in ("ad", "keyword") else None,
+                 "current_status": entity.get("Status")}
+        payload = {"campaign_id": str(found["campaign"].get("Id")),
+                   "ad_group_id": str((found.get("ad_group") or {}).get("Id") or "")}
         if entity_type == "campaign":
             request = {"path": "Campaigns", "body": {"AccountId": account, "CampaignIds": [entity_id]}}
         elif entity_type == "ad_group":
@@ -2018,6 +2141,7 @@ def remove_microsoft_entity(config: AdLoopConfig, *, ad_account_id: str = "", en
             request = {"path": "Ads", "body": {"AdGroupId": str(found["ad_group"].get("Id")), "AdIds": [entity_id]}}
         else:
             request = {"path": "Keywords", "body": {"AdGroupId": str(found["ad_group"].get("Id")), "KeywordIds": [entity_id]}}
+        warnings.append("Deleting cannot be undone; pausing keeps the history and lets it come back.")
     else:
         parts = entity_id.split("~")
         if entity_type == "negative_keyword" and len(parts) == 3 and parts[0] in ("Campaign", "AdGroup"):
@@ -2030,17 +2154,37 @@ def remove_microsoft_entity(config: AdLoopConfig, *, ad_account_id: str = "", en
             request = {"path": "ListItems", "body": {"ListItemIds": [int(item)], "SharedList": {"Type": _LIST_TYPE, "Id": int(list_id)},
                                                      "SharedEntityScope": "Account"}}
             shown = {"list_id": list_id, "item_id": item}
-        elif entity_type == "campaign_criterion" and len(parts) == 2:
+        elif entity_type == "campaign_criterion" and len(parts) == 2 and all(x.isdigit() for x in parts):
             cid, crit = parts
+            campaign = find_entity(config, account, customer, "campaign", cid)
+            if not campaign:
+                return {"error": f"Microsoft campaign '{cid}' was not found in account {account}."}
+            name = campaign["entity"].get("Name")
+            by_kind = target_criterions(config, account, customer, cid, _CRITERION_KINDS)
+            found = _find_criterion(by_kind, crit)
+            if not found:
+                return {"error": f"Campaign '{name}' has no target criterion {crit} (get_microsoft_campaigns lists them)."}
+            refusal = _criterion_refusal(name, found, by_kind)
+            if refusal:
+                return _validation_error([refusal])
+            label = _criterion_label(found["criterion"], found["kind"])
+            shown = {"name": label, "campaign_name": name, "criterion_type": found["kind"]}
+            payload = {"campaign_id": cid, "criterion_kind": found["kind"]}
             request = {"path": "CampaignCriterions", "body": {"CampaignCriterionIds": [int(crit)], "CampaignId": int(cid),
                                                               "CriterionType": "Targets"}}
-            shown = {"campaign_id": cid, "criterion_id": crit}
+            if found["kind"] == "LocationIntent":
+                warnings.append("Without its location intent the campaign falls back to Microsoft's default, "
+                                "which also reaches people outside the locations who search for them.")
+            if found["kind"] == "DayTime" and len(found["siblings"]) == 1:
+                warnings.append("This is the campaign's last ad schedule window: without it the campaign serves at all hours.")
         elif entity_type == "extension_association" and len(parts) == 3 and parts[2] in _ASSOCIATION_ENTITY:
             ext, owner, association = parts
             request = {"path": "AdExtensionsAssociations", "body": {"AccountId": account, "AssociationType": association,
                                                                      "AdExtensionIdToEntityIdAssociations": [
                                                                          {"AdExtensionId": int(ext), "EntityId": int(owner)}]}}
             shown = {"extension_id": ext, "removed_from": f"{association} {owner}"}
+            warnings.append("This unlinks the extension only; the extension (and an image extension's images) "
+                            "stays in the account's library.")
         else:
             return _validation_error([
                 "entity_id format: negative_keyword 'Campaign~<id>~<negativeId>' or 'AdGroup~<id>~<negativeId>', "
@@ -2048,14 +2192,9 @@ def remove_microsoft_entity(config: AdLoopConfig, *, ad_account_id: str = "", en
                 "extension_association '<extensionId>~<entityId>~<Account|Campaign|AdGroup>' (the remove_id values the read "
                 "tools return)."
             ])
-    warnings = ["Deleting cannot be undone; pausing keeps the history and lets it come back."] if entity_type in (
-        "campaign", "ad_group", "ad", "keyword") else []
-    if entity_type == "extension_association":
-        warnings.append("This unlinks the extension only; the extension (and an image extension's images) "
-                        "stays in the account's library.")
-    return _plan(operation, entity_type, entity_id, account,
-                 _base_changes(account, customer, entity_name=shown.get("name") or entity_id, target=shown, request=request),
-                 warnings=warnings, double=True)
+    return _plan(operation, entity_type, entity_id, account, customer,
+                 {"entity_name": shown.pop("name", None) or entity_id, **shown},
+                 {**payload, "request": request}, warnings=warnings, double=True)
 
 
 # ---------------------------------------------------------------------------
@@ -2083,13 +2222,16 @@ def preflight(config: AdLoopConfig, plan: ChangePlan) -> dict:
     """Re-read what the plan touches and re-check the gates; sends nothing."""
     from adloop.safety.guards import check_budget_cap
 
-    c = plan.changes or {}
+    c = plan.apply_payload()
     account, customer = c["ad_account_id"], c.get("customer_id", "")
     op = plan.operation
     checks: dict[str, Any] = {"ad_account_id": account}
 
     def entity(kind: str, eid: str) -> dict:
-        found = find_entity(config, account, customer, kind, eid)
+        # The plan's stored parents keep this to three reads, not a scan of the account.
+        parent = c.get("ad_group_id", "") if kind in ("keyword", "ad") else ""
+        found = find_entity(config, account, customer, kind, eid, parent_id=parent or "",
+                            campaign_id=c.get("campaign_id", "") if kind != "campaign" else "")
         if not found:
             raise ValueError(f"{kind.replace('_', ' ')} '{eid}' no longer exists.")
         return found
@@ -2101,17 +2243,15 @@ def preflight(config: AdLoopConfig, plan: ChangePlan) -> dict:
         if scheme:
             _check_bid((((campaign.get("BiddingScheme") or {}).get("MaxCpc")) or {}).get("Amount"),
                        (scheme.get("MaxCpc") or {}).get("Amount"), config)
-            if scheme.get("Type") in _MANUAL and _active_broad_keywords(config, account, customer, plan.entity_id):
-                raise ValueError("The campaign now has active broad-match keywords; manual bidding with broad match "
-                                 "wastes spend. Change them to phrase or exact first.")
+            strategy = _strategy_name(scheme)
+            if strategy not in _CONVERSION_BASED:
+                broad = _active_broad_keywords(config, account, customer, plan.entity_id)
+                if broad:
+                    raise ValueError(_broad_refusal(len(broad), strategy).replace("The campaign has", "The campaign now has"))
+            elif (strategy != _strategy_name(c["before"].get("BiddingScheme"))
+                  and _counted_goals(config, account, customer) == 0):
+                raise ValueError(_no_goal_refusal(strategy))
     elif op == "microsoft_update_targeting":
-        ops = c.get("operations") or {}
-        scheduled = {str(s.get("criterion_id")) for s in (c["before"].get("schedule") or [])}
-        if (any(((x.get("Criterion") or {}).get("Type")) == "DayTimeCriterion" for x in ops.get("add") or [])
-                or any(str(i) in scheduled for i in ops.get("delete") or [])):
-            raise ValueError("This plan changes the ad schedule and was drafted by an earlier AdLoop version, "
-                             "which did not check the schedule's time zone mode or order the windows Microsoft "
-                             "allows; draft it again.")
         campaign = entity("campaign", plan.entity_id)["entity"]
         now = _current_targeting(config, account, customer, plan.entity_id)
         if "searcher_time_zone" in c["before"]:
@@ -2125,13 +2265,19 @@ def preflight(config: AdLoopConfig, plan: ChangePlan) -> dict:
         check_budget_cap(float(c["daily_budget"]), config.safety)
         if c["entity_name"].lower() in {str(x.get("Name")).lower() for x in _campaigns(config, account, customer)}:
             raise ValueError(f"A campaign named '{c['entity_name']}' now exists (an earlier attempt may have created it).")
+        strategy = _strategy_name(c["campaign"].get("BiddingScheme"))
+        if strategy in _CONVERSION_BASED:
+            goals = _counted_goals(config, account, customer)
+            if goals == 0:
+                raise ValueError(_no_goal_refusal(strategy))
+            checks["conversion_goals"] = goals if goals >= 0 else "unknown"
         checks["budget_cap_ok"] = True
     elif op == "microsoft_create_ad_group":
         campaign = entity("campaign", c["campaign_id"])["entity"]
         if c["entity_name"].lower() in {str(g.get("Name")).lower() for g in _ad_groups(config, account, customer, c["campaign_id"])}:
             raise ValueError(f"An ad group named '{c['entity_name']}' now exists in the campaign.")
         errors = []
-        _refuse_broad_on_manual(c["keyword_rows"], campaign, errors)
+        _refuse_broad_without_conversion_bidding(c["keyword_rows"], campaign, errors)
         if _strategy_name(campaign.get("BiddingScheme")) in _MANUAL and not c["ad_group"].get("CpcBid"):
             errors.append("The campaign now uses manual bidding, which needs a default bid for the ad group.")
         if errors:
@@ -2144,7 +2290,7 @@ def preflight(config: AdLoopConfig, plan: ChangePlan) -> dict:
     elif op == "microsoft_add_keywords":
         found = entity("ad_group", plan.entity_id)
         errors = []
-        _refuse_broad_on_manual(c["keyword_rows"], found["campaign"], errors)
+        _refuse_broad_without_conversion_bidding(c["keyword_rows"], found["campaign"], errors)
         if errors:
             raise ValueError("; ".join(errors))
         have = {(str(k.get("Text")).lower(), k.get("MatchType")) for k in _keywords(config, account, customer, plan.entity_id)
@@ -2243,6 +2389,16 @@ def preflight(config: AdLoopConfig, plan: ChangePlan) -> dict:
     elif op == "microsoft_remove_entity":
         if plan.entity_type in ("campaign", "ad_group", "ad", "keyword"):
             entity(plan.entity_type, plan.entity_id)
+        elif plan.entity_type == "campaign_criterion":
+            cid, crit = plan.entity_id.split("~")
+            name = entity("campaign", cid)["entity"].get("Name")
+            by_kind = target_criterions(config, account, customer, cid, _CRITERION_KINDS)
+            found = _find_criterion(by_kind, crit)
+            if not found:
+                raise ValueError(f"Criterion {crit} is no longer on campaign '{name}'.")
+            refusal = _criterion_refusal(name, found, by_kind)
+            if refusal:
+                raise ValueError(refusal)
     else:
         raise ValueError(f"Unknown Microsoft operation: {op}")
     checks["checked"] = op.replace("microsoft_", "")
@@ -2251,7 +2407,7 @@ def preflight(config: AdLoopConfig, plan: ChangePlan) -> dict:
 
 def apply_plan(config: AdLoopConfig, plan: ChangePlan) -> dict:
     """Execute a management plan (after :func:`preflight`, which the caller runs first)."""
-    c = plan.changes or {}
+    c = plan.apply_payload()
     account = c["ad_account_id"]
     op = plan.operation
     progress = _Progress()

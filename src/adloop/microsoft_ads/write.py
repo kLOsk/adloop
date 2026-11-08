@@ -12,6 +12,10 @@ is sent. The real apply runs the same preflight first, so a change made in
 Microsoft Advertising between the preview (or the dry run) and the apply is
 refused instead of overwritten. Updates send only the fields that change;
 Microsoft leaves every field it does not receive as it was.
+
+A plan's ``changes`` hold only what the person approves; the ids and request
+bodies the dry run and the apply need sit in ``ChangePlan.apply_only_payload``
+(never shown or logged), and both read :meth:`ChangePlan.apply_payload`.
 """
 
 from __future__ import annotations
@@ -35,7 +39,6 @@ if TYPE_CHECKING:
     from adloop.safety.preview import ChangePlan
 
 PLATFORM = "microsoft"
-OPERATION_PREFIX = "microsoft_"
 ENTITY_TYPES = ("campaign", "ad_group", "keyword", "ad")
 _STATUS = {"pause": "Paused", "enable": "Active"}
 
@@ -44,40 +47,48 @@ def _validation_error(details: list[str]) -> dict:
     return {"error": "Validation failed", "details": details}
 
 
-def _guard(operation: str, config: AdLoopConfig) -> dict | None:
-    from adloop.safety.guards import SafetyViolation, check_blocked_operation
+def store_plan_preview(operation: str, entity_type: str, entity_id: str, account: str, changes: dict,
+                       payload: dict, *, warnings: list[str] | None = None, double: bool = False) -> dict:
+    """Store a Microsoft plan: ``changes`` is what the person approves, ``payload`` what the apply sends."""
+    from adloop.safety.guards import store_draft
+    from adloop.safety.preview import ChangePlan
 
-    try:
-        check_blocked_operation(operation, config.safety)
-    except SafetyViolation as e:
-        return {"error": str(e)}
-    return None
+    plan = ChangePlan(
+        platform=PLATFORM, operation=operation, entity_type=entity_type, entity_id=str(entity_id or ""),
+        customer_id=account, requires_double_confirm=double,
+        changes={k: v for k, v in changes.items() if v is not None},
+        apply_only_payload=payload,
+    )
+    return store_draft(plan, warnings=warnings)
 
 
-def _store(plan_kwargs: dict, *, warnings: list[str] | None = None) -> dict:
-    from adloop.safety.preview import ChangePlan, store_plan
+def _blocked(operation: str, config: AdLoopConfig) -> dict | None:
+    from adloop.safety.guards import blocked_operation_error
 
-    plan = ChangePlan(platform=PLATFORM, **plan_kwargs)
-    store_plan(plan)
-    preview = plan.to_preview()
-    if warnings:
-        preview["warnings"] = warnings
-    return preview
+    return blocked_operation_error(operation, config.safety)
 
 
 def find_entity(
     config: AdLoopConfig, account: str, customer: str, entity_type: str, entity_id: str,
-    *, parent_id: str = "",
+    *, parent_id: str = "", campaign_id: str = "",
 ) -> dict | None:
-    """Locate an entity and its parents; ad groups, keywords and ads carry no parent id."""
+    """Locate an entity and its parents; ad groups, keywords and ads carry no parent id.
+
+    ``parent_id`` (the ad group of a keyword or ad, or the campaign of an ad
+    group) and ``campaign_id`` narrow the search: a plan that stored them
+    finds its entity in three calls instead of reading every ad group of
+    the account.
+    """
     entity_id = str(entity_id)
+    if entity_type == "ad_group" and parent_id and not campaign_id:
+        campaign_id = str(parent_id)
     for c in _campaigns(config, account, customer):
         cid = str(c.get("Id"))
         if entity_type == "campaign":
             if cid == entity_id:
                 return {"entity": c, "campaign": c}
             continue
-        if entity_type == "ad_group" and parent_id and cid != str(parent_id):
+        if campaign_id and cid != str(campaign_id):
             continue
         for g in _ad_groups(config, account, customer, cid):
             gid = str(g.get("Id"))
@@ -114,7 +125,7 @@ def draft_microsoft_status(
 ) -> dict:
     """Draft pausing or enabling a campaign, ad group, keyword or ad."""
     operation = "microsoft_set_status"
-    blocked = _guard(operation, config)
+    blocked = _blocked(operation, config)
     if blocked:
         return blocked
     entity_type = (entity_type or "").strip().lower()
@@ -152,23 +163,20 @@ def draft_microsoft_status(
         warnings.append("Pausing the campaign stops every ad in it.")
 
     changes = {
-        "ad_account_id": account,
-        "customer_id": customer,
-        "name": _label(found, entity_type),
         "entity_name": _label(found, entity_type),
-        "campaign_id": str(found["campaign"].get("Id")),
-        "campaign_name": found["campaign"].get("Name"),
-        "ad_group_id": str(found["ad_group"].get("Id")) if found.get("ad_group") else None,
-        "ad_group_name": found["ad_group"].get("Name") if found.get("ad_group") else None,
-        "ad_type": entity.get("Type") if entity_type == "ad" else None,
+        "campaign_name": found["campaign"].get("Name") if entity_type != "campaign" else None,
+        "ad_group_name": found["ad_group"].get("Name") if found.get("ad_group") and entity_type != "ad_group" else None,
         "current_status": current,
         "target_status": target,
     }
-    return _store(
-        {"operation": operation, "entity_type": entity_type, "entity_id": entity_id,
-         "customer_id": account, "changes": changes},
-        warnings=warnings,
-    )
+    payload = {
+        "ad_account_id": account,
+        "customer_id": customer,
+        "campaign_id": str(found["campaign"].get("Id")),
+        "ad_group_id": str(found["ad_group"].get("Id")) if found.get("ad_group") else "",
+        "ad_type": entity.get("Type") if entity_type == "ad" else None,
+    }
+    return store_plan_preview(operation, entity_type, entity_id, account, changes, payload, warnings=warnings)
 
 
 def draft_microsoft_campaign_budget(
@@ -178,7 +186,7 @@ def draft_microsoft_campaign_budget(
     from adloop.safety.guards import SafetyViolation, check_budget_cap
 
     operation = "microsoft_update_campaign_budget"
-    blocked = _guard(operation, config)
+    blocked = _blocked(operation, config)
     if blocked:
         return blocked
     errors = []
@@ -223,29 +231,18 @@ def draft_microsoft_campaign_budget(
         f"Microsoft can spend up to 30.4 × the daily budget in a month: about "
         f"{round(amount * 30.4, 2)} {meta['currency']}."
     )
-    return _store(
+    return store_plan_preview(
+        operation, "campaign", campaign_id, account,
         {
-            "operation": operation,
-            "entity_type": "campaign",
-            "entity_id": campaign_id,
-            "customer_id": account,
-            "changes": {
-                "ad_account_id": account,
-                "customer_id": customer,
-                "entity_name": campaign.get("Name"),
-                "campaign_name": campaign.get("Name"),
-                "campaign_status": campaign.get("Status"),
-                "current_daily_budget": current,
-                "new_daily_budget": amount,
-                "currency": meta["currency"],
-            },
+            "entity_name": campaign.get("Name"),
+            "campaign_status": campaign.get("Status"),
+            "current_daily_budget": current,
+            "new_daily_budget": amount,
+            "currency": meta["currency"],
         },
+        {"ad_account_id": account, "customer_id": customer},
         warnings=warnings,
     )
-
-
-def is_microsoft_plan(plan: ChangePlan) -> bool:
-    return str(plan.operation or "").startswith(OPERATION_PREFIX)
 
 
 def preflight(config: AdLoopConfig, plan: ChangePlan) -> dict:
@@ -255,15 +252,16 @@ def preflight(config: AdLoopConfig, plan: ChangePlan) -> dict:
 
     if plan.operation in manage.OPERATIONS:
         return manage.preflight(config, plan)
-    changes = plan.changes or {}
+    changes = plan.apply_payload()
     account = changes.get("ad_account_id") or plan.customer_id
     customer = changes.get("customer_id") or ""
     parent = changes.get("ad_group_id") if plan.entity_type in ("keyword", "ad") else ""
-    found = find_entity(config, account, customer, plan.entity_type, plan.entity_id, parent_id=parent or "")
+    found = find_entity(config, account, customer, plan.entity_type, plan.entity_id, parent_id=parent or "",
+                        campaign_id=changes.get("campaign_id") or "")
     if not found:
         raise ValueError(f"{plan.entity_type} '{plan.entity_id}' no longer exists.")
     entity = found["entity"]
-    checks: dict[str, Any] = {"ad_account_id": account, "entity": changes.get("name") or entity.get("Name")}
+    checks: dict[str, Any] = {"ad_account_id": account, "entity": changes.get("entity_name") or entity.get("Name")}
     if plan.operation == "microsoft_set_status":
         now = entity.get("Status")
         if now != changes.get("current_status"):
@@ -307,7 +305,7 @@ def apply_plan(config: AdLoopConfig, plan: ChangePlan) -> dict:
     preflight(config, plan)
     if plan.operation in manage.OPERATIONS:
         return manage.apply_plan(config, plan)
-    changes = plan.changes or {}
+    changes = plan.apply_payload()
     account = changes.get("ad_account_id") or plan.customer_id
     customer = changes.get("customer_id") or ""
     kwargs = {"account_id": account, "customer_id": customer, "method": "PUT", "mutation": True}
@@ -321,7 +319,7 @@ def apply_plan(config: AdLoopConfig, plan: ChangePlan) -> dict:
         )
         _raise_partial(payload, "budget change")
         return {"entity_type": "campaign", "entity_id": plan.entity_id,
-                "campaign_name": changes.get("campaign_name"),
+                "campaign_name": changes.get("entity_name"),
                 "daily_budget": changes["new_daily_budget"], "currency": changes.get("currency")}
 
     if plan.operation == "microsoft_set_status":
@@ -342,6 +340,6 @@ def apply_plan(config: AdLoopConfig, plan: ChangePlan) -> dict:
             path = "Ads"
         payload = campaign_request(config, path, body, **kwargs)
         _raise_partial(payload, "status change")
-        return {"entity_type": etype, "entity_id": eid, "name": changes.get("name"), "status": status}
+        return {"entity_type": etype, "entity_id": eid, "name": changes.get("entity_name"), "status": status}
 
     raise ValueError(f"Unknown Microsoft operation: {plan.operation}")

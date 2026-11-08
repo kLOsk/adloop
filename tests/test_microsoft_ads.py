@@ -28,7 +28,8 @@ def _fresh_state(tmp_path):
     global _LOG_FILE
     _LOG_FILE = str(tmp_path / "audit.log")
     preview_store.set_plan_store(InMemoryPlanStore())
-    read.reset_account_cache()
+    read._account_cache.clear()
+    read._targets_query["refused"] = False
     auth.reset_credentials_cache()
     yield
     preview_store.set_plan_store(InMemoryPlanStore())
@@ -197,6 +198,9 @@ def _fake_api(extra: dict | None = None, reports: dict | None = None):
         if key == ("campaign", "Campaigns/QueryByAccountId"):
             return _CAMPAIGNS
         if key == ("campaign", "CampaignCriterions/QueryByIds"):
+            if body["CriterionType"] == "Targets":
+                return {"CampaignCriterions": [c for (cid, _kind), rows in _CRITERIONS.items()
+                                               if cid == body["CampaignId"] for c in rows]}
             return {"CampaignCriterions": _CRITERIONS.get((body["CampaignId"], body["CriterionType"]), [])}
         if key == ("campaign", "AdGroups/QueryByCampaignId"):
             return {"AdGroups": _AD_GROUPS.get(body["CampaignId"], [])}
@@ -381,12 +385,41 @@ class TestClient:
         assert "CampaignServiceInvalidAccountId: The account ID is invalid." in str(err.value)
         assert "trk-1" in str(err.value) and "1100" in err.value.codes
 
-    def test_throttling_waits_briefly(self, creds):
-        throttled = _Resp(400, {"Errors": [{"Code": 117, "ErrorCode": "CallRateExceeded", "Message": "slow down"}]},
+    @pytest.mark.parametrize(("code", "name", "service"), [
+        (117, "CallRateExceeded", "customer"), (207, "ConcurrentRequestOverLimit", "reporting")])
+    def test_throttling_raises_at_once_with_a_minute_to_wait(self, creds, code, name, service):
+        # Microsoft counts calls in a sliding 60-second window: a retry after 5 s only extends it.
+        throttled = _Resp(400, {"Errors": [{"Code": code, "ErrorCode": name, "Message": "slow down"}]},
                           headers={"Retry-After": "2"})
-        with patch("requests.request", side_effect=[throttled, _Resp(200, {"ok": 1})]), patch("time.sleep") as sleep:
-            assert client.ms_request(_config(), "customer", "User/Query", {}) == {"ok": 1}
-        sleep.assert_called_once_with(2)
+        with patch("requests.request", side_effect=[throttled]) as sent, patch("time.sleep") as sleep, \
+                pytest.raises(MicrosoftAdsApiError) as err:
+            client.ms_request(_config(), service, "User/Query", {})
+        assert sent.call_count == 1 and not sleep.called
+        assert err.value.status == 429 and err.value.retry_after == 60
+        from adloop.server import _structured_error
+
+        parsed = _structured_error("get_microsoft_performance", err.value)
+        assert parsed["auth_error"] == "MICROSOFT_ADS_RATE_LIMITED" and parsed["retry_after"] == 60
+        assert "60 seconds" in parsed["hint"]
+
+    def test_invalid_credentials_after_a_refresh_explain_the_identity(self, creds):
+        # A Google-identity user signs in with the Microsoft account of the same
+        # email: the sign-in works, and every call answers a bare 105.
+        bare = _Resp(401, {"Errors": [{"Code": 105, "ErrorCode": "InvalidCredentials",
+                                       "Message": "Authentication failed."}]})
+        with patch("requests.request", side_effect=[bare, bare]), pytest.raises(MicrosoftAdsAuthError) as err:
+            client.ms_request(_config(), "customer", "User/Query", {})
+        assert err.value.error_code == "not_an_account_user" and creds.refreshes == 1
+        assert "not a user of the ad account" in str(err.value) and "Google" in str(err.value)
+        from adloop.server import _structured_error
+
+        assert "Microsoft account or a work (Entra) user" in _structured_error("health_check", err.value)["hint"]
+
+    def test_a_google_identity_fault_is_named(self, creds):
+        fault = _Resp(400, {"Errors": [{"Code": 0, "ErrorCode": "GoogleAccountIsRequired", "Message": "x"}]})
+        with patch("requests.request", side_effect=[fault]), pytest.raises(MicrosoftAdsAuthError) as err:
+            client.ms_request(_config(), "customer", "User/Query", {})
+        assert err.value.error_code == "google_identity" and creds.refreshes == 0
 
     def test_report_runner_polls_and_parses(self, creds):
         responses = iter([
@@ -573,9 +606,14 @@ class TestWrites:
             preview = write.draft_microsoft_status(_config(), action="pause", entity_type="keyword", entity_id="101")
         assert preview["platform"] == "microsoft"
         changes = preview["changes"]
-        assert changes["name"] == "drain cleaning [Phrase]"
-        assert changes["ad_group_id"] == "11" and changes["campaign_id"] == "500100200"
+        assert changes["entity_name"] == "drain cleaning [Phrase]"
         assert changes["current_status"] == "Active" and changes["target_status"] == "Paused"
+        assert changes["ad_group_name"] == "Drains" and changes["campaign_name"] == "Acme Plumbing - Search"
+        # The ids the apply needs stay out of what the person approves.
+        plan = preview_store.get_plan(preview["plan_id"])
+        assert not {"ad_group_id", "campaign_id", "ad_account_id", "customer_id"} & set(changes)
+        assert plan.apply_only_payload["ad_group_id"] == "11"
+        assert plan.apply_only_payload["campaign_id"] == "500100200"
 
     def test_enable_warns_about_paused_parent(self):
         _, _, ctx = _fake_api()
@@ -901,7 +939,7 @@ class TestReviewFindingsRoundTwo:
         assert result["status"] == "BLOCKED" and not [c for c in calls if c[3] == "PUT"]
 
     def test_status_dialog_shows_the_target_status(self):
-        # Finding 2: the requested status must not hide behind "more fields".
+        # The question and the status change lead; no ids or duplicate names follow.
         from adloop.safety.approval import confirmation_message
 
         _, _, ctx = _fake_api()
@@ -909,8 +947,9 @@ class TestReviewFindingsRoundTwo:
             preview = write.draft_microsoft_status(_config(), action="pause", entity_type="keyword", entity_id="101")
         message = confirmation_message(preview_store.get_plan(preview["plan_id"]))
         lines = message.splitlines()
-        assert "- target status: Paused" in lines and "- current status: Active" in lines
-        assert "more fields" not in message
+        assert lines[0] == 'AdLoop: set status "drain cleaning [Phrase]" in Microsoft Advertising?'
+        assert lines[1].startswith(f"Account {ACCOUNT} · Active → Paused")
+        assert "more fields" not in message and " id: " not in message
         assert sum(1 for l in lines if "drain cleaning [Phrase]" in l) == 1  # no duplicate name line
 
     def test_token_errors_never_echo_credentials(self):
@@ -936,27 +975,29 @@ class TestBrowserLogin:
 
         opened: list[str] = []
 
-        def listen(uri):
-            assert uri == "http://localhost:8080/callback"
+        def listen(uri, state):
+            assert uri == "http://localhost:51234/callback"
             query = parse_qs(urlsplit(opened[0]).query)
-            return {"code": "auth-code-1", "state": query["state"][0]}
+            assert state == query["state"][0]
+            return {"code": "auth-code-1", "state": state}
 
         with patch("adloop.microsoft_ads.auth._post_form", return_value=(200, {
             "access_token": "at", "refresh_token": "rt-new", "expires_in": 3600, "scope": auth.SCOPE,
         })) as post:
             path = auth.browser_login(self._cfg(tmp_path), login_hint="ads@contoso.onmicrosoft.com",
-                                      say=lambda _m: None, open_browser=opened.append, listen=listen)
+                                      say=lambda _m: None, open_browser=opened.append, listen=listen,
+                                      redirect_uri="http://localhost:51234/callback")
         url = urlsplit(opened[0])
         query = parse_qs(url.query)
         assert url.netloc == "login.microsoftonline.com" and url.path == "/common/oauth2/v2.0/authorize"
         assert query["client_id"] == ["app-client-id"] and query["response_type"] == ["code"]
-        assert query["redirect_uri"] == ["http://localhost:8080/callback"]
+        assert query["redirect_uri"] == ["http://localhost:51234/callback"]
         assert query["scope"] == [auth.SCOPE] and query["code_challenge_method"] == ["S256"]
         assert query["login_hint"] == ["ads@contoso.onmicrosoft.com"] and query["prompt"] == ["select_account"]
         form = post.call_args.args[1]
         assert post.call_args.args[0].endswith("/common/oauth2/v2.0/token")
         assert form["grant_type"] == "authorization_code" and form["code"] == "auth-code-1"
-        assert form["redirect_uri"] == "http://localhost:8080/callback"
+        assert form["redirect_uri"] == "http://localhost:51234/callback"
         # The verifier sent at the token step matches the challenge sent at authorize.
         challenge = base64.urlsafe_b64encode(hashlib.sha256(form["code_verifier"].encode()).digest()).decode().rstrip("=")
         assert challenge == query["code_challenge"][0]
@@ -966,19 +1007,17 @@ class TestBrowserLogin:
     def test_state_mismatch_and_provider_errors(self, tmp_path):
         with patch("adloop.microsoft_ads.auth._post_form") as post, pytest.raises(MicrosoftAdsAuthError) as err:
             auth.browser_login(self._cfg(tmp_path), say=lambda _m: None, open_browser=lambda _u: None,
-                               listen=lambda _u: {"code": "c", "state": "forged"})
+                               listen=lambda _u, _s: {"code": "c", "state": "forged"})
         assert err.value.error_code == "state_mismatch" and not post.called
         with pytest.raises(MicrosoftAdsAuthError) as err:
             auth.browser_login(self._cfg(tmp_path), say=lambda _m: None, open_browser=lambda _u: None,
-                               listen=lambda _u: {"error": "access_denied",
+                               listen=lambda _u, _s: {"error": "access_denied",
                                                   "error_description": "AADSTS530035: blocked by security defaults"})
         assert err.value.error_code == "access_denied" and "530035" in str(err.value)
 
     def test_refused_code_redacts_it(self, tmp_path):
-        from urllib.parse import parse_qs, urlsplit
-
         opened: list[str] = []
-        listen = lambda _u: {"code": "secret-code-123", "state": parse_qs(urlsplit(opened[0]).query)["state"][0]}  # noqa: E731
+        listen = lambda _u, state: {"code": "secret-code-123", "state": state}  # noqa: E731
         echo = {"error": "invalid_grant", "error_description": "code secret-code-123 was already redeemed"}
         with patch("adloop.microsoft_ads.auth._post_form", return_value=(400, echo)), \
                 pytest.raises(MicrosoftAdsAuthError) as err:
@@ -1010,6 +1049,51 @@ class TestBrowserLogin:
                 _t.sleep(0.05)
         worker.join(timeout=10)
         assert got == {"code": "abc", "state": "xyz"} and "Microsoft Advertising sign-in" in response.text
+
+    def test_real_sign_in_listens_on_a_free_port_until_the_state_matches(self, tmp_path):
+        import threading
+        from urllib.parse import parse_qs, urlsplit
+
+        import requests
+
+        opened: list[str] = []
+        ready = threading.Event()
+
+        def open_browser(url):
+            opened.append(url)
+            ready.set()
+
+        result: dict = {}
+        with patch("adloop.microsoft_ads.auth._post_form", return_value=(200, {
+            "access_token": "at", "refresh_token": "rt-new", "expires_in": 3600})) as post:
+            worker = threading.Thread(target=lambda: result.update(path=auth.browser_login(
+                self._cfg(tmp_path), say=lambda _m: None, open_browser=open_browser)))
+            worker.start()
+            assert ready.wait(10)
+            query = parse_qs(urlsplit(opened[0]).query)
+            redirect = query["redirect_uri"][0]
+            port = urlsplit(redirect).port
+            assert redirect == f"http://localhost:{port}/callback" and port not in (None, 8080)
+            local = redirect.replace("localhost", "127.0.0.1")
+            stray = requests.get(f"{local}?code=forged&state=other", timeout=5)
+            real = requests.get(f"{local}?code=good&state={query['state'][0]}", timeout=5)
+            worker.join(timeout=10)
+        assert stray.status_code == 400 and real.status_code == 200
+        form = post.call_args.args[1]
+        assert form["code"] == "good" and form["redirect_uri"] == redirect
+        assert json.loads(result["path"].read_text())["refresh_token"] == "rt-new"
+
+    def test_the_token_file_is_never_written_through_a_planted_file(self, tmp_path):
+        target = tmp_path / "ms_token.json"
+        planted = tmp_path / "elsewhere.json"
+        planted.write_text("{}")
+        # A stale or planted temp file at the old fixed name is left alone.
+        (tmp_path / "ms_token.json.tmp").symlink_to(planted)
+        auth.write_token_file(target, {"refresh_token": "rt"})
+        assert json.loads(target.read_text()) == {"refresh_token": "rt"}
+        assert planted.read_text() == "{}"
+        assert stat.S_IMODE(os.stat(target).st_mode) == 0o600
+        assert not [f for f in tmp_path.iterdir() if f.name.startswith(".ms_token.json.")]
 
     def test_cli_defaults_to_the_browser_and_keeps_device_code(self, tmp_path, monkeypatch, capsys):
         import adloop

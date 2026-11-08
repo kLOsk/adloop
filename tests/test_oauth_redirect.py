@@ -92,3 +92,33 @@ def test_a_real_redirect_behind_a_trickling_connection_is_served(monkeypatch):
     stop.set()
     assert result == {"code": "c1", "state": "s1"}
     assert elapsed < 2.0
+
+
+def _get(port: int, query: str) -> bytes:
+    sock = _connect(port)
+    sock.sendall(f"GET /callback?{query} HTTP/1.1\r\nHost: localhost\r\n\r\n".encode())
+    data = sock.recv(4096)
+    sock.close()
+    return data
+
+
+def test_a_request_with_another_state_is_answered_and_ignored():
+    port = _free_port()
+
+    def browser():
+        time.sleep(0.1)
+        stray = _get(port, "code=forged&state=other")
+        assert stray.startswith((b"HTTP/1.0 400", b"HTTP/1.1 400"))
+        _get(port, "code=good&state=mine")
+
+    threading.Thread(target=browser, daemon=True).start()
+    started = time.monotonic()
+    result = listen_once(f"http://127.0.0.1:{port}/callback", 5.0, provider="Test", state="mine")
+    assert result == {"code": "good", "state": "mine"}
+    assert time.monotonic() - started < 3.0
+
+
+def test_the_listener_picks_a_free_port_and_names_it():
+    with oauth_redirect.RedirectListener(host="127.0.0.1", path="/callback") as listener:
+        assert listener.port > 0
+        assert listener.redirect_uri == f"http://127.0.0.1:{listener.port}/callback"

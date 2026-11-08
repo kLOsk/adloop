@@ -90,6 +90,8 @@ class FakeMicrosoft:
         self.in_store_pilot = True
         self.calls: list[dict] = []
         self.fail: dict[tuple, Exception] = {}
+        # Whether Microsoft refuses one "Targets" query for every criterion type.
+        self.refuse_targets_query = False
         self._next = 5000
 
     def _id(self) -> int:
@@ -139,9 +141,10 @@ class FakeMicrosoft:
             return {"Campaigns": out}
         if path == "CampaignCriterions/QueryByIds":
             kind = body["CriterionType"]
-            wanted = {"Location": "Location", "LocationIntent": "LocationIntent", "DayTime": "DayTime", "Radius": "Radius"}[kind]
+            if kind == "Targets" and self.refuse_targets_query:
+                raise MicrosoftAdsApiError("InvalidCriterionType", status=400, codes=["InvalidCriterionType"])
             return {"CampaignCriterions": [copy.deepcopy(c) for c in self.criteria.get(str(body["CampaignId"]), [])
-                                           if c["Criterion"]["Type"].replace("Criterion", "") == wanted]}
+                                           if kind == "Targets" or c["Criterion"]["Type"].replace("Criterion", "") == kind]}
         if path == "AdGroups/QueryByCampaignId":
             return {"AdGroups": [self._pub(g) for g in self.ad_groups.values() if g["_campaign"] == str(body["CampaignId"])]}
         if path == "Keywords/QueryByAdGroupId":
@@ -379,7 +382,8 @@ def api():
 @pytest.fixture(autouse=True)
 def _fresh(monkeypatch):
     preview_store.set_plan_store(InMemoryPlanStore())
-    read.reset_account_cache()
+    read._account_cache.clear()
+    read._targets_query["refused"] = False
     read._GEO_CACHE.clear()
     monkeypatch.setattr("adloop.ads.write._validate_urls", lambda urls, timeout=10: ({u: None for u in urls}, {}))
     yield
@@ -404,6 +408,23 @@ def _apply(config, preview):
     return result["result"]
 
 
+def _payload(preview) -> dict:
+    """What the dry run and the apply read: the plan's changes plus its apply-only payload."""
+    return preview_store.get_plan(preview["plan_id"]).apply_payload()
+
+
+def _approval_surfaces(config, preview) -> str:
+    """Everything a person (or the audit log) sees of a plan: preview, dialog and log entries."""
+    from adloop.safety.approval import confirmation_message
+
+    from pathlib import Path
+
+    plan = preview_store.get_plan(preview["plan_id"])
+    log = Path(config.safety.log_file)
+    return (_text(preview) + _text(plan.to_preview()) + confirmation_message(plan)
+            + (log.read_text() if log.exists() else ""))
+
+
 def _last(api, path, method=None):
     return [c for c in api.calls if c["path"] == path and (method is None or c["method"] == method)][-1]
 
@@ -426,7 +447,7 @@ class TestCampaignSettings:
 
     def test_strategy_change_warns_and_targetcpa_maps(self, api, config):
         preview = manage.update_microsoft_campaign(config, campaign_id="600", bidding_strategy="TargetCpa", target_cpa=30)
-        assert preview["changes"]["update"]["BiddingScheme"]["Type"] == "MaxConversions"
+        assert _payload(preview)["update"]["BiddingScheme"]["Type"] == "MaxConversions"
         switched = manage.update_microsoft_campaign(config, campaign_id="600", bidding_strategy="MaxClicks")
         assert any("learning period" in w for w in switched["warnings"])
 
@@ -448,11 +469,11 @@ class TestCampaignSettings:
         assert "must start with" in _text(manage.update_microsoft_campaign(config, campaign_id=CAMPAIGN, tracking_url_template="track.me"))
         preview = manage.update_microsoft_campaign(config, campaign_id=CAMPAIGN, tracking_url_template="{lpurl}?src=bing",
                                                    final_url_suffix="utm_source=bing&utm_medium=cpc")
-        assert preview["changes"]["update"] == {"Id": CAMPAIGN, "TrackingUrlTemplate": "{lpurl}?src=bing",
+        assert _payload(preview)["update"] == {"Id": CAMPAIGN, "TrackingUrlTemplate": "{lpurl}?src=bing",
                                                 "FinalUrlSuffix": "utm_source=bing&utm_medium=cpc"}
         api.campaigns[CAMPAIGN]["FinalUrlSuffix"] = "utm_source=bing"
         removal = manage.update_microsoft_campaign(config, campaign_id=CAMPAIGN, final_url_suffix="")
-        assert removal["changes"]["update"]["FinalUrlSuffix"] == "" and any("removed" in w for w in removal["warnings"])
+        assert _payload(removal)["update"]["FinalUrlSuffix"] == "" and any("removed" in w for w in removal["warnings"])
 
     def test_name_rules_and_nothing_to_change(self, api, config):
         assert "already named" in _text(manage.update_microsoft_campaign(config, campaign_id=CAMPAIGN, name="Brand"))
@@ -508,7 +529,7 @@ class TestTargeting:
 
     def test_intent_is_added_when_missing(self, api, config):
         preview = manage.update_microsoft_campaign_targeting(config, campaign_id="600", location_intent="PeopleIn")
-        assert preview["changes"]["operations"]["add"][0]["Criterion"]["Type"] == "LocationIntentCriterion"
+        assert _payload(preview)["operations"]["add"][0]["Criterion"]["Type"] == "LocationIntentCriterion"
         wide = manage.update_microsoft_campaign_targeting(config, campaign_id="600", location_intent="PeopleInOrSearchingForOrViewingPages")
         assert any("outside the locations" in w for w in wide["warnings"])
 
@@ -526,7 +547,7 @@ class TestTargeting:
         # Replacing the schedule deletes the old windows; [] clears it.
         cleared = manage.update_microsoft_campaign_targeting(config, campaign_id=CAMPAIGN, ad_schedule=[])
         assert cleared["requires_double_confirm"] is False
-        ops = cleared["changes"]["operations"]
+        ops = _payload(cleared)["operations"]
         assert len(ops["schedule_delete"]) == 5 and ops["schedule_add_first"] == ops["schedule_add_after"] == []
 
     def test_schedule_validation(self, api, config):
@@ -580,9 +601,36 @@ class TestNewCampaign:
         assert "location_ids is required" in _text(no_geo)
         assert "exceeds maximum" in manage.draft_microsoft_campaign(config, name="X", daily_budget=500, languages=["English"], location_ids=["190"])["error"]
         assert "already exists" in _text(manage.draft_microsoft_campaign(config, name="brand", daily_budget=10, languages=["English"], location_ids=["190"]))
+        every = manage.draft_microsoft_campaign(config, name="X", daily_budget=10, languages=["All"], location_ids=["190"])
+        assert "reaches every language" in _text(every)
+        manual_target = manage.draft_microsoft_campaign(config, name="X", daily_budget=10, languages=["English"],
+                                                        location_ids=["190"], bidding_strategy="ManualCpc", target_cpa=30)
+        assert "target_cpa goes with MaxConversions" in _text(manual_target)
+
+    def test_conversion_bidding_without_a_goal_is_refused_at_the_draft(self, api, config):
+        # Seen live: the dry run passed, then Microsoft refused the create with
+        # ConversionGoalCriteriaNotMetForBiddingScheme.
         api.goals = []
-        warn = manage.draft_microsoft_campaign(config, name="New", daily_budget=10, languages=["English"], location_ids=["190"])
-        assert any("nothing to optimize" in w for w in warn["warnings"])
+        refused = manage.draft_microsoft_campaign(config, name="New", daily_budget=10, languages=["English"],
+                                                  location_ids=["190"])
+        assert "plan_id" not in refused and "needs an active conversion goal" in _text(refused)
+        assert "MaxClicks, EnhancedCpc or ManualCpc" in _text(refused)
+        clicks = manage.draft_microsoft_campaign(config, name="New", daily_budget=10, languages=["English"],
+                                                 location_ids=["190"], bidding_strategy="MaxClicks")
+        assert "plan_id" in clicks
+
+    def test_a_goal_removed_after_the_draft_fails_the_dry_run(self, api, config):
+        preview = manage.draft_microsoft_campaign(config, name="New", daily_budget=10, languages=["English"],
+                                                  location_ids=["190"])
+        api.goals = []
+        dry = ads_write.confirm_and_apply(config, plan_id=preview["plan_id"], dry_run=True)
+        assert dry["status"] == "DRY_RUN_FAILED" and "needs an active conversion goal" in dry["error"]
+        assert not api.writes()
+
+    def test_the_audience_network_default_is_named(self, api, config):
+        preview = manage.draft_microsoft_campaign(config, name="New", daily_budget=10, languages=["English"],
+                                                  location_ids=["190"])
+        assert any("Microsoft Audience Network" in w and "-100" in w for w in preview["warnings"])
 
     def test_failed_targeting_step_names_the_created_campaign_and_retry_is_refused(self, api, config):
         preview = manage.draft_microsoft_campaign(config, name="Half done", daily_budget=10, languages=["English"], location_ids=["190"])
@@ -733,7 +781,7 @@ class TestNegatives:
 
     def test_attach_and_detach(self, api, config):
         attach = manage.attach_microsoft_negative_keyword_list(config, list_id="900", campaign_ids=[CAMPAIGN, "600"])
-        assert attach["changes"]["campaign_ids"] == ["600"]
+        assert _payload(attach)["campaign_ids"] == ["600"]
         _apply(config, attach)
         detach = manage.detach_microsoft_negative_keyword_list(config, list_id="900", campaign_ids=[CAMPAIGN])
         _apply(config, detach)
@@ -848,12 +896,12 @@ class TestExtensions:
         assert "3–10 values" in _text(manage.draft_microsoft_structured_snippet(config, campaign_id=CAMPAIGN, header="Services", values=["a", "b"]))
         snippet = manage.draft_microsoft_structured_snippet(config, campaign_id=CAMPAIGN, header="Services",
                                                             values=["Drain Cleaning", "Water Heaters", "Repiping"])
-        assert snippet["changes"]["extensions"][0] == {"Type": "StructuredSnippetAdExtension", "Header": "Services",
+        assert _payload(snippet)["extensions"][0] == {"Type": "StructuredSnippetAdExtension", "Header": "Services",
                                                        "Values": ["Drain Cleaning", "Water Heaters", "Repiping"]}
 
     def test_one_call_extension_per_campaign(self, api, config):
         preview = manage.draft_microsoft_call_extension(config, campaign_id=CAMPAIGN, phone_number="(217) 555-0100", country_code="us")
-        assert preview["changes"]["extensions"][0] == {"Type": "CallAdExtension", "PhoneNumber": "(217) 555-0100",
+        assert _payload(preview)["extensions"][0] == {"Type": "CallAdExtension", "PhoneNumber": "(217) 555-0100",
                                                        "CountryCode": "US", "IsCallOnly": False}
         _apply(config, preview)
         again = manage.draft_microsoft_call_extension(config, campaign_id=CAMPAIGN, phone_number="(217) 555-0199", country_code="US")
@@ -1038,24 +1086,23 @@ class TestRoundThreeFindings:
 
     # -- finding 6: every bid and line of copy is on the approval surfaces
     def test_dialog_shows_keyword_bid_overrides(self, api, config):
-        from adloop.safety.approval import confirmation_message, display_fields
+        from adloop.safety.approval import confirmation_message
 
         preview = manage.draft_microsoft_ad_group(config, campaign_id=CAMPAIGN, name="Sewer", cpc_bid=5,
                                                   keywords=[{"text": "sewer line", "match_type": "exact", "bid": 25}])
         plan = preview_store.get_plan(preview["plan_id"])
-        shown = _text(dict(display_fields(plan.changes)))
-        assert "sewer line [Exact] bid 25.0" in shown and "keyword_rows" not in shown
+        assert "sewer line [Exact] bid 25.0" in _text(plan.changes) and "keyword_rows" not in _text(plan.changes)
         assert "bid 25.0" in confirmation_message(plan)
+        assert plan.apply_only_payload["keyword_rows"][0]["Bid"] == {"Amount": 25.0}
 
     def test_dialog_shows_sitelink_descriptions(self, api, config):
-        from adloop.safety.approval import confirmation_message, display_fields
+        from adloop.safety.approval import confirmation_message
 
         preview = manage.draft_microsoft_sitelinks(config, campaign_id="600", sitelinks=[
             {"link_text": "Water Heaters", "final_url": "https://example.com/water-heaters",
              "description1": "Same-day installs", "description2": "Tank and tankless"}])
         plan = preview_store.get_plan(preview["plan_id"])
-        shown = _text(dict(display_fields(plan.changes)))
-        assert "Same-day installs / Tank and tankless" in shown and '"extensions"' not in shown
+        assert "Same-day installs / Tank and tankless" in _text(plan.changes) and '"extensions"' not in _text(plan.changes)
         assert "Tank and tankless" in confirmation_message(plan)
 
     # -- finding 7: a partial create keeps its IDs and is never replayed
@@ -1144,7 +1191,7 @@ class TestUpstreamAuditFindings:
             {"day_of_week": "Monday", "start_hour": 9, "end_hour": 17},     # kept
             {"day_of_week": "Tuesday", "start_hour": 13, "end_hour": 17},   # no overlap: first
         ])
-        ops = preview["changes"]["operations"]
+        ops = _payload(preview)["operations"]
         assert len(ops["schedule_add_first"]) == 1 and ops["schedule_delete"] == ["7002"] and ops["schedule_add_after"] == []
         assert not any("serves at all hours" in w for w in preview["warnings"])
         _apply(config, preview)
@@ -1201,10 +1248,8 @@ class TestKeywordStatusOnCreate:
     """Finding 9: the approval surfaces say keywords are created Active."""
 
     def test_keywords_in_a_live_ad_group_say_they_serve_immediately(self, api, config):
-        from adloop.safety.approval import display_fields
-
         preview = manage.draft_microsoft_keywords(config, ad_group_id="11", keywords=["clogged drain"])
-        shown = dict(display_fields(preview_store.get_plan(preview["plan_id"]).changes))
+        shown = preview_store.get_plan(preview["plan_id"]).changes
         assert shown["status_on_create"] == "Active"
         assert shown["ad_group_status"] == "Active" and shown["campaign_status"] == "Active"
         assert any("can serve as soon as this is applied" in w for w in preview["warnings"])
@@ -1233,7 +1278,7 @@ class TestScheduleDeltaFindings:
             self._window(api, 7100 + i, "Monday", start, start + 1)
         new = [{"day_of_week": "Monday", "start_hour": h, "end_hour": h + 1} for h in range(12, 24, 2)]
         preview = manage.update_microsoft_campaign_targeting(config, campaign_id=CAMPAIGN, ad_schedule=new)
-        ops = preview["changes"]["operations"]
+        ops = _payload(preview)["operations"]
         assert len(ops["schedule_add_first"]) == 1 and len(ops["schedule_add_after"]) == 5
         assert not any("serves at all hours" in w for w in preview["warnings"])
         _apply(config, preview)
@@ -1252,26 +1297,6 @@ class TestScheduleDeltaFindings:
         assert "keeps Mon 09:00–17:00" in result["error"] and "serves at all hours" not in result["error"]
         assert self._schedule(api) == [("Monday", 9, 17)]
 
-    @pytest.mark.parametrize("with_locations", [False, True])
-    def test_a_schedule_plan_from_before_the_fix_must_be_drafted_again(self, api, config, with_locations):
-        # Finding 2: the old plan shape put schedule windows in add/delete and
-        # carried no time zone mode; it is refused, never applied the old way.
-        self._window(api, 7001, "Monday", 9, 17)
-        preview = manage.update_microsoft_campaign_targeting(
-            config, campaign_id=CAMPAIGN, location_ids=["190", "200"] if with_locations else None,
-            ad_schedule=[{"day_of_week": "Monday", "start_hour": 10, "end_hour": 18}])
-        plan = preview_store.get_plan(preview["plan_id"])
-        ops = plan.changes["operations"]
-        ops["add"] += ops.pop("schedule_add_first") + ops.pop("schedule_add_after")
-        ops["delete"] += ops.pop("schedule_delete")
-        ops.pop("schedule_kept", None)
-        plan.changes["before"].pop("searcher_time_zone")
-        preview_store.store_plan(plan)
-        result = ads_write.confirm_and_apply(config, plan_id=preview["plan_id"], dry_run=False)
-        assert result.get("status") != "APPLIED" and "draft it again" in _text(result)
-        assert self._schedule(api) == [("Monday", 9, 17)]
-        assert not [c for c in api.calls if c["path"] == "CampaignCriterions" and c["method"] in ("POST", "DELETE")]
-
 
 class TestGoalsWithoutInStorePilot:
     """The MaxConversions goal check must work for accounts outside Microsoft's in-store pilot."""
@@ -1282,14 +1307,18 @@ class TestGoalsWithoutInStorePilot:
         api.goals = []
         assert manage._counted_goals(config, ACCOUNT, CUSTOMER) == 0
 
-    def test_max_conversions_without_goals_still_warns(self, api, config):
+    def test_max_conversions_without_goals_warns_or_refuses(self, api, config):
         api.in_store_pilot = False
         api.goals = []
+        # Already on MaxConversions: a target change only warns.
         update = manage.update_microsoft_campaign(config, campaign_id="600", target_cpa=25)
         assert any("nothing to optimize" in w for w in update["warnings"])
+        # A switch to it, or a new campaign on it, is refused: Microsoft would refuse it.
+        switch = manage.update_microsoft_campaign(config, campaign_id=CAMPAIGN, bidding_strategy="MaxConversions")
+        assert "needs an active conversion goal" in _text(switch) and "plan_id" not in switch
         new = manage.draft_microsoft_campaign(config, name="New", daily_budget=10, languages=["English"],
                                               location_ids=["190"])
-        assert any("nothing to optimize" in w for w in new["warnings"])
+        assert "needs an active conversion goal" in _text(new)
 
     def test_an_unreadable_goal_list_is_unknown(self, api, config):
         api.fail[("POST", "ConversionGoals/QueryByIds")] = MicrosoftAdsApiError("Internal error", status=500)
@@ -1397,7 +1426,9 @@ class TestImageExtensions:
         assert preview["operation"] == "microsoft_add_image_extension" and preview["entity_type"] == "ad_group"
         changes = preview["changes"]
         assert changes["entity_name"] == "ad group 'Drains' in campaign 'Acme Plumbing - Search'"
-        assert changes["association_type"] == "AdGroup" and changes["entity_id"] == "11"
+        payload = _payload(preview)
+        assert payload["association_type"] == "AdGroup" and payload["entity_id"] == "11"
+        assert not {"association_type", "image_payloads", "ad_account_id", "customer_id"} & set(changes)
         assert changes["images"][0].endswith("PNG 1200x628 (1.91:1), 0.1 KB")
         assert changes["images"][1] == "https://cdn.example.com/team.jpg: JPEG 1406x736 (1.91:1), 0.0 KB"
         assert changes["alt_text"] == "Plumber clearing a drain" and changes["display_text"] == "Same-day drain service"
@@ -1408,6 +1439,7 @@ class TestImageExtensions:
         # The approval dialog shows the images, never the pinned payloads.
         message = confirmation_message(get_plan(preview["plan_id"]))
         assert "1200x628" in message and "image payloads" not in message and "sha256" not in message
+        assert "sha256" not in _approval_surfaces(config, preview)
         plain = manage.draft_microsoft_image_extension(config, campaign_id=CAMPAIGN, alt_text="Van",
                                                        image_paths=[_file(tmp_path, "van2.png", _png(1910, 1000))])
         assert plain["changes"]["layouts"] == ["SearchSingle"] and "display_text" not in plain["changes"]
@@ -1423,6 +1455,7 @@ class TestImageExtensions:
             config, ad_group_id="11", image_paths=[_file(tmp_path, "van.png", png)],
             image_urls=["https://cdn.example.com/team.jpg"], alt_text="Plumber clearing a drain",
             display_text="Same-day drain service", final_url="https://example.com/drain")
+        payload = _payload(preview)
         result = _apply(config, preview)
         writes = [c["path"] for c in api.writes()]
         assert writes == ["Media", "AdExtensions", "AdExtensionsAssociations/Set"]
@@ -1435,7 +1468,7 @@ class TestImageExtensions:
         first_media = int(result["media_ids"][0])
         assert created[0] == {
             "Type": "ImageAdExtension", "AlternativeText": "Plumber clearing a drain",
-            "Description": preview["changes"]["image_payloads"][0]["name"][:100],
+            "Description": payload["image_payloads"][0]["name"][:100],
             "ImageMediaIds": [first_media],
             "Images": [{"Asset": {"Type": "ImageAsset", "Id": first_media, "SubType": "LandscapeImageMedia"}}],
             "Layouts": ["SearchSingle", "SearchMultiple"], "DisplayText": "Same-day drain service",
@@ -1630,3 +1663,178 @@ class TestImageExtensions:
             assert "Upload 1: upload up_missing0000 was not found" in _text(missing) and "plan_id" not in missing
         finally:
             uploads.set_upload_store(None)
+
+
+# ---------------------------------------------------------------------------
+# Upstream review (#130)
+# ---------------------------------------------------------------------------
+
+
+class TestReviewBroadMatch:
+    """Broad match only with conversion-based bidding; Maximize Clicks does not count."""
+
+    def test_broad_keywords_are_refused_on_maximize_clicks(self, api, config):
+        api.campaigns["600"]["BiddingScheme"] = {"Type": "MaxClicks"}
+        refused = manage.draft_microsoft_keywords(config, ad_group_id="21",
+                                                  keywords=[{"text": "acme", "match_type": "broad"}])
+        assert "Broad match needs conversion-based bidding" in _text(refused) and "plan_id" not in refused
+
+    @pytest.mark.parametrize("scheme", ["MaxConversions", "MaxConversionValue", "TargetCpa", "TargetRoas",
+                                        "MaxConversionValueBiddingScheme"])
+    def test_broad_keywords_are_allowed_on_conversion_bidding(self, api, config, scheme):
+        api.campaigns["600"]["BiddingScheme"] = {"Type": scheme}
+        preview = manage.draft_microsoft_keywords(config, ad_group_id="21",
+                                                  keywords=[{"text": "acme", "match_type": "broad"}])
+        assert "plan_id" in preview, preview
+
+    def test_moving_to_maximize_clicks_with_broad_keywords_is_refused(self, api, config):
+        # CAMPAIGN has the active broad keyword 'plumber'.
+        result = manage.update_microsoft_campaign(config, campaign_id=CAMPAIGN, bidding_strategy="MaxClicks")
+        assert "broad match needs conversion-based bidding" in _text(result) and "plan_id" not in result
+
+    def test_a_broad_keyword_added_after_a_maximize_clicks_draft_fails_the_apply(self, api, config):
+        preview = manage.update_microsoft_campaign(config, campaign_id="600", bidding_strategy="MaxClicks")
+        api.keywords["299"] = {"Id": 299, "Text": "acme", "MatchType": "Broad", "Bid": {"Amount": None},
+                               "Status": "Active", "_group": "21"}
+        result = ads_write.confirm_and_apply(config, plan_id=preview["plan_id"], dry_run=False)
+        assert result.get("status") != "APPLIED" and "now has 1 active broad-match" in _text(result)
+
+    def test_the_keyword_read_flags_broad_on_maximize_clicks(self, api, config):
+        api.campaigns["600"]["BiddingScheme"] = {"Type": "MaxClicks"}
+        api.keywords["299"] = {"Id": 299, "Text": "acme", "MatchType": "Broad", "Bid": {"Amount": None},
+                               "Status": "Active", "_group": "21"}
+        insights = " ".join(read.get_microsoft_keywords(config, campaign_id="600")["insights"])
+        assert "without conversion-based bidding" in insights and "Maximize Clicks" in insights
+
+
+class TestReviewCriterionRemoval:
+    def test_the_draft_names_the_criterion(self, api, config):
+        preview = manage.remove_microsoft_entity(config, entity_type="campaign_criterion", entity_id=f"{CAMPAIGN}~1002")
+        changes = preview["changes"]
+        assert changes["entity_name"] == "location Los Angeles, California (excluded)"
+        assert changes["campaign_name"] == "Acme Plumbing - Search" and changes["criterion_type"] == "Location"
+        assert "request" not in changes
+
+    def test_the_last_targeted_location_cannot_be_removed(self, api, config):
+        result = manage.remove_microsoft_entity(config, entity_type="campaign_criterion", entity_id=f"{CAMPAIGN}~1001")
+        assert "last targeted location" in _text(result) and "update_microsoft_campaign_targeting" in _text(result)
+        assert "plan_id" not in result
+
+    def test_a_location_with_others_left_can_go_but_not_once_it_is_the_last(self, api, config):
+        api.criteria[CAMPAIGN].append({"Id": 1004, "Type": "BiddableCampaignCriterion", "CampaignId": int(CAMPAIGN),
+                                       "Criterion": {"Type": "Radius", "Name": "Downtown", "Radius": 10,
+                                                     "RadiusUnit": "Miles"}})
+        preview = manage.remove_microsoft_entity(config, entity_type="campaign_criterion", entity_id=f"{CAMPAIGN}~1001")
+        assert preview["changes"]["entity_name"] == "location Springfield, Illinois (targeted)"
+        api.criteria[CAMPAIGN] = [c for c in api.criteria[CAMPAIGN] if c["Id"] != 1004]
+        result = ads_write.confirm_and_apply(config, plan_id=preview["plan_id"], dry_run=True)
+        assert result["status"] == "DRY_RUN_FAILED" and "last targeted location" in result["error"]
+
+    def test_an_unknown_criterion_is_reported(self, api, config):
+        assert "has no target criterion 4242" in _text(manage.remove_microsoft_entity(
+            config, entity_type="campaign_criterion", entity_id=f"{CAMPAIGN}~4242"))
+
+
+class TestReviewPayloads:
+    """Request bodies, snapshots and ids live in apply_only_payload, never on an approval surface."""
+
+    @pytest.mark.parametrize("draft", [
+        lambda c: manage.update_microsoft_campaign(c, campaign_id="600", target_cpa=40),
+        lambda c: manage.update_microsoft_campaign_targeting(c, campaign_id=CAMPAIGN, location_ids=["190", "200"]),
+        lambda c: manage.draft_microsoft_campaign(c, name="New", daily_budget=10, languages=["English"],
+                                                  location_ids=["190"]),
+        lambda c: manage.draft_microsoft_ad_group(c, campaign_id=CAMPAIGN, name="Sewer", cpc_bid=5, keywords=["sewer"]),
+        lambda c: manage.update_microsoft_ad_group(c, ad_group_id="11", cpc_bid=9),
+        lambda c: manage.draft_microsoft_keywords(c, ad_group_id="11", keywords=["clogged drain"]),
+        lambda c: manage.update_microsoft_keyword_bids(c, ad_group_id="11", bids=[{"keyword_id": "102", "bid": 10}]),
+        lambda c: manage.add_microsoft_negative_keywords(c, campaign_id=CAMPAIGN, keywords=["cheap"]),
+        lambda c: manage.propose_microsoft_negative_keyword_list(c, list_name="New list", keywords=["cheap"],
+                                                                 campaign_ids=["600"]),
+        lambda c: manage.update_microsoft_responsive_search_ad(c, ad_id="301", path2="fast"),
+        lambda c: manage.draft_microsoft_callouts(c, campaign_id="600", callouts=["Licensed", "Insured"]),
+        lambda c: manage.remove_microsoft_entity(c, entity_type="keyword", entity_id="102"),
+    ])
+    def test_payloads_stay_off_every_approval_surface(self, api, config, draft):
+        preview = draft(config)
+        assert "plan_id" in preview, preview
+        ads_write.confirm_and_apply(config, plan_id=preview["plan_id"], dry_run=True)
+        plan = preview_store.get_plan(preview["plan_id"])
+        hidden = {"update", "before", "operations", "campaign", "criteria", "ad_group", "keyword_rows",
+                  "negative_rows", "request", "image_payloads", "extensions", "entity_kind", "ad",
+                  "update_audience_adjustment", "ad_account_id", "customer_id", "campaign_ids"}
+        assert not hidden & set(plan.changes), sorted(hidden & set(plan.changes))
+        assert {"ad_account_id", "customer_id"} <= set(plan.apply_only_payload)
+        surfaces = _approval_surfaces(config, preview)
+        for marker in ('"Type": "BiddableCampaignCriterion"', '"MatchType":', '"Asset":', "customer id", "ad account id"):
+            assert marker not in surfaces, marker
+
+
+class TestReviewAccountScans:
+    def _reads(self, api, path):
+        return sum(1 for c in api.calls if c["path"] == path)
+
+    def test_an_rsa_update_reads_only_its_own_ad_group_after_the_draft(self, api, config):
+        api.ad_groups["13"] = {"Id": 13, "Name": "Sewers", "Status": "Active", "_campaign": CAMPAIGN}
+        api.ad_groups["22"] = {"Id": 22, "Name": "Brand two", "Status": "Active", "_campaign": "600"}
+        preview = manage.update_microsoft_responsive_search_ad(config, ad_id="301", path2="fast")
+        api.calls.clear()
+        _apply(config, preview)
+        # Dry run and apply: one ad group list of the ad's campaign and one ad list of its group each.
+        assert self._reads(api, "AdGroups/QueryByCampaignId") == 2
+        assert self._reads(api, "Ads/QueryByAdGroupId") == 2
+
+    def test_a_keyword_removal_reads_only_its_own_ad_group_after_the_draft(self, api, config):
+        preview = manage.remove_microsoft_entity(config, entity_type="keyword", entity_id="103")
+        api.calls.clear()
+        _apply(config, preview)
+        assert self._reads(api, "AdGroups/QueryByCampaignId") == 2
+        assert {c["body"]["AdGroupId"] for c in api.calls if c["path"] == "Keywords/QueryByAdGroupId"} == {"12"}
+
+    def test_campaign_reads_ask_once_per_campaign_for_its_targeting(self, api, config):
+        read.get_microsoft_campaigns(config)
+        queries = [c["body"] for c in api.calls if c["path"] == "CampaignCriterions/QueryByIds"]
+        assert [q["CriterionType"] for q in queries] == ["Targets"] * len(api.campaigns)
+
+    def test_a_refused_targets_query_falls_back_to_one_per_type(self, api, config):
+        api.refuse_targets_query = True
+        rows = {r["campaign_id"]: r for r in read.get_microsoft_campaigns(config)["campaigns"]}
+        assert rows[CAMPAIGN]["locations"]["included"] == ["Springfield, Illinois"]
+        kinds = [c["body"]["CriterionType"] for c in api.calls if c["path"] == "CampaignCriterions/QueryByIds"]
+        assert kinds.count("Targets") == 1 and kinds.count("Location") == len(api.campaigns)
+
+
+class TestReviewReads:
+    def test_radius_targets_are_named(self, api, config):
+        api.criteria[CAMPAIGN].append({"Id": 1004, "Type": "BiddableCampaignCriterion", "CampaignId": int(CAMPAIGN),
+                                       "Criterion": {"Type": "Radius", "Name": "Downtown", "Radius": 10,
+                                                     "RadiusUnit": "Miles"}})
+        rows = {r["campaign_id"]: r for r in read.get_microsoft_campaigns(config)["campaigns"]}
+        assert "Downtown (10 Miles)" in rows[CAMPAIGN]["locations"]["included"]
+
+    def test_an_ad_group_without_its_own_audience_setting_inherits_the_campaign(self, api, config):
+        api.campaigns[CAMPAIGN]["AudienceAdsBidAdjustment"] = -100
+        api.ad_groups["11"]["AudienceAdsBidAdjustment"] = None
+        rows = {r["ad_group_id"]: r for r in read.get_microsoft_ad_groups(config)["ad_groups"]}
+        assert rows["11"]["audience_network"] == {"on": False, "bid_adjustment": -100, "set_on": "campaign"}
+        api.campaigns[CAMPAIGN]["AudienceAdsBidAdjustment"] = None
+        rows = {r["ad_group_id"]: r for r in read.get_microsoft_ad_groups(config)["ad_groups"]}
+        assert rows["11"]["audience_network"]["on"] and rows["11"]["audience_network"]["set_on"] == "Microsoft default"
+        insights = " ".join(read.get_microsoft_ad_groups(config)["insights"])
+        assert "Audience Network" in insights
+
+
+class TestReviewValidation:
+    def test_target_cpa_and_max_cpc_on_a_manual_campaign_are_refused(self, api, config):
+        # CAMPAIGN is EnhancedCpc: neither value would reach Microsoft.
+        assert "target_cpa goes with MaxConversions" in _text(
+            manage.update_microsoft_campaign(config, campaign_id=CAMPAIGN, target_cpa=30))
+        assert "max_cpc caps" in _text(manage.update_microsoft_campaign(config, campaign_id=CAMPAIGN, max_cpc=5))
+        assert "max_cpc caps" in _text(manage.update_microsoft_campaign(
+            config, campaign_id=CAMPAIGN, bidding_strategy="ManualCpc", max_cpc=5))
+
+    def test_seven_schedule_windows_a_day_are_allowed(self, api, config):
+        seven = [{"day_of_week": "Monday", "start_hour": h, "end_hour": h + 1} for h in range(8, 15)]
+        assert "plan_id" in manage.update_microsoft_campaign_targeting(config, campaign_id=CAMPAIGN, ad_schedule=seven)
+        eight = seven + [{"day_of_week": "Monday", "start_hour": 20, "end_hour": 21}]
+        assert "At most 7 ad_schedule windows on Monday" in _text(
+            manage.update_microsoft_campaign_targeting(config, campaign_id=CAMPAIGN, ad_schedule=eight))

@@ -32,6 +32,13 @@ CONVERSION_GOAL_TYPES = _GOAL_TYPES_WITHOUT_IN_STORE + ", InStoreTransaction"
 # outside Microsoft's in-store pilot, which is almost all of them.
 _IN_STORE_PILOT_CODES = {"InStoreTransactionPilotNotEnabledForCustomer", "5359"}
 
+# Bid strategies that optimise for conversions (BiddingScheme Type without its
+# "BiddingScheme" suffix). Broad match is only safe under these: Maximize
+# Clicks and manual bids buy whatever traffic a loose match brings. TargetCpa
+# and TargetRoas are the older stand-alone schemes Microsoft folded into
+# MaxConversions and MaxConversionValue; campaigns can still carry them.
+CONVERSION_BASED_STRATEGIES = frozenset({"MaxConversions", "MaxConversionValue", "TargetCpa", "TargetRoas", "MaxRoas"})
+
 # Microsoft time zone names → IANA, for "today" in the account's zone. Reports
 # take Microsoft's own name (ReportTimeZone) directly. From Microsoft's time
 # zone mapping table (advertising/scripts/concepts/timezone-mapping), plus the
@@ -177,10 +184,6 @@ _account_cache: dict[str, dict] = {}
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
-
-
-def reset_account_cache() -> None:
-    _account_cache.clear()
 
 
 def resolve_account(config: AdLoopConfig, ad_account_id: str = "") -> str:
@@ -390,6 +393,42 @@ def _criterions(config: AdLoopConfig, account: str, customer: str, campaign_id: 
     return [c for c in payload.get("CampaignCriterions") or [] if isinstance(c, dict)]
 
 
+def criterion_kind(c: dict) -> str:
+    """'Location', 'Radius', 'DayTime', ...: reads name criteria without the 'Criterion' suffix."""
+    kind = str((c.get("Criterion") or {}).get("Type") or "")
+    return kind.removesuffix("Criterion")
+
+
+def is_negative(c: dict) -> bool:
+    return str(c.get("Type") or "").startswith("Negative")
+
+
+TARGET_KINDS = ("Location", "LocationIntent", "Radius", "DayTime")
+# One "Targets" query returns every target criterion of a campaign instead of
+# one call per type. If Microsoft ever refuses it, the per-type queries take
+# over for the rest of the process.
+_targets_query = {"refused": False}
+
+
+def target_criterions(config: AdLoopConfig, account: str, customer: str, campaign_id: str,
+                      kinds: tuple[str, ...] = TARGET_KINDS) -> dict[str, list[dict]]:
+    """A campaign's target criteria by kind, in one call where Microsoft allows it."""
+    if not _targets_query["refused"]:
+        try:
+            rows = _criterions(config, account, customer, campaign_id, "Targets")
+        except MicrosoftAdsApiError as exc:
+            if exc.status != 400:
+                raise
+            _targets_query["refused"] = True
+        else:
+            out: dict[str, list[dict]] = {k: [] for k in kinds}
+            for row in rows:
+                if criterion_kind(row) in out:
+                    out[criterion_kind(row)].append(row)
+            return out
+    return {k: _criterions(config, account, customer, campaign_id, k) for k in kinds}
+
+
 def _ad_groups(config: AdLoopConfig, account: str, customer: str, campaign_id: str) -> list[dict]:
     payload = campaign_request(
         config, "AdGroups/QueryByCampaignId", {"CampaignId": campaign_id},
@@ -445,13 +484,13 @@ def _location_summary(locations: list[dict], intent: list[dict], radius: list[di
     included, excluded = [], []
     for c in locations + radius:
         crit = c.get("Criterion") or {}
-        if crit.get("Type") == "RadiusCriterion":
+        if criterion_kind(c) == "Radius":
             label = f"{crit.get('Name') or 'radius'} ({crit.get('Radius')} {crit.get('RadiusUnit') or ''})".strip()
         else:
             label = crit.get("DisplayName") or str(crit.get("LocationId") or "")
             if crit.get("LocationType"):
                 label += f" ({crit.get('LocationType')})"
-        (excluded if c.get("Type") == "NegativeCampaignCriterion" else included).append(label)
+        (excluded if is_negative(c) else included).append(label)
     option = ""
     for c in intent:
         option = str((c.get("Criterion") or {}).get("IntentOption") or "")
@@ -494,12 +533,9 @@ def get_microsoft_campaigns(
     for c in _campaigns(config, account, customer, with_goals=True):
         targeting = None
         if include_targeting:
-            cid = str(c.get("Id"))
-            targeting = _location_summary(
-                _criterions(config, account, customer, cid, "Location"),
-                _criterions(config, account, customer, cid, "LocationIntent"),
-                _criterions(config, account, customer, cid, "Radius"),
-            )
+            found = target_criterions(config, account, customer, str(c.get("Id")),
+                                      ("Location", "LocationIntent", "Radius"))
+            targeting = _location_summary(found["Location"], found["LocationIntent"], found["Radius"])
         rows.append(campaign_summary(c, targeting))
 
     insights: list[str] = []
@@ -555,6 +591,7 @@ def get_microsoft_ad_groups(config: AdLoopConfig, *, ad_account_id: str = "", ca
     account, customer = meta["ad_account_id"], _customer(config, meta)
     rows = []
     for g, c in load_ad_groups(config, account, customer, campaign_id.strip()):
+        audience = audience_network(g, c)
         rows.append({
             "ad_group_id": str(g.get("Id")),
             "name": g.get("Name"),
@@ -566,6 +603,7 @@ def get_microsoft_ad_groups(config: AdLoopConfig, *, ad_account_id: str = "", ca
             "network": g.get("Network"),
             "language": g.get("Language"),
             "audience_ads_bid_adjustment": g.get("AudienceAdsBidAdjustment"),
+            "audience_network": audience,
             "start_date": _ms_date(g.get("StartDate")),
             "end_date": _ms_date(g.get("EndDate")),
         })
@@ -577,10 +615,7 @@ def get_microsoft_ad_groups(config: AdLoopConfig, *, ad_account_id: str = "", ca
             "(OwnedAndOperatedAndSyndicatedSearch); set OwnedAndOperatedOnly to keep ads on Bing, "
             "Yahoo and AOL only."
         )
-    audience = [
-        r for r in rows
-        if r["status"] == "Active" and r["audience_ads_bid_adjustment"] not in (None, -100)
-    ]
+    audience = [r for r in rows if r["status"] == "Active" and r["audience_network"]["on"]]
     if audience:
         insights.append(
             f"{len(audience)} active ad group(s) can show on the Microsoft Audience Network "
@@ -591,6 +626,19 @@ def get_microsoft_ad_groups(config: AdLoopConfig, *, ad_account_id: str = "", ca
         insights.append(f"{len(expired)} ad group(s) have passed their end date (Expired).")
     return {"ad_account_id": account, "currency": meta["currency"], "ad_groups": rows,
             "total_ad_groups": len(rows), "insights": insights}
+
+
+def audience_network(group: dict, campaign: dict) -> dict:
+    """Whether an ad group can show on the Microsoft Audience Network, and where that is set.
+
+    An ad group without its own AudienceAdsBidAdjustment inherits the
+    campaign's; -100 switches the Audience Network off, any other value
+    (or none at either level, Microsoft's default) leaves it on.
+    """
+    own, inherited = group.get("AudienceAdsBidAdjustment"), campaign.get("AudienceAdsBidAdjustment")
+    effective = own if own is not None else inherited
+    source = "ad group" if own is not None else "campaign" if inherited is not None else "Microsoft default"
+    return {"on": effective != -100, "bid_adjustment": effective, "set_on": source}
 
 
 def get_microsoft_keywords(
@@ -628,12 +676,13 @@ def get_microsoft_keywords(
     broad_manual = [
         r for r in rows
         if r["match_type"] == "Broad" and r["status"] == "Active"
-        and r["campaign_bidding"] in ("ManualCpc", "EnhancedCpc")
+        and r["campaign_bidding"] not in CONVERSION_BASED_STRATEGIES
     ]
     if broad_manual:
         insights.append(
-            f"{len(broad_manual)} active broad-match keyword(s) sit in manual-bid campaigns, the "
-            "combination that wastes the most spend; use phrase/exact or a conversion-based strategy."
+            f"{len(broad_manual)} active broad-match keyword(s) sit in campaigns without conversion-based "
+            "bidding (manual bids or Maximize Clicks), the combination that wastes the most spend; use "
+            "phrase/exact, or move the campaign to MaxConversions or MaxConversionValue."
         )
     return {"ad_account_id": account, "currency": meta["currency"], "keywords": rows,
             "total_keywords": len(rows), "insights": insights}
