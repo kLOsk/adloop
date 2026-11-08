@@ -25,8 +25,14 @@ You have access to AdLoop MCP tools that connect Google Ads, Reddit Ads and Goog
 | Tool | When to Use | Key Parameters |
 |------|-------------|----------------|
 | `get_account_summaries` | First-time discovery — find which GA4 properties exist | (none — uses config) |
-| `run_ga4_report` | Any analytics question: sessions, users, key events, page performance | `dimensions`, `metrics`, `date_range_start`, `date_range_end`, `limit`; optional `dimension_filter` / `metric_filter` (AND list of `{field, op, value}`), `order_by` (`[{field, desc}]`), `offset` (paging, see `next_offset`), `compare_start` + `compare_end` (period comparison) |
-| `run_realtime_report` | After code deploys — verify tracking fires correctly | `dimensions`, `metrics` |
+| `get_ga4_property` | The property's setup in one call: time zone, currency, standard or 360, linked Google Ads accounts, data streams with measurement IDs, data retention, key event count | `property_id` (falls back to config) |
+| `audit_ga4_property` | "Is my GA4 set up right?": retention, Ads link, streams that stopped sending, key events that never fire, Google signals, enhanced measurement, custom definition limits. Checks come back warn / info / ok | `property_id` |
+| `run_ga4_report` | Any analytics question: sessions, users, key events, page performance | `dimensions`, `metrics`, `date_range_start`, `date_range_end`, `limit`; optional `dimension_filter` / `metric_filter` (AND list of `{field, op, value}`, groups `{"any_of": [...]}` / `{"all_of": [...]}`), `order_by` (`[{field, desc}]`), `offset` (paging, see `next_offset`), `compare_start` + `compare_end` (period comparison), `date_ranges` (up to four named periods), `currency_code` |
+| `run_realtime_report` | After code deploys — verify tracking fires correctly | `dimensions`, `metrics`; optional `dimension_filter` / `metric_filter`, `order_by`, `limit`, `minute_ranges` (up to two windows, e.g. last 5 minutes vs the 25 before) |
+| `run_ga4_funnel` | "Where do users drop off?": users per step, completion and abandonment, the biggest drop | `steps` (2-10 event names or `{"page": "/checkout"}` / `{"event": ..., "directly_followed": true, "within_minutes": 30}`), dates, `open_funnel`, `breakdown` (a dimension), `next_action` (eventName or pagePath), `dimension_filter` |
+| `run_ga4_attribution` | "Which channel gets the credit?": conversions, revenue, ad cost, ROAS by channel, campaign or source under DATA_DRIVEN or LAST_CLICK; `COMPARE` shows both and the shift in credit | `dimensions` (defaultChannelGroup, campaignName, source, ...), `metrics`, dates, `conversions` (key event names), `attribution_model` |
+| `list_ga4_annotations` | The notes on GA4's charts: "what happened on that day?" | optional date range |
+| `list_ga4_custom_definitions` | Custom dimensions and metrics with their parameters, and the slots left before the limit | `property_id` |
 | `get_tracking_events` | Understanding what events are configured and their volume | `date_range_start`, `date_range_end` |
 | `list_key_events` | Which events count as key events (conversions), their counting method, and whether GA4 lets them be deleted | `property_id` (falls back to config) |
 | `list_ga4_dimensions_and_metrics` | Exact dimension/metric API names for this property, including custom ones, before writing a `run_ga4_report` call | `search` (also matches deprecated names), `kind` (all/dimensions/metrics), `custom_only` |
@@ -38,6 +44,14 @@ You have access to AdLoop MCP tools that connect Google Ads, Reddit Ads and Goog
 - `metric_filter` ops: `EQUAL`, `LESS_THAN`, `LESS_THAN_OR_EQUAL`, `GREATER_THAN`, `GREATER_THAN_OR_EQUAL` (or `=`, `<`, `<=`, `>`, `>=`), or `BETWEEN` with `[from, to]`. Metric filters apply after aggregation, like SQL `HAVING`.
 - Every `order_by` field must also be in `dimensions` or `metrics`.
 - With `compare_start`/`compare_end`, each row carries `dateRange`: `"current"` or `"comparison"`. Compare like with like (same length, same weekdays) and present the change per row.
+- OR: put a group in the filter list, `{"any_of": [<conditions>]}` (any must hold) or `{"all_of": [...]}`, optionally with `"not": true`; groups nest up to three levels. Example: `[{"any_of": [{"field": "sessionSource", "value": "google"}, {"field": "sessionSource", "value": "bing"}]}]`.
+- `date_ranges` replaces the start/end pair with up to four named periods (`[{"start": ..., "end": ..., "name": "october"}]`), e.g. this month against the same month last year; rows carry `dateRange` with the name. Not combinable with `compare_start`/`compare_end`.
+- Read `insights[]`: GA4 says when it thresholded or sampled the data, grouped rows into "(other)", or the property is close to its API quota. Each makes numbers differ from the GA4 interface; tell the user instead of presenting them as exact.
+- Reports over time (a date-type dimension) or comparing periods return the property's `annotations` in those dates. Use them when explaining a jump: "traffic fell on the 3rd" next to an annotation "site relaunch" is the answer.
+
+**Funnels and attribution (Data API v1alpha):**
+- `run_ga4_funnel` steps are event names exactly as they fire (check `get_tracking_events` first) or pages (URL contains). A closed funnel (default) counts only users who start at step 1. Present the step table, the overall completion and the biggest drop; with `next_action` say what users do instead at the leaky step.
+- `run_ga4_attribution` is GA4's model-based view, not session-based: numbers differ from `run_ga4_report` by design. Use `COMPARE` when the question is "is Google Ads over- or under-credited?". Google is still rolling the report out: an error with a `hint` means the property doesn't have it yet; use the hint's fallback and say so.
 
 ### Google Ads Read Tools
 
@@ -89,6 +103,22 @@ You have access to AdLoop MCP tools that connect Google Ads, Reddit Ads and Goog
 - `get_demographic_targeting` returns an empty list when no demographics have been excluded or narrowed — that is the DEFAULT state (Google serves to all segments). Each criterion includes a composite `remove_id` (`adGroupId~criterionId` or `campaignId~criterionId`) that can be passed straight to `remove_entity`.
 - **Compact mode for audits**: `get_campaign_performance`, `get_keyword_performance`, `get_search_terms`, and `get_ad_performance` accept `compact=true`, returning account totals, breakdowns, the top-10 rows, and pre-computed offender lists (zero-conversion spenders, budget-limited converters, low-QS keywords, negative-keyword waste candidates, thin RSAs, single-ad ad groups, disapproved or limited ads) instead of every row; compact `get_ad_performance` keeps `final_urls` on its rows and adds `landing_pages` (every final URL across all ads with its ad count), so landing-page checks need no extra GAQL — roughly 90% smaller. Use it for account audits and overviews so raw tables don't flood the context; use the default full mode when you need a specific entity's exact rows before drafting a change. In harnesses with subagents, heavy multi-tool audits can additionally be delegated to a subagent that returns only the summary.
 
+### Google Analytics Write Tools (ALL require safety confirmation)
+
+Same draft → preview → `confirm_and_apply` gate as Google Ads. The GA4 Admin API has no validate-only mode: the dry run re-reads what the plan changes (duplicates and limits for a create, "unchanged since the preview" for an update, delete or archive) and fails when the apply would fail or act on something someone changed in GA4 meanwhile. Then draft again.
+
+| Tool | What It Does | Key Parameters |
+|------|-------------|----------------|
+| `draft_key_event` | Mark a GA4 event as a key event (conversion), or change an existing one (counting method, default value; the preview shows before → after, `NO_CHANGE` when nothing differs) — closes the tracking loop after attribution_check finds an untracked conversion | `event_name`, `counting_method` (ONCE_PER_EVENT for purchases / ONCE_PER_SESSION for sign-ups), optional `default_value` + `currency_code` (a lead worth 20 EUR) |
+| `draft_delete_key_event` | Remove a GA4 key event (DESTRUCTIVE). The event keeps firing but stops counting as a conversion, for future data only. Refused for key events GA4 marks as not deletable | `event_name` (as listed by `list_key_events`) |
+| `draft_ga4_annotation` | Create, change or delete an annotation (a note on a date or range in GA4's charts). Google's own annotations cannot be changed | `action` (create/update/delete), `title` (≤60), `date` (+ `end_date` for a range), `description` (≤150), `color`, `annotation` (ID for update/delete) |
+| `draft_ga4_custom_dimension` | Register an event parameter, user property or item parameter as a dimension; rename or archive one (archive cannot be undone) | `action` (create/update/archive), `parameter_name`, `scope` (EVENT/USER/ITEM), `display_name`, `description` |
+| `draft_ga4_custom_metric` | Register a numeric event parameter as a metric; change or archive one | `action`, `parameter_name`, `display_name`, `measurement_unit` (STANDARD, CURRENCY, ...), `restricted_metric_type` (required for CURRENCY) |
+
+- A new custom dimension or metric is filled only from now on: events sent before stay without it, and data can take a day or two to show. Say so before the user approves. `parameter_name` and scope cannot change later, so check the spelling against the code that sends the parameter.
+- Check `list_ga4_custom_definitions` before creating: the draft refuses a full property, a duplicate parameter and a taken display name, but the user should hear about the limit before asking.
+- Key events feed Google Ads. Before removing one, or changing how it counts, check with `check_key_event_imports` whether Google Ads imports it: that conversion action changes with it.
+
 ### Cross-Reference Tools (GA4 + Ads combined)
 
 | Tool | When to Use | Key Parameters |
@@ -96,6 +126,7 @@ You have access to AdLoop MCP tools that connect Google Ads, Reddit Ads and Goog
 | `analyze_campaign_conversions` | "What's my real CPA?", paid vs organic comparison, GDPR gap analysis | `date_range_start`, `date_range_end`, `campaign_name` (optional filter) |
 | `landing_page_analysis` | "Which landing pages convert?", identify pages with traffic but no conversions | `date_range_start`, `date_range_end` |
 | `attribution_check` | "Are my conversions tracked correctly?", Ads vs GA4 conversion discrepancies | `date_range_start`, `date_range_end`, `conversion_events` (optional GA4 event names) |
+| `check_key_event_imports` | "Does Google Ads get my GA4 conversions?": every GA4 key event against the Ads conversion actions importing it — not imported, only secondary (not bid on), imported but receiving nothing while GA4 counts google / cpc key events, imports of events that are no longer key events | `date_range_start`, `date_range_end` |
 
 These tools call both APIs internally and return unified results with computed `insights[]`. They are read-only — no mutations. Each returns a `date_range` and auto-generates conditional warnings (GDPR gaps, zero conversions, attribution mismatches, orphaned URLs).
 
@@ -304,8 +335,6 @@ Conversions that happen offline (a sales call, a lead that turned into a deal) g
 | `draft_keywords` | Propose keyword additions (does NOT add) | Each keyword needs `text` and `match_type` (EXACT/PHRASE/BROAD) |
 | `add_negative_keywords` | Propose negative keywords directly on a campaign (does NOT add) | `campaign_id`, keyword list, `match_type` |
 | `add_negative_locations` | Propose negative geo exclusions on a campaign (does NOT add) — exclude cities/regions while keeping broader positive targets | `campaign_id`, `geo_target_ids` (numeric geo target constant IDs) |
-| `draft_key_event` | Mark a GA4 event as a key event/conversion (does NOT apply) — closes the tracking loop after attribution_check finds an untracked conversion | `event_name`, `counting_method` (ONCE_PER_EVENT for purchases / ONCE_PER_SESSION for sign-ups), `property_id` (falls back to config) |
-| `draft_delete_key_event` | Remove a GA4 key event (does NOT apply; DESTRUCTIVE). The event keeps firing but stops counting as a conversion, for future data only. Refused for key events GA4 marks as not deletable | `event_name` (as listed by `list_key_events`), `property_id` (falls back to config) |
 | `propose_negative_keyword_list` | Draft a shared negative keyword list and attach it to a campaign (does NOT create) | `campaign_id`, `list_name`, keyword list, `match_type` |
 | `propose_brand_list` | Draft a brand list (SharedSet of type BRANDS) and optionally attach it. Only the Commercial KG MID can be written — resolve names first. | `list_name`, `brand_ids`, optional `campaign_ids`, optional `negative` (default True = exclusion) |
 | `add_to_brand_list` | Append brands to an EXISTING brand list | `shared_set_id`, `brand_ids` |
@@ -349,6 +378,8 @@ Same draft → preview → `confirm_and_apply` gate; the plan carries `platform:
 - **Choose the post type deliberately.** IMAGE, VIDEO and CAROUSEL ads click through to `click_url` (normal landing-page ads; a carousel card can link to its own page). A TEXT ("free-form") ad clicks through to the **post itself**: Reddit forbids a `click_url` on it, so the landing link must be written into `body` (the tool refuses otherwise) and the report shows post opens and comments, not site clicks. Use TEXT for conversation-style founder posts, IMAGE when you want landing-page traffic. Neither can be edited after creation except `allow_comments`; new copy means a new post and ad.
 - **Media comes from URLs.** Reddit downloads `image_url`, `video_url`, `thumbnail_url` and card images when the post is created, so they must be direct links to the files, publicly reachable. The draft checks each one and refuses a web page or a file over Reddit's limit (videos 1 GB, images 20 MB). A video needs a thumbnail. Videos cannot be uploaded through AdLoop: host the file (a CDN, the website, cloud storage) and pass its link. Images without a public URL can be uploaded first on AdLoop Cloud and passed as `upload:<id>` (see Image Uploads).
 - **Ad groups need a schedule.** Reddit requires `start_time`; the tool defaults it to now. Pass `end_time` too when the budget is `lifetime_budget`.
+
+**After an applied change that moves traffic:** when `confirm_and_apply` (or the approval card's message) returns `suggested_annotation` (budget, bidding, targeting or status changes in Google Ads and Reddit Ads, when a GA4 property is set up), offer in one sentence to note it in GA4, so a later jump in the GA4 charts has its explanation. If the user agrees, call `draft_ga4_annotation(action="create", title=..., date=..., description=...)` with the suggested values: it is a separate change with its own preview and approval. Don't insist; offer once.
 
 **Write tool workflow:**
 1. Call a `draft_*` tool → returns a preview with a `plan_id`
@@ -555,8 +586,9 @@ Most websites (especially in the EU) use a GDPR cookie consent banner. This has 
 3. Call `validate_tracking` with the extracted event names — it compares codebase events against actual GA4 data and returns matched, missing, and unexpected events
 4. Review the `insights[]` from `validate_tracking` — missing events indicate code not deployed or behind untriggered conditions; unexpected events may come from tag managers
 5. If the user needs to add new tracking, use `generate_tracking_code` to produce the gtag snippet with recommended parameters
-6. If an event FIRES in GA4 but is not marked as a key event (conversion), call `list_key_events` first to see what is already a key event, then propose `draft_key_event`. It goes through preview → confirm like every write. Remind the user it applies to future data only and Ads needs the GA4 link + conversion import to optimize on it
-7. To retire a key event (a duplicate, or one that no longer means a conversion), propose `draft_delete_key_event`. Before applying, check whether Google Ads imports it as a conversion action: removing it starves that conversion action and Smart Bidding of new conversions
+6. For a full check of the GA4 setup (retention, Ads link, dead streams, silent key events), call `audit_ga4_property`; for whether Google Ads receives the key events, `check_key_event_imports`.
+7. If an event FIRES in GA4 but is not marked as a key event (conversion), call `list_key_events` first to see what is already a key event, then propose `draft_key_event`. It goes through preview → confirm like every write. Remind the user it applies to future data only and Ads needs the GA4 link + conversion import to optimize on it
+8. To retire a key event (a duplicate, or one that no longer means a conversion), propose `draft_delete_key_event`. Before applying, check whether Google Ads imports it as a conversion action: removing it starves that conversion action and Smart Bidding of new conversions
 
 ### When user asks to add negative keywords
 
@@ -613,6 +645,13 @@ Reddit's structure is campaign → ad group (budget, bid, pixel, targeting) → 
 2. Call `pause_entity` or `enable_entity` (Google) or `pause_reddit_entity` / `enable_reddit_entity` (Reddit) with the entity type and ID
 3. Present the preview with a clear warning about impact (e.g. "This will stop all ads in this campaign"). Google Ads previews of pause, enable and remove name the target: `entity_name`, `account`, the parent `campaign_name` / `ad_group_name` and `current_status`. Repeat the names to the user, because a wrong account is the costly mistake; an ID that matches nothing is refused at draft time
 4. Wait for confirmation
+
+### When user asks about a GA4 funnel or checkout drop-off
+
+1. Call `get_tracking_events` to get the exact event names (case-sensitive) for the steps
+2. Call `run_ga4_funnel` with the steps in order; a closed funnel unless the user wants entries at any step
+3. Present users per step, the overall completion and the biggest drop. For the leaky step, rerun with `breakdown` (deviceCategory, sessionDefaultChannelGroup) to see who drops, or `next_action` to see what they do instead
+4. If paid traffic is involved, cross-check `landing_page_analysis` for the pages behind the drop
 
 ### When user asks about landing page performance
 

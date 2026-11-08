@@ -106,6 +106,7 @@
       applied: "Applied.", discarded: "Discarded. Nothing was changed.",
       failed: "Not applied:", more: "more fields not shown",
       msgApplied: "Applied on the AdLoop approval card: {op} (plan {id}).",
+      msgAnnotate: " Suggested GA4 annotation for {date}: \u201c{title}\u201d (draft_ga4_annotation, needs approval).",
       msgDiscarded: "Discarded on the AdLoop approval card: {op} (plan {id}). Nothing was changed.",
       gone: "This change is no longer pending (applied, discarded or expired).",
     },
@@ -118,6 +119,7 @@
       applied: "Angewendet.", discarded: "Verworfen. Nichts wurde geändert.",
       failed: "Nicht angewendet:", more: "weitere Felder nicht angezeigt",
       msgApplied: "Auf der AdLoop-Freigabekarte angewendet: {op} (Plan {id}).",
+      msgAnnotate: " Vorgeschlagene GA4-Anmerkung für den {date}: \u201e{title}\u201c (draft_ga4_annotation, braucht Freigabe).",
       msgDiscarded: "Auf der AdLoop-Freigabekarte verworfen: {op} (Plan {id}). Nichts wurde geändert.",
       gone: "Diese Änderung ist nicht mehr offen (angewendet, verworfen oder abgelaufen).",
     },
@@ -298,7 +300,10 @@
         if (status === "APPLIED" || status === "PARTIAL_UPLOAD") {
           finished = true;
           setStatus("ok", t("applied") + (r.message ? " " + r.message : ""));
-          tell(t("msgApplied"));
+          const note = r.suggested_annotation;
+          tell(t("msgApplied") + (note && note.title
+            ? t("msgAnnotate").replace("{date}", note.date || "").replace("{title}", note.title)
+            : ""));
         } else {
           setStatus(status === "DRY_RUN_SUCCESS" ? "warn" : "bad", r.remediation || r.message || r.error || status);
         }

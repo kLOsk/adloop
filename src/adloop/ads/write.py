@@ -3265,12 +3265,23 @@ def confirm_and_apply(
     )
     remove_plan(plan.plan_id)
 
-    return {
+    applied = {
         "status": "APPLIED",
         "plan_id": plan.plan_id,
         "operation": plan.operation,
         "result": result,
     }
+    # A change that moves traffic gets a ready GA4 annotation for the AI to
+    # offer; writing it is a separate, approved change.
+    from adloop.ga4.suggest import suggested_annotation
+
+    try:
+        suggestion = suggested_annotation(config, plan)
+    except Exception:  # noqa: BLE001 - a suggestion must never spoil a successful apply
+        suggestion = None
+    if suggestion:
+        applied["suggested_annotation"] = suggestion
+    return applied
 
 
 # ---------------------------------------------------------------------------
