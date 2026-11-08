@@ -168,7 +168,7 @@
     const op = String(preview.operation || "");
     if (preview.platform === "reddit" || op.startsWith("reddit_")) return "reddit";
     if (op.startsWith("gtm_")) return "gtm";
-    if (op.includes("key_event")) return "ga4";
+    if (preview.platform === "ga4" || op.startsWith("ga4_") || op.includes("key_event")) return "ga4";
     return "google";
   }
 

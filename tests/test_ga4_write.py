@@ -28,6 +28,14 @@ def config() -> AdLoopConfig:
 
 
 class TestDraft:
+    @pytest.fixture(autouse=True)
+    def no_existing_key_events(self):
+        # The draft checks whether the event already is a key event.
+        admin = MagicMock()
+        admin.list_key_events.return_value = []
+        with patch("adloop.ga4.client.get_admin_client", return_value=admin):
+            yield admin
+
     def test_returns_preview_with_future_data_warnings(self, config):
         result = ga4_write.draft_key_event(
             config, property_id="123456", event_name="sign_up",
@@ -255,17 +263,107 @@ class TestApplyDelete:
         assert result["result"]["deleted"] is True
         assert result["result"]["event_name"] == "sign_up"
 
-    def test_create_key_event_dry_run_still_runs_no_checks(self, config):
+    def test_create_key_event_dry_run_checks_it_is_not_one_already(self, config):
         from adloop.ads import write as ads_write
 
-        preview = ga4_write.draft_key_event(
-            config, property_id="123456", event_name="sign_up",
-        )
-        with patch("adloop.ga4.client.get_admin_client") as get_admin:
-            result = ads_write.confirm_and_apply(
-                config, plan_id=preview["plan_id"], dry_run=True,
-            )
+        with patch("adloop.ga4.client.get_admin_client", return_value=_admin()):
+            preview = ga4_write.draft_key_event(config, property_id="123456", event_name="sign_up")
+            result = ads_write.confirm_and_apply(config, plan_id=preview["plan_id"], dry_run=True)
         assert result["status"] == "DRY_RUN_SUCCESS"
-        assert "checks" not in result
+        assert result["checks"] == {"key_event_exists": False}
         assert "Google Analytics" in result["message"]
-        get_admin.assert_not_called()
+
+    def test_create_key_event_dry_run_fails_when_someone_created_it_meanwhile(self, config):
+        from adloop.ads import write as ads_write
+
+        with patch("adloop.ga4.client.get_admin_client", return_value=_admin()):
+            preview = ga4_write.draft_key_event(config, property_id="123456", event_name="sign_up")
+        with patch("adloop.ga4.client.get_admin_client", return_value=_admin(_key_event("sign_up"))):
+            result = ads_write.confirm_and_apply(config, plan_id=preview["plan_id"], dry_run=True)
+        assert result["status"] == "DRY_RUN_FAILED"
+        assert "already is a key event" in str(result)
+
+
+# ---------------------------------------------------------------------------
+# Default values and changing an existing key event
+# ---------------------------------------------------------------------------
+
+
+class TestDefaultValueAndUpdate:
+    def test_create_carries_the_default_value_to_the_api(self, config):
+        with patch("adloop.ga4.client.get_admin_client", return_value=_admin()):
+            preview = ga4_write.draft_key_event(
+                config, property_id="123456", event_name="generate_lead", default_value=20, currency_code="eur",
+            )
+        assert preview["operation"] == "create_key_event"
+        assert preview["changes"]["default_value"] == {"numeric_value": 20.0, "currency_code": "EUR"}
+
+        created = MagicMock(event_name="generate_lead")
+        created.name = "properties/123456/keyEvents/5"
+        created.counting_method.name = "ONCE_PER_EVENT"
+        admin = _admin()
+        admin.create_key_event.return_value = created
+        with patch("adloop.ga4.client.get_admin_client", return_value=admin):
+            ga4_write._apply_create_key_event(config, preview["changes"])
+        sent = admin.create_key_event.call_args.kwargs["key_event"]
+        assert sent.default_value.numeric_value == 20.0
+        assert sent.default_value.currency_code == "EUR"
+
+    @pytest.mark.parametrize("kwargs, message", [
+        ({"default_value": 20}, "needs currency_code"),
+        ({"default_value": -1, "currency_code": "EUR"}, "0 or more"),
+        ({"currency_code": "EUR"}, "only applies together"),
+    ])
+    def test_default_value_rules(self, config, kwargs, message):
+        result = ga4_write.draft_key_event(config, property_id="123456", event_name="x", **kwargs)
+        assert message in " ".join(result["details"])
+
+    def test_existing_key_event_becomes_an_update_with_before_and_after(self, config):
+        existing = _key_event("sign_up", method="ONCE_PER_EVENT")
+        with patch("adloop.ga4.client.get_admin_client", return_value=_admin(existing)):
+            preview = ga4_write.draft_key_event(
+                config, property_id="123456", event_name="sign_up", counting_method="ONCE_PER_SESSION",
+            )
+        assert preview["operation"] == "ga4_update_key_event"
+        assert preview["platform"] == "ga4"
+        assert preview["changes"]["counting_method"] == "ONCE_PER_SESSION"
+        assert preview["changes"]["current_counting_method"] == "ONCE_PER_EVENT"
+        assert "default_value" not in preview["changes"]
+
+    def test_unchanged_key_event_needs_no_plan(self, config):
+        with patch("adloop.ga4.client.get_admin_client", return_value=_admin(_key_event("sign_up", method="ONCE_PER_EVENT"))):
+            result = ga4_write.draft_key_event(config, property_id="123456", event_name="sign_up")
+        assert result["status"] == "NO_CHANGE"
+        assert "plan_id" not in result
+
+    def test_update_applies_only_the_changed_field(self, config):
+        from adloop.ads import write as ads_write
+
+        existing = _key_event("sign_up", method="ONCE_PER_EVENT")
+        admin = _admin(existing)
+        admin.update_key_event.return_value = MagicMock(
+            event_name="sign_up", counting_method=MagicMock(name="ONCE_PER_SESSION"),
+        )
+        admin.update_key_event.return_value.name = existing.name
+        with patch("adloop.ga4.client.get_admin_client", return_value=admin):
+            preview = ga4_write.draft_key_event(
+                config, property_id="123456", event_name="sign_up", counting_method="ONCE_PER_SESSION",
+            )
+            dry = ads_write.confirm_and_apply(config, plan_id=preview["plan_id"], dry_run=True)
+            assert dry["checks"] == {"key_event_unchanged": True}
+            result = ga4_write._apply_update_key_event(config, preview["changes"])
+        call = admin.update_key_event.call_args.kwargs
+        assert list(call["update_mask"].paths) == ["counting_method"]
+        assert call["key_event"].name == existing.name
+        assert result["updated_fields"] == ["counting_method"]
+
+    def test_update_refuses_when_changed_in_ga4_after_the_preview(self, config):
+        existing = _key_event("sign_up", method="ONCE_PER_EVENT")
+        with patch("adloop.ga4.client.get_admin_client", return_value=_admin(existing)):
+            preview = ga4_write.draft_key_event(
+                config, property_id="123456", event_name="sign_up", counting_method="ONCE_PER_SESSION",
+            )
+        existing.counting_method.name = "ONCE_PER_SESSION"  # someone changed it in the GA4 UI
+        with patch("adloop.ga4.client.get_admin_client", return_value=_admin(existing)):
+            with pytest.raises(RuntimeError, match="changed in GA4 after the preview"):
+                ga4_write._apply_update_key_event(config, preview["changes"])

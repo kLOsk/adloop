@@ -880,7 +880,9 @@ def run_ga4_report(
     failed" with details, before anything is sent. insights[] says when GA4
     thresholded or sampled the data, grouped rows into "(other)", or the
     property is close to its API quota, because each makes numbers differ
-    from the GA4 interface.
+    from the GA4 interface. Reports over time (a date-type dimension) or
+    comparing periods also return the property's annotations in those dates,
+    which often explain a jump in the rows.
 
     Queries the GA4 Data API. Dimensions and metrics:
     https://developers.google.com/analytics/devguides/reporting/data/v1/api-schema
@@ -951,6 +953,7 @@ def run_ga4_report(
         compare_end=compare_end,
         date_ranges=date_ranges,
         currency_code=currency_code,
+        include_annotations=True,
     )
 
 
@@ -1131,6 +1134,66 @@ def list_ga4_dimensions_and_metrics(
         kind=kind,
         custom_only=custom_only,
         include_descriptions=include_descriptions,
+    )
+
+
+@_tool(title="List Analytics annotations", annotations=_READONLY, tags={"ga4"})
+@_safe
+def list_ga4_annotations(
+    date_range_start: str = "",
+    date_range_end: str = "",
+    property_id: str = "",
+) -> dict:
+    """List a GA4 property's annotations, the notes GA4 shows on a date or date range in its charts.
+
+    Returns each annotation's ID (resource name), title, description, color,
+    and its date or start and end date, newest first; Google's own
+    annotations are marked system_generated. With a date range, only the
+    annotations that overlap it. The first stop for "what happened on that
+    day?" next to get_change_history in Google Ads. Reads the GA4 Admin API
+    v1alpha (reportingDataAnnotations.list).
+
+    Args:
+        date_range_start: Optional start: "today", "yesterday", "NdaysAgo" or
+            "YYYY-MM-DD". Set together with date_range_end.
+        date_range_end: Optional end, same formats.
+        property_id: GA4 property as "properties/123456789" or the bare
+            numeric ID. If empty, uses the default from config.
+    """
+    from adloop.ga4.annotations import list_ga4_annotations as _impl
+
+    return _impl(
+        current_config(),
+        property_id=property_id or current_config().ga4.property_id,
+        date_range_start=date_range_start,
+        date_range_end=date_range_end,
+    )
+
+
+@_tool(title="List Analytics custom definitions", annotations=_READONLY, tags={"ga4"})
+@_safe
+def list_ga4_custom_definitions(property_id: str = "") -> dict:
+    """List a GA4 property's custom dimensions and custom metrics, with how many slots are left.
+
+    Returns each custom dimension's resource name, parameter name, display
+    name, scope (EVENT, USER or ITEM) and description, and each custom
+    metric's resource name, parameter name, display name, measurement unit
+    and description, plus usage per kind against the property's limit
+    (standard: 50 event, 25 user, 10 item dimensions, 50 metrics; 360:
+    125, 100, 25, 125). Use it before draft_ga4_custom_dimension or
+    draft_ga4_custom_metric. For the field names to use in reports, see
+    list_ga4_dimensions_and_metrics. Reads the GA4 Admin API
+    (customDimensions.list, customMetrics.list).
+
+    Args:
+        property_id: GA4 property as "properties/123456789" or the bare
+            numeric ID. If empty, uses the default from config.
+    """
+    from adloop.ga4.definitions import list_ga4_custom_definitions as _impl
+
+    return _impl(
+        current_config(),
+        property_id=property_id or current_config().ga4.property_id,
     )
 
 
@@ -6818,13 +6881,18 @@ def draft_key_event(
     event_name: str,
     counting_method: str = "ONCE_PER_EVENT",
     property_id: str = "",
+    default_value: float | None = None,
+    currency_code: str = "",
 ) -> dict:
-    """Draft marking a GA4 event as a key event (conversion) — returns a PREVIEW.
+    """Draft marking a GA4 event as a key event (conversion), or changing an existing one — returns a PREVIEW.
 
     The fix for "the event fires but isn't tracked as a conversion":
     attribution_check / validate_tracking diagnose it, this closes the loop.
-    Applies to future data only. Returns a preview with a plan_id and warnings;
-    nothing changes until confirm_and_apply applies it.
+    When the event already is a key event, the plan changes its counting
+    method or default value instead and the preview shows before and after;
+    nothing to change returns NO_CHANGE. Applies to future data only.
+    Returns a preview with a plan_id and warnings; nothing changes until
+    confirm_and_apply applies it.
 
     Args:
         event_name: Name of the GA4 event to mark as a key event, exactly as it
@@ -6834,6 +6902,9 @@ def draft_key_event(
             sign-ups). Defaults to ONCE_PER_EVENT.
         property_id: Numeric GA4 property ID, with or without the "properties/"
             prefix. If empty, uses the default from config.
+        default_value: Value GA4 gives each key event when the event sends
+            no value parameter, e.g. 20 for a lead. Needs currency_code.
+        currency_code: Three-letter currency of default_value, e.g. "EUR".
     """
     from adloop.ga4.write import draft_key_event as _impl
 
@@ -6842,6 +6913,8 @@ def draft_key_event(
         property_id=property_id or current_config().ga4.property_id,
         event_name=event_name,
         counting_method=counting_method,
+        default_value=default_value,
+        currency_code=currency_code,
     )
 
 
@@ -6874,6 +6947,167 @@ def draft_delete_key_event(
         current_config(),
         property_id=property_id or current_config().ga4.property_id,
         event_name=event_name,
+    )
+
+
+@_tool(title="Draft an Analytics annotation", annotations=_DESTRUCTIVE, tags={"ga4"})
+@_safe
+def draft_ga4_annotation(
+    action: str = "create",
+    title: str = "",
+    date: str = "",
+    end_date: str = "",
+    description: str | None = None,
+    color: str = "",
+    annotation: str = "",
+    property_id: str = "",
+) -> dict:
+    """Draft creating, changing or deleting a GA4 annotation (a note on a date or date range in GA4's charts), returning a PREVIEW.
+
+    Use it to mark what explains a change in the data: a site relaunch, a
+    price change, a campaign start, a tracking fix. Create needs title and
+    date; update and delete need the annotation's ID from
+    list_ga4_annotations, and an update changes only the fields passed (the
+    preview shows before and after). Annotations Google created itself
+    cannot be changed. Nothing changes until confirm_and_apply applies it;
+    the dry run re-reads the annotation and refuses if it was changed in
+    GA4 after the preview. GA4 Admin API v1alpha (reportingDataAnnotations).
+
+    Args:
+        action: "create" (default), "update" or "delete".
+        title: Up to 60 characters. Required for create.
+        date: The day as YYYY-MM-DD, or the first day of a range together
+            with end_date. Required for create.
+        end_date: Last day of a range (YYYY-MM-DD); leave empty for one day.
+        description: Up to 150 characters. On update, "" clears it.
+        color: BLUE (default on create), GREEN, RED, PURPLE, BROWN or CYAN.
+        annotation: ID or resource name of the annotation to update or
+            delete (list_ga4_annotations).
+        property_id: Numeric GA4 property ID, with or without the
+            "properties/" prefix. If empty, uses the default from config.
+    """
+    from adloop.ga4.annotations import draft_ga4_annotation as _impl
+
+    return _impl(
+        current_config(),
+        property_id=property_id or current_config().ga4.property_id,
+        action=action,
+        annotation=annotation,
+        title=title,
+        date_=date,
+        end_date=end_date,
+        description=description,
+        color=color,
+    )
+
+
+@_tool(title="Draft an Analytics custom dimension", annotations=_DESTRUCTIVE, tags={"ga4"})
+@_safe
+def draft_ga4_custom_dimension(
+    action: str = "create",
+    parameter_name: str = "",
+    scope: str = "EVENT",
+    display_name: str = "",
+    description: str | None = None,
+    disallow_ads_personalization: bool | None = None,
+    custom_dimension: str = "",
+    property_id: str = "",
+) -> dict:
+    """Draft registering, changing or archiving a GA4 custom dimension, returning a PREVIEW.
+
+    Registering makes an event parameter (EVENT scope), a user property
+    (USER) or an ecommerce item parameter (ITEM) reportable as a dimension.
+    Before anything reaches Google the draft refuses a parameter that is
+    already registered, a taken display name and a full property (see
+    list_ga4_custom_definitions), and the preview warns that GA4 fills the
+    dimension only from now on and that parameter_name and scope cannot
+    change later. Update changes display_name, description or (USER scope)
+    disallow_ads_personalization; archive removes it from reports and frees
+    the slot, cannot be undone and needs a double confirmation. Nothing
+    changes until confirm_and_apply applies it. GA4 Admin API
+    (customDimensions).
+
+    Args:
+        action: "create" (default), "update" or "archive".
+        parameter_name: The event parameter or user property name exactly as
+            sent, e.g. "plan_type". Required for create; identifies the
+            dimension for update and archive.
+        scope: EVENT (default), USER or ITEM.
+        display_name: Name shown in GA4; defaults to parameter_name on create.
+        description: Up to 150 characters. On update, "" clears it.
+        disallow_ads_personalization: USER scope only: keep this dimension out
+            of ads personalization.
+        custom_dimension: Resource name, instead of parameter_name, for update
+            or archive.
+        property_id: Numeric GA4 property ID, with or without the
+            "properties/" prefix. If empty, uses the default from config.
+    """
+    from adloop.ga4.definitions import draft_ga4_custom_dimension as _impl
+
+    return _impl(
+        current_config(),
+        property_id=property_id or current_config().ga4.property_id,
+        action=action,
+        parameter_name=parameter_name,
+        scope=scope,
+        display_name=display_name,
+        description=description,
+        disallow_ads_personalization=disallow_ads_personalization,
+        custom_dimension=custom_dimension,
+    )
+
+
+@_tool(title="Draft an Analytics custom metric", annotations=_DESTRUCTIVE, tags={"ga4"})
+@_safe
+def draft_ga4_custom_metric(
+    action: str = "create",
+    parameter_name: str = "",
+    display_name: str = "",
+    description: str | None = None,
+    measurement_unit: str = "",
+    restricted_metric_type: _StrListOpt = None,
+    custom_metric: str = "",
+    property_id: str = "",
+) -> dict:
+    """Draft registering, changing or archiving a GA4 custom metric, returning a PREVIEW.
+
+    Registering makes a numeric event parameter reportable as a metric. The
+    draft refuses a parameter that is already registered, a taken display
+    name and a full property (see list_ga4_custom_definitions), and the
+    preview warns that GA4 fills the metric only from now on. Update changes
+    display_name, description, measurement_unit or restricted_metric_type;
+    archive removes it from reports, cannot be undone and needs a double
+    confirmation. Nothing changes until confirm_and_apply applies it. GA4
+    Admin API (customMetrics).
+
+    Args:
+        action: "create" (default), "update" or "archive".
+        parameter_name: The numeric event parameter exactly as sent, e.g.
+            "discount_amount". Required for create; identifies the metric for
+            update and archive.
+        display_name: Name shown in GA4; defaults to parameter_name on create.
+        description: Up to 150 characters. On update, "" clears it.
+        measurement_unit: STANDARD (default on create), CURRENCY, FEET,
+            METERS, KILOMETERS, MILES, MILLISECONDS, SECONDS, MINUTES or HOURS.
+        restricted_metric_type: For CURRENCY metrics, required: ["COST_DATA"]
+            or ["REVENUE_DATA"] (or both).
+        custom_metric: Resource name, instead of parameter_name, for update or
+            archive.
+        property_id: Numeric GA4 property ID, with or without the
+            "properties/" prefix. If empty, uses the default from config.
+    """
+    from adloop.ga4.definitions import draft_ga4_custom_metric as _impl
+
+    return _impl(
+        current_config(),
+        property_id=property_id or current_config().ga4.property_id,
+        action=action,
+        parameter_name=parameter_name,
+        display_name=display_name,
+        description=description,
+        measurement_unit=measurement_unit,
+        restricted_metric_type=restricted_metric_type,
+        custom_metric=custom_metric,
     )
 
 

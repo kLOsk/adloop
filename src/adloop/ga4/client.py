@@ -29,3 +29,25 @@ def get_admin_client(config: AdLoopConfig) -> AnalyticsAdminServiceClient:
 
     credentials = get_ga4_credentials(config)
     return AnalyticsAdminServiceClient(credentials=credentials)
+
+
+def get_admin_alpha_client(config: AdLoopConfig):
+    """GA4 Admin API v1alpha client: annotations, Google signals, audiences.
+
+    Google can change v1alpha without notice; callers turn its errors into
+    a plain message instead of a traceback.
+    """
+    from google.analytics.admin_v1alpha import AnalyticsAdminServiceClient
+
+    from adloop.auth import get_ga4_credentials
+
+    return AnalyticsAdminServiceClient(credentials=get_ga4_credentials(config))
+
+
+def get_data_alpha_client(config: AdLoopConfig):
+    """GA4 Data API v1alpha client: funnel reports and conversion attribution."""
+    from google.analytics.data_v1alpha import AlphaAnalyticsDataClient
+
+    from adloop.auth import get_ga4_credentials
+
+    return AlphaAnalyticsDataClient(credentials=get_ga4_credentials(config))

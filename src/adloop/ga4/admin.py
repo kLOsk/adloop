@@ -194,3 +194,37 @@ def _property_insights(config: AdLoopConfig, result: dict) -> list[str]:
     if streams == []:
         insights.append("The property has no data stream, so it receives no data.")
     return insights
+
+
+def fingerprint(values: dict) -> str:
+    """A short hash of an entity's current values, stored on update plans.
+
+    The dry run and the apply re-read the entity and refuse when the hash
+    differs: someone changed it in GA4 after the preview was shown.
+    """
+    import hashlib
+    import json
+
+    blob = json.dumps(values, sort_keys=True, default=str).encode()
+    return hashlib.sha256(blob).hexdigest()[:12]
+
+
+def check_property(property_id: str) -> tuple[str, str]:
+    """('123', '') for a usable property ID, ('', error) otherwise."""
+    pid = str(property_id or "").strip().removeprefix("properties/")
+    if not pid:
+        return "", "property_id is required (falls back to the configured GA4 property when set)"
+    if not pid.isdigit():
+        return "", "property_id must be a numeric GA4 property ID"
+    return pid, ""
+
+
+def service_level(config: AdLoopConfig, property_id: str) -> str:
+    """'standard' or '360' (GA4 limits differ); 'standard' when unreadable."""
+    from adloop.ga4.client import get_admin_client
+
+    try:
+        prop = get_admin_client(config).get_property(name=f"properties/{property_id}")
+    except Exception:  # noqa: BLE001 - the lower limits are the safe assumption
+        return "standard"
+    return _SERVICE_LEVELS.get(_enum_name(prop.service_level), "standard")

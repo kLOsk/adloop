@@ -76,6 +76,13 @@ _NUMERIC_OPS = {
 }
 # Names given to the two date ranges of a comparison report; GA4 echoes them
 # back as the value of the automatic ``dateRange`` dimension.
+# Dimensions that put a report on a timeline, where annotations explain jumps.
+TIME_DIMENSIONS = frozenset({
+    "date", "dateHour", "dateHourMinute", "day", "week", "isoWeek", "isoYearIsoWeek",
+    "yearWeek", "month", "yearMonth", "year", "isoYear", "nthDay", "nthWeek", "nthMonth",
+    "nthYear", "nthHour", "nthMinute",
+})
+
 CURRENT_RANGE = "current"
 COMPARISON_RANGE = "comparison"
 
@@ -446,6 +453,7 @@ def run_ga4_report(
     compare_end: str = "",
     date_ranges: list[dict] | None = None,
     currency_code: str = "",
+    include_annotations: bool = False,
 ) -> dict:
     """Run a GA4 report with specified dimensions, metrics, and date range.
 
@@ -566,6 +574,21 @@ def run_ga4_report(
     insights = response_insights(response)
     if insights:
         result["insights"] = insights
+    if include_annotations and (comparing or len(named_ranges) > 1 or set(dimensions) & TIME_DIMENSIONS):
+        from adloop.ga4.annotations import annotations_for_report
+
+        if comparing:
+            spans = [(date_range_start, date_range_end), (compare_start, compare_end)]
+        elif named_ranges:
+            spans = [(start, end) for _, start, end in named_ranges]
+        else:
+            spans = [(date_range_start, date_range_end)]
+        time_zone = str(getattr(getattr(response, "metadata", None), "time_zone", "") or "")
+        annotations = annotations_for_report(config, property_id, spans, time_zone)
+        if annotations:
+            # Notes the property's users left on these dates: often the
+            # explanation for a jump in the rows above.
+            result["annotations"] = annotations
     return result
 
 
