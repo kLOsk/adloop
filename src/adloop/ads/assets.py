@@ -1671,22 +1671,36 @@ def _apply_update_promotion(client, cid: str, changes: dict) -> dict:
         if "final_url" in changed:
             asset.final_urls.append(promo["final_url"])
             paths.append("final_urls")
+        # Google refuses a mask that names a message field it is given a value
+        # for (FIELD_HAS_SUBFIELDS): a Money that is set is masked by its
+        # leaves. An unset field may still be masked whole, which clears it,
+        # and the replaced member of a oneof (discount, trigger) has to be
+        # cleared that way: Google does not drop it on its own
+        # (PROMOTION_CANNOT_SET_PERCENT_OFF_AND_MONEY_AMOUNT_OFF).
         if changed.keys() & {"money_off", "percent_off", "currency_code"}:
             if promo["percent_off"]:
                 p.percent_off = round(float(promo["percent_off"]) * 10_000)
                 paths.append("promotion_asset.percent_off")
+                if before.get("money_off"):
+                    paths.append("promotion_asset.money_amount_off")
             else:
                 p.money_amount_off.amount_micros = _micros(promo["money_off"])
                 p.money_amount_off.currency_code = promo["currency_code"]
-                paths.append("promotion_asset.money_amount_off")
+                paths += [f"promotion_asset.money_amount_off.{f}" for f in ("amount_micros", "currency_code")]
+                if before.get("percent_off"):
+                    paths.append("promotion_asset.percent_off")
         if changed.keys() & {"promotion_code", "orders_over_amount", "currency_code"}:
             if promo["promotion_code"]:
                 p.promotion_code = promo["promotion_code"]
                 paths.append("promotion_asset.promotion_code")
+                if before.get("orders_over_amount"):
+                    paths.append("promotion_asset.orders_over_amount")
             elif promo["orders_over_amount"]:
                 p.orders_over_amount.amount_micros = _micros(promo["orders_over_amount"])
                 p.orders_over_amount.currency_code = promo["currency_code"]
-                paths.append("promotion_asset.orders_over_amount")
+                paths += [f"promotion_asset.orders_over_amount.{f}" for f in ("amount_micros", "currency_code")]
+                if before.get("promotion_code"):
+                    paths.append("promotion_asset.promotion_code")
             else:  # cleared: the masked, unset field is removed
                 paths += [f"promotion_asset.{f}" for f in ("promotion_code", "orders_over_amount") if before.get(f)]
         for field, enum in (("occasion", "PromotionExtensionOccasionEnum"),
