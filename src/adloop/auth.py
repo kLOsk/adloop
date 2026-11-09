@@ -19,6 +19,7 @@ if TYPE_CHECKING:
     from google.auth.credentials import Credentials
 
     from adloop.config import AdLoopConfig
+    from adloop.microsoft_ads.auth import MicrosoftCredentials
     from adloop.reddit.auth import RedditCredentials
 
 # Request all scopes in a single OAuth flow so one token works for both
@@ -90,6 +91,8 @@ class CredentialsProvider(Protocol):
 
     def reddit_credentials(self, config: AdLoopConfig) -> RedditCredentials: ...
 
+    def microsoft_ads_credentials(self, config: AdLoopConfig) -> MicrosoftCredentials: ...
+
 
 class LocalFileCredentialsProvider:
     """OSS default: local credential files + interactive OAuth.
@@ -138,6 +141,14 @@ class LocalFileCredentialsProvider:
         # file (reddit.token_path), nothing shared with the Google token.
         self._guard_local_only()
         from adloop.reddit.auth import local_credentials
+
+        return local_credentials(config)
+
+    def microsoft_ads_credentials(self, config: AdLoopConfig) -> MicrosoftCredentials:
+        # Microsoft identity platform: own Entra app, own token file
+        # (microsoft_ads.token_path), written by `adloop microsoft-login`.
+        self._guard_local_only()
+        from adloop.microsoft_ads.auth import local_credentials
 
         return local_credentials(config)
 
@@ -287,6 +298,18 @@ def get_reddit_credentials(config: AdLoopConfig) -> RedditCredentials:
             "provider implements reddit_credentials()."
         )
     return provider.reddit_credentials(config)
+
+
+def get_microsoft_ads_credentials(config: AdLoopConfig) -> MicrosoftCredentials:
+    """Return refreshable bearer credentials for the Microsoft Advertising API."""
+    provider = _active_provider
+    if not hasattr(provider, "microsoft_ads_credentials"):
+        raise RuntimeError(
+            "This deployment's credentials provider does not support "
+            "Microsoft Advertising. Microsoft Ads tools are only available where "
+            "the provider implements microsoft_ads_credentials()."
+        )
+    return provider.microsoft_ads_credentials(config)
 
 
 def _requested_scopes(config: AdLoopConfig) -> list[str]:

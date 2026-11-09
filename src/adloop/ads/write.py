@@ -2898,6 +2898,7 @@ def confirm_and_apply(
     from adloop.ga4.write import GA4_OPERATIONS
 
     is_reddit = plan.operation.startswith("reddit_")
+    is_microsoft = plan.operation.startswith("microsoft_")
     is_gtm = plan.operation.startswith("gtm_")
     is_ga4 = plan.operation in GA4_OPERATIONS
     # Google Ads calls without a validate_only field: the dry run re-reads the
@@ -2909,6 +2910,7 @@ def confirm_and_apply(
     platform_label = (
         "Google Ads and Google Analytics" if is_setup
         else "Reddit Ads" if is_reddit
+        else "Microsoft Advertising" if is_microsoft
         else "Google Tag Manager" if is_gtm
         else "Google Analytics" if is_ga4
         else "Google Ads"
@@ -2923,14 +2925,19 @@ def confirm_and_apply(
         # Either way a failed check leaves dry_run_result unset, so two-phase
         # apply keeps refusing the real write.
         try:
-            if is_reddit or is_gtm:
-                # Neither Reddit nor Tag Manager has a validate-only mode; the
-                # dry run re-reads the target and re-runs the safety checks
-                # against live values.
+            if is_reddit or is_gtm or is_microsoft:
+                # Reddit, Microsoft Advertising and Tag Manager have no
+                # validate-only mode for these calls; the dry run re-reads the
+                # target and re-runs the safety checks against live values.
                 from adloop.gtm.write import preflight as gtm_preflight
+                from adloop.microsoft_ads.write import preflight as microsoft_preflight
                 from adloop.reddit.write import preflight as reddit_preflight
 
-                preflight = reddit_preflight if is_reddit else gtm_preflight
+                preflight = (
+                    reddit_preflight if is_reddit
+                    else microsoft_preflight if is_microsoft
+                    else gtm_preflight
+                )
                 preflight_checks = preflight(config, plan)
             elif is_ga4:
                 # The GA4 Admin API has no validate-only mode either; a
@@ -2987,7 +2994,7 @@ def confirm_and_apply(
                 "Analytics by re-reading the property)"
                 if is_setup
                 else f"re-checked the target against {platform_label}"
-                if is_reddit or is_gtm or is_ga4 or is_ads_reread
+                if is_reddit or is_microsoft or is_gtm or is_ga4 or is_ads_reread
                 else "sent the change to Google Ads in validate-only mode"
             )
             return {
@@ -4557,6 +4564,12 @@ def _execute_plan(
         from adloop.reddit.write import apply_plan
 
         return apply_plan(config, plan)
+
+    # Microsoft Advertising plans likewise have their own executor.
+    if plan.operation.startswith("microsoft_"):
+        from adloop.microsoft_ads.write import apply_plan as apply_microsoft_plan
+
+        return apply_microsoft_plan(config, plan)
 
     # Tag Manager plans likewise never touch the Ads client.
     if plan.operation.startswith("gtm_"):

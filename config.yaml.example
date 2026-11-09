@@ -96,6 +96,31 @@ reddit:
   user_agent: ""
   token_path: "~/.adloop/reddit_token.json"
 
+microsoft_ads:
+  # Microsoft Advertising / Bing (optional, REST API v13). Needs:
+  # 1. A developer token: Microsoft Advertising -> Settings -> Developer
+  #    settings, or https://developers.ads.microsoft.com/Account.
+  # 2. An Entra app registered with "Allow public client flows" on and the
+  #    Microsoft Advertising API permission msads.manage. Its application id:
+  # 3. `adloop microsoft-login` once: the browser opens, sign in with the
+  #    account that has access to the ad accounts; the refresh token lands in
+  #    token_path. The app needs http://localhost/callback as a
+  #    mobile/desktop redirect URI (the sign-in listens on a free port; Entra
+  #    ignores the port of localhost redirects). (--device-code is a fallback;
+  #    directories with security defaults block it with error 530035.)
+  #    Users who sign in to Microsoft Advertising with Google are not
+  #    supported yet: invite a Microsoft account or work (Entra) user to the
+  #    ad account and sign in as that user.
+  developer_token: ""
+  client_id: ""
+  client_secret: ""   # only for confidential (web) apps
+  tenant: "common"
+  # Manager account (CustomerId) and default ad account (CustomerAccountId);
+  # list_microsoft_ads_accounts shows both.
+  customer_id: ""
+  ad_account_id: ""
+  token_path: "~/.adloop/microsoft_token.json"
+
 safety:
   # Maximum daily budget allowed per campaign (in your account's currency).
   # AdLoop will reject any campaign creation or budget change above this.
