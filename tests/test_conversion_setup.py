@@ -323,3 +323,27 @@ def test_blocked_operations_stop_the_draft(config):
     config.safety.blocked_operations = ["update_conversion_action"]
     result = _draft(config, _linked_but_hidden())
     assert "blocked" in result["error"]
+
+
+@pytest.mark.parametrize("dry_run", [True, False])
+def test_a_step_blocked_after_the_draft_stops_the_apply(config, dry_run):
+    world = _linked_but_hidden()
+    preview = _draft(config, world)
+    before = {k: dict(v) for k, v in world.actions.items()}
+
+    # The setup's own operation stays allowed; one of its steps is blocked now.
+    config.safety.blocked_operations = ["update_conversion_action"]
+    result = _confirm(config, world, preview["plan_id"], dry_run)
+
+    assert result["status"] == "BLOCKED"
+    assert "update_conversion_action" in result["error"]
+    assert world.actions == before
+
+
+def test_step_operations_name_what_a_setup_carries_out():
+    from adloop.ga4 import retention
+
+    actions = [{"kind": "link"}, {"kind": "key_event"}, {"kind": "import"}, {"kind": "primary"}, {"kind": "retention"}]
+    assert setup.step_operations(actions) == sorted(
+        {"create_key_event", "update_conversion_action", retention.OPERATION}
+    )

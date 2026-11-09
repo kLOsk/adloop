@@ -24,6 +24,23 @@ if TYPE_CHECKING:
 
 OPERATION = "conversion_tracking_setup"
 
+# Steps that are operations of their own elsewhere: blocking one of those in
+# safety.blocked_operations blocks the step here too, at the draft and again
+# at apply (the blocklist can grow in between).
+_STEP_OPERATIONS = {
+    "key_event": "create_key_event",
+    "import": "update_conversion_action",
+    "primary": "update_conversion_action",
+}
+
+
+def step_operations(actions: list[dict]) -> list[str]:
+    """The separately blockable operations a setup plan's steps carry out."""
+    from adloop.ga4 import retention
+
+    operations = {**_STEP_OPERATIONS, "retention": retention.OPERATION}
+    return sorted({operations[a["kind"]] for a in actions if a.get("kind") in operations})
+
 _EVENT_NAME = re.compile(r"^[A-Za-z][A-Za-z0-9_]{0,39}$")
 _COUNTING_METHODS = ("ONCE_PER_EVENT", "ONCE_PER_SESSION")
 _GA4_ACTION_TYPES = ("GOOGLE_ANALYTICS_4_CUSTOM", "GOOGLE_ANALYTICS_4_PURCHASE")
@@ -328,13 +345,9 @@ def draft_conversion_tracking_setup(
         except Exception:  # noqa: BLE001 - a hint, not part of the plan
             pass
 
-    blocked = {
-        "key_event": "create_key_event", "import": "update_conversion_action",
-        "primary": "update_conversion_action", "retention": retention.OPERATION,
-    }
-    for kind in {a["kind"] for a in actions} & set(blocked):
+    for operation in step_operations(actions):
         try:
-            check_blocked_operation(blocked[kind], config.safety)
+            check_blocked_operation(operation, config.safety)
         except SafetyViolation as e:
             return {"error": str(e)}
 

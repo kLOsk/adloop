@@ -90,7 +90,16 @@ def blocked_plan_refusal(config: AdLoopConfig, plan: ChangePlan, *, dry_run: boo
     outcome; the plan stays pending, so it can still be discarded or applied
     once the operation is unblocked.
     """
-    error = blocked_operation_error(plan.operation, config.safety)
+    operations = [plan.operation]
+    from adloop.conversion_setup import OPERATION as SETUP, step_operations
+
+    if plan.operation == SETUP:
+        # The setup bundles steps that are operations of their own.
+        operations += step_operations((plan.apply_only_payload or {}).get("actions") or [])
+    error = next(
+        (e for e in (blocked_operation_error(op, config.safety) for op in operations) if e is not None),
+        None,
+    )
     if error is None:
         return None
     from adloop.safety.audit import log_mutation
