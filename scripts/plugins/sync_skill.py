@@ -91,6 +91,9 @@ CLOUD_DROPPED_SECTIONS = [
     # Hidden on Cloud until the data processing agreement covers the CSVs'
     # personal data; remove this entry when the runtime switch goes on.
     "### Offline Conversion Uploads",
+    # Community-contributed in the open-source package; Cloud offers it once
+    # we take it over (remove this entry and the marker below then).
+    "### Microsoft Advertising Tools",
 ]
 
 # Anything matching these after the drop names a tool Cloud doesn't offer.
@@ -99,6 +102,7 @@ CLOUD_UNAVAILABLE_MARKERS = [
     r"\bdraft_\w*gtm\w*",
     r"\bupload_conversion_csv\b",
     r"\bdraft_upload_\w+",
+    r"\b\w*microsoft_\w+",
 ]
 
 # (old, new) pairs. Every ``old`` must occur in the source at least once.
@@ -234,6 +238,16 @@ CLOUD_REPLACEMENTS: list[tuple[str, str]] = [
         "- **Property ID**: Use the property chosen in the AdLoop Cloud "
         "dashboard (no need to ask)",
     ),
+    # Microsoft Advertising is not on Cloud yet (see CLOUD_DROPPED_SECTIONS).
+    (
+        "(when configured) Reddit Ads and Microsoft Advertising connectivity",
+        "(when configured) Reddit Ads connectivity",
+    ),
+    (
+        '`draft_image_assets(upload_ids=["up_..."])` for Google Ads; '
+        '`draft_microsoft_image_extension(upload_ids=["up_..."])` for Microsoft Advertising; ',
+        '`draft_image_assets(upload_ids=["up_..."])` for Google Ads; ',
+    ),
 ]
 
 # Anything matching these after the rewrite only makes sense for the
@@ -303,20 +317,7 @@ def drop_sections(body: str) -> str:
             len(lines),
         )
         del lines[start:end]
-    body = "".join(lines)
-
-    leftovers = [
-        f"  line {number}: {line.strip()[:120]}"
-        for number, line in enumerate(body.splitlines(), start=1)
-        if any(re.search(marker, line) for marker in CLOUD_UNAVAILABLE_MARKERS)
-    ]
-    if leftovers:
-        raise SystemExit(
-            "The upstream rules mention tools AdLoop Cloud doesn't offer outside "
-            "the dropped sections. Extend CLOUD_DROPPED_SECTIONS or rewrite them.\n"
-            + "\n".join(leftovers)
-        )
-    return body
+    return "".join(lines)
 
 
 def to_cloud(body: str) -> str:
@@ -330,6 +331,19 @@ def to_cloud(body: str) -> str:
         )
     for old, new in CLOUD_REPLACEMENTS:
         body = body.replace(old, new)
+
+    # After the rewrites, so a CLOUD_REPLACEMENTS entry can take a mention out.
+    leftovers = [
+        f"  line {number}: {line.strip()[:120]}"
+        for number, line in enumerate(body.splitlines(), start=1)
+        if any(re.search(marker, line) for marker in CLOUD_UNAVAILABLE_MARKERS)
+    ]
+    if leftovers:
+        raise SystemExit(
+            "The upstream rules mention tools AdLoop Cloud doesn't offer outside "
+            "the dropped sections. Extend CLOUD_DROPPED_SECTIONS or rewrite them.\n"
+            + "\n".join(leftovers)
+        )
 
     leftovers = []
     for number, line in enumerate(body.splitlines(), start=1):
