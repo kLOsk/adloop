@@ -560,7 +560,7 @@ class TestUnconfiguredPlatforms:
         server = restore_visibility
         from adloop.config import AdLoopConfig
 
-        assert server.hide_unconfigured_platforms(AdLoopConfig()) == ["reddit"]
+        assert server.hide_unconfigured_platforms(AdLoopConfig()) == ["microsoft_ads", "reddit"]
 
         names = {t.name for t in await server.mcp.list_tools()}
         assert not {n for n in names if "reddit" in n}
@@ -573,9 +573,20 @@ class TestUnconfiguredPlatforms:
         from adloop.config import AdLoopConfig, RedditConfig
 
         config = AdLoopConfig(reddit=RedditConfig(client_id="app"))
-        assert server.hide_unconfigured_platforms(config) == []
+        assert server.hide_unconfigured_platforms(config) == ["microsoft_ads"]
         names = {t.name for t in await server.mcp.list_tools()}
         assert "get_reddit_campaigns" in names
+        assert "get_microsoft_campaigns" not in names
+
+    @pytest.mark.asyncio
+    async def test_microsoft_with_a_developer_token_stays(self, restore_visibility):
+        server = restore_visibility
+        from adloop.config import AdLoopConfig, MicrosoftAdsConfig
+
+        config = AdLoopConfig(microsoft_ads=MicrosoftAdsConfig(developer_token="dev"))
+        assert server.hide_unconfigured_platforms(config) == ["reddit"]
+        names = {t.name for t in await server.mcp.list_tools()}
+        assert "get_microsoft_campaigns" in names
 
     @pytest.mark.asyncio
     async def test_naming_a_platform_in_adloop_toolsets_shows_it_anyway(self, monkeypatch, restore_visibility):
@@ -615,9 +626,10 @@ class TestUnconfiguredPlatforms:
             runtime.set_default_config(None)
 
         assert ran == [True]
-        assert server._HIDDEN_TAGS == {"reddit"}
+        assert server._HIDDEN_TAGS == {"microsoft_ads", "reddit"}
         names = {t.name for t in await server.mcp.list_tools()}
         assert "get_reddit_campaigns" not in names
+        assert "get_microsoft_campaigns" not in names
 
 
 class TestDirectoryReadiness:

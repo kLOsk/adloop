@@ -9360,6 +9360,12 @@ _PLATFORM_SETUP: dict[str, tuple[Callable, str]] = {
         _reddit_configured,
         "Reddit Ads: run `adloop init` and complete the Reddit Ads step.",
     ),
+    "microsoft_ads": (
+        lambda config: bool(config.microsoft_ads.developer_token or config.microsoft_ads.client_id),
+        "Microsoft Advertising: add a `microsoft_ads` section with your developer token and "
+        "Entra app's client_id to the config (see config.yaml.example), then run "
+        "`adloop microsoft-login`.",
+    ),
 }
 
 
