@@ -199,3 +199,28 @@ def test_a_host_that_does_not_offer_microsoft_does_not_report_it(monkeypatch, st
 
     status = _health(monkeypatch, config=AdLoopConfig(), summaries=_summaries(), probe=lambda _c, _p: None)
     assert status["microsoft_ads"] == "not_configured"
+
+
+def test_a_hosted_workspace_without_microsoft_is_not_probed(monkeypatch):
+    """Hosted runtimes may offer Microsoft only to workspaces that connected
+    it. The others must not get a Microsoft error in their health check."""
+    import adloop.ga4.reports as reports
+    from adloop import auth
+
+    class MicrosoftProvider:
+        def microsoft_ads_credentials(self, config):
+            raise AssertionError("a workspace without Microsoft must not be probed")
+
+    monkeypatch.setattr("adloop.runtime.deployment_mode", lambda: "server")
+    monkeypatch.setattr(reports, "get_account_summaries", lambda _c: _summaries())
+    monkeypatch.setattr(reports, "probe_data_api", lambda _c, _p: None)
+    previous = auth.get_credentials_provider()
+    auth.set_credentials_provider(MicrosoftProvider())
+    runtime.set_default_config(AdLoopConfig())
+    runtime.set_tool_visibility(lambda tools: {n: t for n, t in tools.items() if "microsoft_ads" not in t})
+    try:
+        status = server.health_check()
+    finally:
+        runtime.set_tool_visibility(None)
+        auth.set_credentials_provider(previous)
+    assert "microsoft_ads" not in status

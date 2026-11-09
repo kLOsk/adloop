@@ -551,6 +551,34 @@ def _microsoft_ads_structured_error(exc: Exception) -> dict | None:
     from adloop.microsoft_ads.auth import MicrosoftAdsApiError, MicrosoftAdsAuthError
 
     if isinstance(exc, MicrosoftAdsAuthError):
+        from adloop.runtime import deployment_mode
+
+        if deployment_mode() == "server":
+            # Hosted: the connection lives in the deployment's dashboard; there
+            # is no local sign-in command to run.
+            hosted_hints = {
+                "missing_developer_token": "Microsoft Advertising is not enabled on this deployment yet.",
+                "missing_client": "Microsoft Advertising is not enabled on this deployment yet.",
+                "not_an_account_user": (
+                    "Invite a Microsoft account or a work (Entra) user to the ad account in Microsoft "
+                    "Advertising, then reconnect Microsoft in the dashboard as that user. Signing in with "
+                    "Google is not supported yet."
+                ),
+                "google_identity": (
+                    "This account's users sign in with Google, which is not supported yet. Invite a "
+                    "Microsoft account or a work (Entra) user to the ad account, then reconnect Microsoft "
+                    "in the dashboard as that user."
+                ),
+            }
+            return {
+                "error": str(exc),
+                "hint": hosted_hints.get(
+                    exc.error_code,
+                    "Reconnect Microsoft Advertising in the dashboard with the account that has "
+                    "access to the ad accounts, then retry.",
+                ),
+                "auth_error": "MICROSOFT_ADS_" + (exc.error_code or "auth").upper(),
+            }
         hints = {
             "missing_developer_token": (
                 "Request a developer token in Microsoft Advertising (Settings → Developer "
@@ -874,6 +902,8 @@ def health_check() -> dict:
 
     ms_cfg = current_config().microsoft_ads
     if _microsoft_ads_configured():
+        from adloop.runtime import deployment_mode
+
         try:
             from adloop.microsoft_ads.read import account_meta as ms_account_meta
 
@@ -889,7 +919,9 @@ def health_check() -> dict:
                 ms_request(current_config(), "customer", "User/Query", {"UserId": None})
                 status["microsoft_ads"] = "ok"
                 status["microsoft_ads_note"] = (
-                    "Signed in; set microsoft_ads.ad_account_id (see list_microsoft_ads_accounts)."
+                    "Signed in; pick the ad account in the dashboard (see list_microsoft_ads_accounts)."
+                    if deployment_mode() == "server"
+                    else "Signed in; set microsoft_ads.ad_account_id (see list_microsoft_ads_accounts)."
                 )
         except Exception as e:
             parsed = _structured_error("health_check", e)
@@ -7272,13 +7304,17 @@ def draft_reddit_ad(
 
 
 def _microsoft_ads_configured() -> bool:
-    """Set up here: hosted, the credentials provider must support Microsoft;
+    """Set up here: hosted, the credentials provider must support Microsoft
+    and the runtime must offer its tools to this caller (a hosted runtime
+    may offer them only to workspaces that connected Microsoft);
     self-hosted, the config names a developer token or an app."""
     from adloop.auth import get_credentials_provider
     from adloop.runtime import deployment_mode
 
     if deployment_mode() == "server":
-        return hasattr(get_credentials_provider(), "microsoft_ads_credentials")
+        return hasattr(get_credentials_provider(), "microsoft_ads_credentials") and (
+            "list_microsoft_ads_accounts" in _offered_tool_names()
+        )
     cfg = current_config().microsoft_ads
     return bool(cfg.developer_token or cfg.client_id)
 

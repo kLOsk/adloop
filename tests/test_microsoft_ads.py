@@ -1287,3 +1287,22 @@ class TestInStoreGoalPilot:
         assert [g["Name"] for g in goals] == ["Quote form", "Booked jobs"]
         sent = [c.kwargs["json"]["ConversionGoalTypes"] for c in req.call_args_list]
         assert "InStoreTransaction" in sent[0] and "InStoreTransaction" not in sent[1]
+
+
+def test_hosted_auth_hints_point_at_the_dashboard_not_the_local_sign_in():
+    from adloop import runtime
+    from adloop.microsoft_ads.auth import MicrosoftAdsAuthError
+    from adloop.server import _structured_error
+
+    runtime.set_deployment_mode("server")
+    try:
+        for code in ("invalid_grant", "missing_refresh_token", "not_an_account_user", "missing_client"):
+            result = _structured_error("get_microsoft_campaigns", MicrosoftAdsAuthError("refused", error_code=code))
+            assert "microsoft-login" not in result["hint"], code
+            assert result["auth_error"] == "MICROSOFT_ADS_" + code.upper()
+        assert "Reconnect Microsoft" in _structured_error(
+            "get_microsoft_campaigns", MicrosoftAdsAuthError("refused", error_code="invalid_grant"))["hint"]
+    finally:
+        runtime.set_deployment_mode("local")
+    assert "microsoft-login" in _structured_error(
+        "get_microsoft_campaigns", MicrosoftAdsAuthError("refused", error_code="invalid_grant"))["hint"]
