@@ -2886,6 +2886,11 @@ def confirm_and_apply(
             "Plans expire when the MCP server restarts.",
         }
 
+    from adloop.safety.guards import blocked_plan_refusal
+
+    if (refusal := blocked_plan_refusal(config, plan, dry_run=dry_run)) is not None:
+        return refusal
+
     forced_by_config = bool(config.safety.require_dry_run) and not dry_run
     if config.safety.require_dry_run:
         dry_run = True
@@ -3202,6 +3207,35 @@ def confirm_and_apply(
             and not e.sent_total
             and not e.unknown_status
         )
+        from adloop.safety.outcomes import PartialApplyError
+
+        if isinstance(e, PartialApplyError):
+            # Part of the change happened (or may have): replaying the plan
+            # would repeat it. Retire it and say what was done.
+            remove_plan(plan.plan_id)
+            log_mutation(
+                config.safety.log_file,
+                operation=plan.operation,
+                customer_id=plan.customer_id,
+                entity_type=plan.entity_type,
+                entity_id=plan.entity_id,
+                changes=plan.changes,
+                dry_run=False,
+                result="unknown_status" if e.unknown else "partial_apply",
+                error=error_message,
+            )
+            return {
+                "status": "UNKNOWN_OUTCOME" if e.unknown else "PARTIAL_APPLY",
+                "plan_id": plan.plan_id,
+                "operation": plan.operation,
+                "error": error_message,
+                "created": e.created,
+                "message": (
+                    "Part of this change may already be in the account, so the plan was retired "
+                    "and cannot be applied again. Read the account back, then draft only what is "
+                    "still missing."
+                ),
+            }
         if not plan.operation.startswith("upload_") or nothing_written:
             store_plan(plan)
 

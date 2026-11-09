@@ -23,7 +23,8 @@ class ChangePlan:
     requires_double_confirm: bool = False
     dry_run_result: dict[str, Any] | None = None
     # Ad platform the plan targets: "" (Google, the default so stored plans
-    # from before the field existed still load) or "reddit".
+    # from before the field existed still load), "reddit", "gtm", "ga4",
+    # "microsoft" or "chatgpt".
     platform: str = ""
     # When a confirmation dialog for this plan was last sent and not yet
     # answered (ISO timestamp, "" when none is open). An app that receives

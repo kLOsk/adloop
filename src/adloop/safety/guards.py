@@ -5,7 +5,8 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from adloop.config import SafetyConfig
+    from adloop.config import AdLoopConfig, SafetyConfig
+    from adloop.safety.preview import ChangePlan
 
 
 class SafetyViolation(Exception):
@@ -54,3 +55,64 @@ def requires_double_confirmation(operation: str, **kwargs: object) -> bool:
             return True
 
     return False
+
+
+# ---------------------------------------------------------------------------
+# Shared by the draft tools and confirm_and_apply of every platform
+# ---------------------------------------------------------------------------
+
+
+def blocked_operation_error(operation: str, config: SafetyConfig) -> dict | None:
+    """A draft tool's refusal for a blocked operation, or None when it may proceed."""
+    try:
+        check_blocked_operation(operation, config)
+    except SafetyViolation as e:
+        return {"error": str(e)}
+    return None
+
+
+def store_draft(plan: ChangePlan, *, warnings: list[str] | None = None) -> dict:
+    """Store a drafted plan and return its preview, with the draft's warnings."""
+    from adloop.safety.preview import store_plan
+
+    store_plan(plan)
+    preview = plan.to_preview()
+    if warnings:
+        preview["warnings"] = warnings
+    return preview
+
+
+def blocked_plan_refusal(config: AdLoopConfig, plan: ChangePlan, *, dry_run: bool) -> dict | None:
+    """confirm_and_apply's refusal for a plan whose operation is blocked now.
+
+    The blocklist can grow after a plan was drafted, so it is checked again
+    before a dry run or an apply. The refusal is logged like any other
+    outcome; the plan stays pending, so it can still be discarded or applied
+    once the operation is unblocked.
+    """
+    error = blocked_operation_error(plan.operation, config.safety)
+    if error is None:
+        return None
+    from adloop.safety.audit import log_mutation
+
+    log_mutation(
+        config.safety.log_file,
+        operation=plan.operation,
+        customer_id=plan.customer_id,
+        entity_type=plan.entity_type,
+        entity_id=plan.entity_id,
+        changes=plan.changes,
+        dry_run=dry_run,
+        result="blocked",
+        error=error["error"],
+    )
+    return {
+        "status": "BLOCKED",
+        "plan_id": plan.plan_id,
+        "operation": plan.operation,
+        "error": error["error"],
+        "message": (
+            "Nothing was changed: this operation was added to safety.blocked_operations "
+            "after the plan was drafted, so it can neither be tested nor applied."
+        ),
+    }

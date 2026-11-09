@@ -429,6 +429,8 @@ Same draft → preview → `confirm_and_apply` gate; the plan carries `platform:
 - `require_dry_run: true` in config overrides `dry_run=false` — the user must change the config to allow real mutations.
 - `two_phase_apply: true` in config (always on for AdLoop Cloud) refuses `dry_run=false` with status `DRY_RUN_REQUIRED` until that plan_id has completed one `dry_run=true` pass. Run the dry run, show the user, then apply — do not retry `dry_run=false` in a loop.
 - All operations (including dry runs) are logged to `~/.adloop/audit.log`.
+- `blocked_operations` is checked again by `confirm_and_apply`: a plan whose operation was blocked after it was drafted is refused with status `BLOCKED`, dry run and apply alike, and no confirmation dialog is shown for it.
+- **`PARTIAL_APPLY` and `UNKNOWN_OUTCOME`** (platforms without transactional writes): `PARTIAL_APPLY` means part of the change is in the account (`created` names it), from a multi-step apply whose later step failed or a batch the platform accepted only in part; `UNKNOWN_OUTCOME` means the platform never answered a create, so it may or may not exist. In both cases the plan is retired and cannot be applied again: read the account back, tell the user what exists, and draft only what is missing.
 
 ## Safety Rules (CRITICAL — always follow)
 

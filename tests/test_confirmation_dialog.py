@@ -152,6 +152,13 @@ async def test_no_dialog_before_the_required_dry_run(fake_apply, tmp_path):
     assert asked == []
 
 
+async def test_no_dialog_for_an_operation_blocked_after_the_draft(fake_apply, tmp_path):
+    """confirm_and_apply refuses it with BLOCKED; the user is not asked to approve it first."""
+    runtime.set_default_config(_config(tmp_path, blocked_operations=["pause_entity"]))
+    _status, asked = await _apply(_plan(), answer={"apply": True})
+    assert asked == []
+
+
 async def test_hosted_servers_skip_the_dialog_on_the_older_protocol(fake_apply):
     runtime.set_deployment_mode("server")
     status, asked = await _apply(_plan(), answer={"apply": False}, mode="legacy")

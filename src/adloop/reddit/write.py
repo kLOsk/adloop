@@ -190,13 +190,9 @@ def _daily_equivalent(
 
 
 def _guard(operation: str, config: AdLoopConfig) -> dict | None:
-    from adloop.safety.guards import SafetyViolation, check_blocked_operation
+    from adloop.safety.guards import blocked_operation_error
 
-    try:
-        check_blocked_operation(operation, config.safety)
-    except SafetyViolation as e:
-        return {"error": str(e)}
-    return None
+    return blocked_operation_error(operation, config.safety)
 
 
 def _budget_cap(daily_equivalent: float | None, config: AdLoopConfig, currency: str) -> None:
@@ -213,14 +209,10 @@ def _budget_cap(daily_equivalent: float | None, config: AdLoopConfig, currency: 
 
 
 def _store(plan_kwargs: dict, *, warnings: list[str] | None = None) -> dict:
-    from adloop.safety.preview import ChangePlan, store_plan
+    from adloop.safety.guards import store_draft
+    from adloop.safety.preview import ChangePlan
 
-    plan = ChangePlan(platform=PLATFORM, **plan_kwargs)
-    store_plan(plan)
-    preview = plan.to_preview()
-    if warnings:
-        preview["warnings"] = warnings
-    return preview
+    return store_draft(ChangePlan(platform=PLATFORM, **plan_kwargs), warnings=warnings)
 
 
 def _fetch(config: AdLoopConfig, entity_type: str, entity_id: str) -> dict:
