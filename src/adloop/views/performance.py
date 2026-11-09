@@ -131,8 +131,11 @@ def campaign_performance_view(
 
     chart_rows = [r for r in rows if r["cost"] > 0][:_CHART_ROWS]
     top_cost = max((r["cost"] for r in chart_rows), default=0) or 1
+    # Every number lives once, in state: ChatGPT shows the model the whole
+    # view next to the text answer, so a second copy would cost it twice.
     state = {
         "totals": totals,
+        "rows": rows,
         "bars": [
             {"name": r["name"], "cost": r["cost"], "share": round(r["cost"] / top_cost * 100, 1)}
             for r in chart_rows
@@ -205,7 +208,7 @@ def campaign_performance_view(
                 with Div(css_class="overflow-x-auto max-w-full"):
                     DataTable(
                         columns=columns,
-                        rows=rows,
+                        rows="{{ rows }}",
                         search=len(rows) > 10,
                         search_placeholder="Find a campaign",
                         paginated=len(rows) > 15,
