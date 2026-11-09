@@ -127,3 +127,30 @@ async def test_server_announces_its_icons_and_website():
         "https://getadloop.com/icon-512.png",
         "https://getadloop.com/favicon.svg",
     ]
+
+
+def test_hidden_platforms_say_how_to_set_them_up(monkeypatch, stub_other_services):
+    monkeypatch.setattr(server, "_HIDDEN_TAGS", {"reddit"})
+
+    status = _health(
+        monkeypatch,
+        config=AdLoopConfig(),
+        summaries=_summaries(),
+        probe=lambda _c, _p: None,
+    )
+
+    assert status["reddit"] == "not_configured"
+    assert "adloop init" in status["hidden_toolsets"]["reddit"]
+    assert "restart" in status["hidden_toolsets_note"]
+    assert not [n for n in status["tools_offered"] if "reddit" in n]
+
+
+def test_nothing_hidden_means_no_note(monkeypatch, stub_other_services):
+    status = _health(
+        monkeypatch,
+        config=AdLoopConfig(),
+        summaries=_summaries(),
+        probe=lambda _c, _p: None,
+    )
+
+    assert "hidden_toolsets" not in status

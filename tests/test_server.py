@@ -525,6 +525,100 @@ class TestToolsets:
         assert server.mcp._transforms == before
 
 
+@pytest.fixture(autouse=True)
+def restore_visibility():
+    """Undo whatever a test does to the shared server's tool visibility:
+    the visibility rules, the ADLOOP_TOOLSETS selection and hidden platforms."""
+    from adloop import server
+
+    saved = list(server.mcp._transforms)
+    saved_enabled = server._ENABLED_TAGS
+    saved_hidden = set(server._HIDDEN_TAGS)
+    yield server
+    server.mcp._transforms[:] = saved
+    server._ENABLED_TAGS = saved_enabled
+    server._HIDDEN_TAGS.clear()
+    server._HIDDEN_TAGS.update(saved_hidden)
+
+
+class TestUnconfiguredPlatforms:
+    """A local server hides the tools of a platform that isn't set up."""
+
+    @pytest.mark.asyncio
+    async def test_importing_the_server_hides_nothing(self):
+        # Embedders (a hosted runtime) import the module and decide
+        # visibility per request; the startup step is the entry point's.
+        from adloop import server
+
+        assert server._HIDDEN_TAGS == set()
+        names = {t.name for t in await server.mcp.list_tools()}
+        assert "get_reddit_campaigns" in names
+
+    @pytest.mark.asyncio
+    async def test_reddit_without_an_app_is_hidden(self, restore_visibility):
+        server = restore_visibility
+        from adloop.config import AdLoopConfig
+
+        assert server.hide_unconfigured_platforms(AdLoopConfig()) == ["reddit"]
+
+        names = {t.name for t in await server.mcp.list_tools()}
+        assert not {n for n in names if "reddit" in n}
+        assert {"get_campaign_performance", "run_ga4_report", "health_check", "confirm_and_apply"} <= names
+        assert "get_reddit_campaigns" not in server._offered_tool_names()
+
+    @pytest.mark.asyncio
+    async def test_reddit_with_an_app_stays(self, restore_visibility):
+        server = restore_visibility
+        from adloop.config import AdLoopConfig, RedditConfig
+
+        config = AdLoopConfig(reddit=RedditConfig(client_id="app"))
+        assert server.hide_unconfigured_platforms(config) == []
+        names = {t.name for t in await server.mcp.list_tools()}
+        assert "get_reddit_campaigns" in names
+
+    @pytest.mark.asyncio
+    async def test_naming_a_platform_in_adloop_toolsets_shows_it_anyway(self, monkeypatch, restore_visibility):
+        server = restore_visibility
+        from adloop.config import AdLoopConfig
+
+        monkeypatch.setenv("ADLOOP_TOOLSETS", "reddit")
+        server._apply_toolsets_env()
+        assert server.hide_unconfigured_platforms(AdLoopConfig()) == []
+        names = {t.name for t in await server.mcp.list_tools()}
+        assert "get_reddit_campaigns" in names
+        assert "get_campaign_performance" not in names
+
+    def test_every_hidden_platform_is_a_toolset_with_setup_steps(self):
+        from adloop import server
+
+        for toolset, (configured, how) in server._PLATFORM_SETUP.items():
+            assert toolset in server.TOOLSETS
+            assert callable(configured) and how.strip()
+
+    @pytest.mark.asyncio
+    async def test_the_local_entry_point_hides_them(self, monkeypatch, tmp_path, restore_visibility):
+        server = restore_visibility
+        import adloop
+        from adloop import diagnostics, runtime
+        from adloop.config import AdLoopConfig
+
+        ran = []
+        monkeypatch.setattr(adloop.sys, "argv", ["adloop"])
+        monkeypatch.setattr(diagnostics, "install", lambda: None)
+        monkeypatch.setattr(adloop, "install_runtime_patches", lambda: None)
+        monkeypatch.setattr(server.mcp, "run", lambda *a, **k: ran.append(True))
+        runtime.set_default_config(AdLoopConfig())
+        try:
+            adloop.main()
+        finally:
+            runtime.set_default_config(None)
+
+        assert ran == [True]
+        assert server._HIDDEN_TAGS == {"reddit"}
+        names = {t.name for t in await server.mcp.list_tools()}
+        assert "get_reddit_campaigns" not in names
+
+
 class TestDirectoryReadiness:
     """What the Claude and ChatGPT connector directories check on every tool."""
 

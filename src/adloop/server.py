@@ -345,6 +345,9 @@ def set_request_state_keys(keys: list[bytes]) -> None:
 _TOOL_TAGS: dict[str, frozenset[str]] = {}
 # Tags enabled by ADLOOP_TOOLSETS (None: the full catalog).
 _ENABLED_TAGS: set[str] | None = None
+# Toolsets the local server hid at startup because their platform is not
+# set up (see hide_unconfigured_platforms), so health_check can say why.
+_HIDDEN_TAGS: set[str] = set()
 
 
 # The API each toolset calls, linked at the end of every tool description:
@@ -767,7 +770,7 @@ def health_check() -> dict:
             status["ads_error_details"] = parsed["details"]
 
     reddit_cfg = current_config().reddit
-    if reddit_cfg.ad_account_id or reddit_cfg.client_id:
+    if _reddit_configured(current_config()):
         try:
             from adloop.reddit.client import data_of, reddit_get
 
@@ -793,6 +796,16 @@ def health_check() -> dict:
             status["hint"] = status["ga4_hint"]
     elif status.get("reddit") == "error" and status.get("reddit_hint"):
         status["hint"] = status["reddit_hint"]
+
+    if _HIDDEN_TAGS:
+        status["hidden_toolsets"] = {
+            toolset: _PLATFORM_SETUP[toolset][1]
+            for toolset in sorted(_HIDDEN_TAGS)
+        }
+        status["hidden_toolsets_note"] = (
+            "These platforms are not set up, so their tools are hidden. Set one "
+            "up as described, then restart the AdLoop MCP server to get its tools."
+        )
 
     status["adloop_version"] = _adloop_version()
     status["tools_offered"] = _offered_tool_names()
@@ -825,7 +838,7 @@ def _offered_tool_names() -> list[str]:
     tools = {
         name: tags
         for name, tags in _TOOL_TAGS.items()
-        if _ENABLED_TAGS is None or tags & _ENABLED_TAGS
+        if (_ENABLED_TAGS is None or tags & _ENABLED_TAGS) and not tags & _HIDDEN_TAGS
     }
     hook = tool_visibility()
     names = hook(tools) if hook is not None else tools
@@ -8297,3 +8310,43 @@ def _apply_toolsets_env() -> None:
 
 
 _apply_toolsets_env()
+
+
+def _reddit_configured(config) -> bool:
+    return bool(config.reddit.client_id or config.reddit.ad_account_id)
+
+
+# Platforms whose tools a local server hides until they are set up, so a
+# setup without them doesn't carry their tool schemas into every session:
+# toolset -> (is it set up in this config?, how to set it up). Google is not
+# listed: it can sign in through Application Default Credentials with
+# nothing in the config, so "not set up" can't be told from the config alone.
+_PLATFORM_SETUP: dict[str, tuple[Callable, str]] = {
+    "reddit": (
+        _reddit_configured,
+        "Reddit Ads: run `adloop init` and complete the Reddit Ads step.",
+    ),
+}
+
+
+def hide_unconfigured_platforms(config) -> list[str]:
+    """Hide the tools of every platform this config doesn't set up.
+
+    Called by the local entry point (``adloop``), never on import: an
+    embedding server decides per request which tools to show, and has no
+    single config to judge by. An explicit ADLOOP_TOOLSETS selection is left
+    alone, so naming a platform there still shows its tools (health_check
+    then reports it as not configured). Returns the hidden toolsets.
+    """
+    if _ENABLED_TAGS is not None:
+        return []
+    hidden = sorted(
+        toolset
+        for toolset, (configured, _how) in _PLATFORM_SETUP.items()
+        if not configured(config)
+    )
+    if hidden:
+        _HIDDEN_TAGS.update(hidden)
+        # A later visibility rule wins over the ADLOOP_TOOLSETS allowlist.
+        mcp.disable(tags=set(hidden))
+    return hidden

@@ -576,6 +576,8 @@ Google Ads can be narrowed further. Use one of these instead of `ads`:
 
 `health_check` and `confirm_and_apply` are always included, whatever you select. Unset = the full catalog; unknown names fail at startup with the valid list. The effect is real: `ads:read,ga4` costs about 40% of `ads,ga4` for audits and diagnosis, and an `ads:plan`-only client for keyword research pays about 5% of the full catalog. Toolsets are per *client*, not per install: one AdLoop config can serve a trimmed Cursor and a full-catalog Claude Code side by side.
 
+Without `ADLOOP_TOOLSETS`, a platform you haven't set up stays out of the list: with no Reddit app in the config, the Reddit Ads tools are hidden, and `health_check` lists them under `hidden_toolsets` with the setup step. Set the platform up and restart the server to get its tools, or name it in `ADLOOP_TOOLSETS` to show them anyway. Google's toolsets are always listed, because Google can sign in through Application Default Credentials with nothing in the config.
+
 On [AdLoop Cloud](https://getadloop.com), the same feature is per API key: pick toolsets when creating a key in the dashboard, and that key's tools/list is trimmed server-side for whichever AI client uses it.
 
 ## Project Structure

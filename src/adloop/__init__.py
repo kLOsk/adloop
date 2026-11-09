@@ -74,6 +74,16 @@ def main() -> None:
     diagnostics.install()
     install_runtime_patches()
 
-    from adloop.server import mcp
+    from adloop.server import hide_unconfigured_platforms, mcp
+
+    # Also local-only: a platform that isn't set up (Reddit Ads without a
+    # Reddit app, say) keeps its tools out of tools/list. A config that fails
+    # to load hides nothing; every tool call reports the problem.
+    try:
+        from adloop.runtime import current_config
+
+        hide_unconfigured_platforms(current_config())
+    except Exception as e:  # noqa: BLE001
+        print(f"adloop: could not check which platforms are set up: {e}", file=sys.stderr)
 
     mcp.run()
