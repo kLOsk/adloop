@@ -27,12 +27,13 @@ if TYPE_CHECKING:
 
 VIEW_URI = "ui://adloop/view.html"
 # Added to the AI's copy of a result that is shown as a view, so the reply
-# comments on the dashboard instead of rebuilding it as a table.
+# comments on the dashboard instead of rebuilding it as a table. "Usually":
+# claude.ai draws no view for a call folded into a run of several tool calls.
 VIEW_NOTE = (
-    "The user sees this result as an interactive dashboard next to your reply: "
+    "The app usually shows the user this result as an interactive dashboard: "
     "headline numbers, alerts, spend per campaign and a sortable table of every "
-    "campaign. Don't repeat those numbers as a table; say what stands out and "
-    "what to do next."
+    "campaign. Say what stands out and what to do next instead of repeating "
+    "those numbers as a table."
 )
 VIEW_MIME_TYPE = "text/html;profile=mcp-app"
 
