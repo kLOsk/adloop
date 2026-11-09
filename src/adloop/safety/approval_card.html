@@ -111,6 +111,10 @@
       msgAnnotate: " Suggested GA4 annotation for {date}: \u201c{title}\u201d (draft_ga4_annotation, needs approval).",
       msgDiscarded: "Discarded on the AdLoop approval card: {op} (plan {id}). Nothing was changed.",
       gone: "This change is no longer pending (applied, discarded or expired).",
+      partial: "Partly applied. Part of the change is live, the rest is not.",
+      unknown: "Outcome unknown. The platform did not confirm the change, so it may or may not be live.",
+      msgPartial: "Partly applied on the AdLoop approval card: {op} (plan {id}). Read the account back to see what exists, then draft only what is missing.",
+      msgUnknown: "Outcome unknown on the AdLoop approval card: {op} (plan {id}). The platform did not answer. Read the account back before drafting it again.",
     },
     de: {
       brand: "AdLoop · Freigabe nötig", ack: "Mir ist klar, dass sich das nicht rückgängig machen lässt.",
@@ -124,6 +128,10 @@
       msgAnnotate: " Vorgeschlagene GA4-Anmerkung für den {date}: \u201e{title}\u201c (draft_ga4_annotation, braucht Freigabe).",
       msgDiscarded: "Auf der AdLoop-Freigabekarte verworfen: {op} (Plan {id}). Nichts wurde geändert.",
       gone: "Diese Änderung ist nicht mehr offen (angewendet, verworfen oder abgelaufen).",
+      partial: "Teilweise angewendet. Ein Teil der Änderung ist live, der Rest nicht.",
+      unknown: "Ergebnis unklar. Die Plattform hat die Änderung nicht bestätigt, sie kann live sein oder nicht.",
+      msgPartial: "Auf der AdLoop-Freigabekarte teilweise angewendet: {op} (Plan {id}). Lies das Konto erneut, um zu sehen, was angelegt wurde, und entwirf nur, was fehlt.",
+      msgUnknown: "Ergebnis auf der AdLoop-Freigabekarte unklar: {op} (Plan {id}). Die Plattform hat nicht geantwortet. Lies das Konto erneut, bevor du die Änderung neu entwirfst.",
     },
   };
   const PLATFORMS = { google: "Google Ads", reddit: "Reddit Ads", microsoft: "Microsoft Advertising", chatgpt: "ChatGPT Ads", ga4: "Google Analytics", gtm: "Tag Manager", google_ga4: "Google Ads · Analytics" };
@@ -308,7 +316,15 @@
       });
       const r = resultPayload(result);
       const status = r.status || "";
-      if (result && result.isError || r.error) {
+      if (status === "PARTIAL_APPLY" || status === "UNKNOWN_OUTCOME") {
+        // Part of the change may be live and the plan is retired: the card
+        // is done, and the AI has to read the account back before drafting
+        // anything again.
+        const partial = status === "PARTIAL_APPLY";
+        finished = true;
+        setStatus("warn", t(partial ? "partial" : "unknown") + (r.error ? " " + r.error : ""));
+        tell(t(partial ? "msgPartial" : "msgUnknown"));
+      } else if (result && result.isError || r.error) {
         setStatus("bad", t("failed") + " " + (r.error || r.message || JSON.stringify(r)));
         if (/no pending plan|no longer pending/i.test(String(r.error || ""))) { finished = true; setStatus("info", t("gone")); }
       } else if (action === "test") {
