@@ -29,20 +29,68 @@ _BUDGET_LOST_FLAG = 0.2
 _LIGHT = "--primary: #2563eb; --ring: #2563eb;"
 _DARK = "--primary: #3b82f6; --ring: #3b82f6;"
 
-# The renderer ships a fixed stylesheet without responsive type sizes, so
-# the few styles the view needs live here.
+# AdLoop's mark (the loop from getadloop.com's icon), drawn in white.
+_LOOP = (
+    '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" fill="none">'
+    '<path d="M16 16 C 13.5 11.5, 6.5 11.5, 6.5 16 C 6.5 20.5, 13.5 20.5, 16 16 '
+    'C 18.5 11.5, 25.5 11.5, 25.5 16 C 25.5 20.5, 18.5 20.5, 16 16 Z" '
+    'stroke="currentColor" stroke-width="2.6" stroke-linejoin="round" stroke-linecap="round"/></svg>'
+)
+
+# The renderer ships a fixed stylesheet without responsive type sizes or
+# gradients, so the styles the view needs live here.
 _CSS = """
-.al-kpi { padding: 12px 14px; min-width: 0; }
-.al-kpi-label { font-size: 12px; line-height: 16px; color: var(--muted-foreground); }
+.al-hero { position: relative; overflow: hidden; border-radius: 16px; padding: 18px;
+  color: #fff; background: linear-gradient(135deg, #2563eb 0%, #4f46e5 55%, #7c3aed 100%);
+  box-shadow: 0 10px 30px -12px rgba(37, 99, 235, .55); }
+.dark .al-hero { background: linear-gradient(135deg, #1d4ed8 0%, #4338ca 55%, #6d28d9 100%);
+  box-shadow: none; }
+.al-hero-glow { position: absolute; right: -80px; top: -90px; width: 260px; height: 260px;
+  border-radius: 999px; background: radial-gradient(circle, rgba(255,255,255,.28), transparent 68%);
+  pointer-events: none; }
+.al-hero-art { position: absolute; right: -48px; top: -64px; width: 240px; color: #fff;
+  opacity: .09; pointer-events: none; }
+.al-hero-body { position: relative; }
+.al-logo { width: 26px; height: 26px; border-radius: 8px; padding: 3px; color: #fff;
+  background: rgba(255,255,255,.18); border: 1px solid rgba(255,255,255,.25); }
+.al-eyebrow { font-size: 12px; font-weight: 600; letter-spacing: .04em; text-transform: uppercase;
+  color: rgba(255,255,255,.85); }
+.al-pill { padding: 3px 10px; border-radius: 999px; font-size: 12px; font-weight: 500; color: #fff;
+  background: rgba(255,255,255,.16); border: 1px solid rgba(255,255,255,.22); white-space: nowrap; }
+.al-dot { width: 7px; height: 7px; border-radius: 999px; background: #fbbf24; }
+.al-dot-ok { background: #4ade80; }
+.al-title, .al-sub, .al-kpi-label, .al-kpi-value, .al-kpi-caption { display: block; }
+.al-title { font-size: 22px; line-height: 28px; font-weight: 700; letter-spacing: -0.02em; color: #fff;
+  margin-top: 14px; }
+.al-sub { font-size: 13px; color: rgba(255,255,255,.78); margin-top: 2px; }
+.al-kpis { margin-top: 16px; }
+.al-kpi { min-width: 0; padding: 10px 12px; border-radius: 12px;
+  background: rgba(255,255,255,.12); border: 1px solid rgba(255,255,255,.18); }
+.al-kpi-label { font-size: 12px; line-height: 16px; color: rgba(255,255,255,.8); }
 .al-kpi-value { font-size: 20px; line-height: 28px; font-weight: 700; margin-top: 2px; letter-spacing: -0.01em;
-  font-variant-numeric: tabular-nums; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.al-kpi-caption { font-size: 12px; line-height: 16px; color: var(--muted-foreground);
+  color: #fff; font-variant-numeric: tabular-nums; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.al-kpi-caption { font-size: 12px; line-height: 16px; color: rgba(255,255,255,.72);
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .al-bar-ok { background: var(--primary); }
 .al-bar-warn { background: #f59e0b; }
 .al-amount { font-size: 13px; font-variant-numeric: tabular-nums; white-space: nowrap; }
-@media (min-width: 640px) { .al-kpi-value { font-size: 24px; line-height: 32px; } }
-@media (max-width: 480px) { .pf-app-root { padding: 8px; } }
+.al-name { max-width: 220px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+@media (max-width: 719px) { .al-name { max-width: 190px; } }
+@media (min-width: 640px) {
+  .al-hero { padding: 22px; }
+  .al-title { font-size: 26px; line-height: 32px; }
+  .al-kpi-value { font-size: 24px; line-height: 32px; }
+}
+/* The table shows what fits: no sideways scrolling in a chat pane. */
+@media (max-width: 519px) { .al-col-md { display: none; } }
+@media (max-width: 719px) { .al-col-lg { display: none; } }
+@media (max-width: 859px) { .al-col-xl { display: none; } }
+@media (max-width: 480px) {
+  .pf-app-root { padding: 8px; }
+  .al-tight { padding-left: 12px; padding-right: 12px; }
+  .al-tight th, .al-tight td { padding-left: 6px; padding-right: 6px; }
+  .al-name { max-width: 140px; }
+}
 """
 
 
@@ -50,10 +98,14 @@ def _row(r: dict) -> dict:
     cost = r.get("metrics.cost") or 0
     conversions = round(r.get("metrics.conversions") or 0, 1)
     channel = str(r.get("campaign.advertising_channel_type") or "")
+    name = str(r.get("campaign.name") or "")
+    status = _STATUS_LABELS.get(str(r.get("campaign.status")), str(r.get("campaign.status") or ""))
     return {
         "id": str(r.get("campaign.id") or ""),
-        "name": str(r.get("campaign.name") or ""),
-        "status": _STATUS_LABELS.get(str(r.get("campaign.status")), str(r.get("campaign.status") or "")),
+        "name": name,
+        # Narrow views hide the Status column; a paused campaign still says so.
+        "label": name if status == "Active" else f"{name} · {status}",
+        "status": status,
         "type": _TYPE_LABELS.get(channel, channel.replace("_", " ").title()),
         "cost": cost,
         "clicks": r.get("metrics.clicks") or 0,
@@ -94,6 +146,23 @@ def _period(start: str, end: str) -> str:
     if first.year == last.year:
         return f"{first.day} {first:%b} to {last.day} {last:%b %Y}"
     return f"{first.day} {first:%b %Y} to {last.day} {last:%b %Y}"
+
+
+def _column(key: str, header: str, fmt: str | None = None, *, tier: str = "", cell_class: str = "") -> Any:
+    """A sortable table column; ``tier`` hides it below that width (md, lg, xl)."""
+    from prefab_ui.components import DataTableColumn
+
+    hide = f"al-col-{tier}" if tier else ""
+    numeric = fmt is not None
+    return DataTableColumn(
+        key=key,
+        header=header,
+        sortable=True,
+        format=fmt,
+        align="right" if numeric else "left",
+        header_class=hide or None,
+        cell_class=" ".join(c for c in (hide, cell_class) if c) or None,
+    )
 
 
 def _campaigns(n: int) -> str:
@@ -149,20 +218,18 @@ def campaign_performance_view(
         Alert,
         AlertDescription,
         AlertTitle,
-        Badge,
         Card,
         CardContent,
         CardHeader,
         CardTitle,
         Column,
         DataTable,
-        DataTableColumn,
         Div,
         Grid,
-        Heading,
         Muted,
         Progress,
         Row,
+        Svg,
         Text,
     )
     from prefab_ui.components.control_flow import ForEach
@@ -201,43 +268,54 @@ def campaign_performance_view(
     )
 
     def kpi(label: str, value: str, caption: str | None) -> None:
-        with Card(css_class="al-kpi"):
-            with Column(gap=0):
-                Text(label, css_class="al-kpi-label")
-                Text(value, css_class="al-kpi-value")
-                if caption:
-                    Text(caption, css_class="al-kpi-caption")
+        with Column(gap=0, css_class="al-kpi"):
+            Text(label, css_class="al-kpi-label")
+            Text(value, css_class="al-kpi-value")
+            if caption:
+                Text(caption, css_class="al-kpi-caption")
 
+    flagged = len(state["alerts"])
     theme = Theme(light_css=_LIGHT, dark_css=_DARK, gradient=False)
     with PrefabApp(title="Campaign performance", state=state, css=[_CSS], theme=theme) as app:
         with Column(gap=4):
-            with Column(gap=1):
-                Heading("Campaign performance", level=4)
-                with Row(gap=2, align="center", css_class="flex-wrap"):
-                    Badge("Google Ads", variant="secondary")
-                    Muted(f"{period} · {_campaigns(total_campaigns)}")
+            with Div(css_class="al-hero"):
+                Div(css_class="al-hero-glow")
+                with Div(css_class="al-hero-art"):
+                    Svg(_LOOP, width="100%")
+                with Column(gap=0, css_class="al-hero-body"):
+                    with Row(gap=2, align="center", justify="between"):
+                        with Row(gap=2, align="center"):
+                            with Div(css_class="al-logo"):
+                                Svg(_LOOP, width="100%", height="100%")
+                            Text("Google Ads", css_class="al-eyebrow")
+                        if rows:
+                            with Row(gap=2, align="center", css_class="al-pill"):
+                                Div(css_class="al-dot" if flagged else "al-dot al-dot-ok")
+                                Text(f"{flagged} to review" if flagged else "Nothing flagged")
+                    Text("Campaign performance", css_class="al-title")
+                    Text(f"{period} · {_campaigns(total_campaigns)}", css_class="al-sub")
+                    if rows:
+                        with Grid(columns={"default": 2, "md": 4}, gap=2, css_class="al-kpis"):
+                            kpi("Spend", money("totals.cost"), _campaigns(total_campaigns))
+                            kpi(
+                                "Conversions",
+                                "{{ totals.conversions | number:1 }}",
+                                "{{ totals.conv_rate | percent:2 }} of clicks" if totals["conv_rate"] is not None else None,
+                            )
+                            kpi(
+                                "Cost per conversion",
+                                money("totals.cpa") if totals["cpa"] is not None else "–",
+                                f"{money('totals.cpc')} per click" if totals["cpc"] is not None else None,
+                            )
+                            kpi(
+                                "Clicks",
+                                "{{ totals.clicks | number }}",
+                                "{{ totals.ctr | percent:2 }} CTR" if totals["ctr"] is not None else None,
+                            )
 
             if not rows:
                 Text("No campaign had impressions or spend in this period.")
                 return app
-
-            with Grid(columns={"default": 2, "md": 4}, gap=3):
-                kpi("Spend", money("totals.cost"), _campaigns(total_campaigns))
-                kpi(
-                    "Conversions",
-                    "{{ totals.conversions | number:1 }}",
-                    "{{ totals.conv_rate | percent:2 }} of clicks" if totals["conv_rate"] is not None else None,
-                )
-                kpi(
-                    "Cost per conversion",
-                    money("totals.cpa") if totals["cpa"] is not None else "–",
-                    f"{money('totals.cpc')} per click" if totals["cpc"] is not None else None,
-                )
-                kpi(
-                    "Clicks",
-                    "{{ totals.clicks | number }}",
-                    "{{ totals.ctr | percent:2 }} CTR" if totals["ctr"] is not None else None,
-                )
 
             alerts = state["alerts"]
             if "idle" in alerts:
@@ -268,17 +346,15 @@ def campaign_performance_view(
 
             money_format = f"currency:{currency}" if currency else "number:2"
             columns = [
-                DataTableColumn(key="name", header="Campaign", sortable=True, min_width="160px"),
-                DataTableColumn(key="status", header="Status", sortable=True),
-                DataTableColumn(key="type", header="Type", sortable=True),
-                DataTableColumn(key="cost", header="Spend", sortable=True, align="right", format=money_format),
-                DataTableColumn(key="clicks", header="Clicks", sortable=True, align="right", format="number"),
-                DataTableColumn(key="conversions", header="Conv.", sortable=True, align="right", format="number:1"),
-                DataTableColumn(key="cpa", header="CPA", sortable=True, align="right", format=money_format),
-                DataTableColumn(key="ctr", header="CTR", sortable=True, align="right", format="percent:2"),
-                DataTableColumn(
-                    key="lost_to_budget", header="Lost to budget", sortable=True, align="right", format="percent:0"
-                ),
+                _column("label", "Campaign", cell_class="al-name"),
+                _column("status", "Status", tier="xl"),
+                _column("type", "Type", tier="xl"),
+                _column("cost", "Spend", money_format),
+                _column("clicks", "Clicks", "number", tier="lg"),
+                _column("conversions", "Conv.", "number:1"),
+                _column("cpa", "CPA", money_format, tier="md"),
+                _column("ctr", "CTR", "percent:2", tier="lg"),
+                _column("lost_to_budget", "Lost to budget", "percent:0", tier="lg"),
             ]
             ask = SendMessage(
                 "Look into the Google Ads campaign \"{{ $event.name }}\" "
@@ -288,9 +364,9 @@ def campaign_performance_view(
             with Card():
                 with CardHeader():
                     CardTitle("All campaigns" if not result.get("compact") else "Top campaigns by spend")
-                with CardContent():
-                    # Nine columns are wider than a chat pane: the table
-                    # scrolls, not the page.
+                with CardContent(css_class="al-tight"):
+                    # Columns drop out as the view narrows (see _CSS); the
+                    # scroll container is only a safety net.
                     with Div(css_class="overflow-x-auto max-w-full"):
                         DataTable(
                             columns=columns,
