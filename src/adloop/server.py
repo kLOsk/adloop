@@ -899,7 +899,10 @@ def health_check() -> dict:
                 status["microsoft_ads_hint"] = parsed["hint"]
             if "auth_error" in parsed:
                 status["microsoft_ads_auth_error"] = parsed["auth_error"]
-    else:
+    elif "list_microsoft_ads_accounts" in _offered_tool_names():
+        # Only where its tools are offered: a hosted runtime that does not
+        # offer Microsoft Advertising shouldn't send the user to set it up,
+        # and a local server that hid it says so under hidden_toolsets.
         status["microsoft_ads"] = "not_configured"
 
     if status["ga4"] == "error" or status["ads"] == "error":

@@ -183,3 +183,19 @@ def test_hosted_provider_without_an_integration_reports_not_configured(monkeypat
     finally:
         auth.set_credentials_provider(previous)
     assert status["microsoft_ads"] == "not_configured"
+
+
+def test_a_host_that_does_not_offer_microsoft_does_not_report_it(monkeypatch, stub_other_services):
+    """A hosted runtime hiding the Microsoft tools must not send its users
+    to set it up; where the tools are offered, not_configured stays."""
+    hide_microsoft = lambda tools: {n: t for n, t in tools.items() if "microsoft_ads" not in t}  # noqa: E731
+    runtime.set_tool_visibility(hide_microsoft)
+    try:
+        status = _health(monkeypatch, config=AdLoopConfig(), summaries=_summaries(), probe=lambda _c, _p: None)
+    finally:
+        runtime.set_tool_visibility(None)
+    assert "microsoft_ads" not in status
+    assert "list_microsoft_ads_accounts" not in status["tools_offered"]
+
+    status = _health(monkeypatch, config=AdLoopConfig(), summaries=_summaries(), probe=lambda _c, _p: None)
+    assert status["microsoft_ads"] == "not_configured"
