@@ -31,7 +31,7 @@ def _row(cid, name, cost, conversions, clicks=100, impressions=2000, lost=None):
         "metrics.ctr": clicks / impressions,
         "metrics.cost": cost,
         "metrics.currency": "EUR",
-        "search_budget_lost_impression_share": lost,
+        "metrics.search_budget_lost_impression_share": lost,
     }
     if conversions:
         row["metrics.cpa"] = round(cost / conversions, 2)
