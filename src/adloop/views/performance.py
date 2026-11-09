@@ -75,21 +75,26 @@ _CSS = """
 .al-bar-warn { background: #f59e0b; }
 .al-amount { font-size: 13px; font-variant-numeric: tabular-nums; white-space: nowrap; }
 .al-name { max-width: 220px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-@media (max-width: 719px) { .al-name { max-width: 190px; } }
+/* The table shows the columns that fit its own width (not the window's:
+   hosts pad and scale the frame, and bring wider fonts: claude.ai lays it
+   out at ~730px with a ~650px table box), so a chat pane never scrolls
+   sideways. The tiers leave room for a host font. */
+.al-table { container-type: inline-size; }
+@container (max-width: 919px) { .al-col-xl { display: none; } }
+@container (max-width: 759px) { .al-col-lg { display: none; } .al-name { max-width: 200px; } }
+@container (max-width: 419px) {
+  .al-col-md { display: none; }
+  .al-name { max-width: 130px; }
+  .al-table th, .al-table td { padding-left: 6px; padding-right: 6px; }
+}
 @media (min-width: 640px) {
   .al-hero { padding: 22px; }
   .al-title { font-size: 26px; line-height: 32px; }
   .al-kpi-value { font-size: 24px; line-height: 32px; }
 }
-/* The table shows what fits: no sideways scrolling in a chat pane. */
-@media (max-width: 519px) { .al-col-md { display: none; } }
-@media (max-width: 719px) { .al-col-lg { display: none; } }
-@media (max-width: 859px) { .al-col-xl { display: none; } }
 @media (max-width: 480px) {
   .pf-app-root { padding: 8px; }
   .al-tight { padding-left: 12px; padding-right: 12px; }
-  .al-tight th, .al-tight td { padding-left: 6px; padding-right: 6px; }
-  .al-name { max-width: 140px; }
 }
 """
 
@@ -367,7 +372,7 @@ def campaign_performance_view(
                 with CardContent(css_class="al-tight"):
                     # Columns drop out as the view narrows (see _CSS); the
                     # scroll container is only a safety net.
-                    with Div(css_class="overflow-x-auto max-w-full"):
+                    with Div(css_class="al-table overflow-x-auto max-w-full"):
                         DataTable(
                             columns=columns,
                             rows="{{ rows }}",

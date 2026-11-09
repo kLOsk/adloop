@@ -10,7 +10,7 @@ from mcp.client import advertise
 from adloop import runtime, server
 from adloop.config import AdLoopConfig, ViewsConfig
 from adloop.safety.approval import UI_EXTENSION_ID
-from adloop.views import VIEW_URI, VIEWS, renderer_html
+from adloop.views import VIEW_NOTE, VIEW_URI, VIEWS, renderer_html
 
 pytestmark = pytest.mark.asyncio
 pytest.importorskip("prefab_ui")
@@ -104,7 +104,8 @@ async def test_apps_without_mcp_apps_get_the_plain_answer(views_on):
 async def test_apps_with_mcp_apps_get_the_view_and_the_same_answer(views_on):
     _tool, result = await _call(CARDS)
 
-    assert result.content[0].text == _plain_text()
+    # The AI reads the same result, plus a note that the user sees the view.
+    assert json.loads(result.content[0].text) == {**json.loads(_plain_text()), "view_note": VIEW_NOTE}
     view = result.structured_content
     assert "$prefab" in view
     # The view shows the tool's own numbers.

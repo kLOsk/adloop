@@ -26,6 +26,14 @@ if TYPE_CHECKING:
     from fastmcp.tools.base import Tool
 
 VIEW_URI = "ui://adloop/view.html"
+# Added to the AI's copy of a result that is shown as a view, so the reply
+# comments on the dashboard instead of rebuilding it as a table.
+VIEW_NOTE = (
+    "The user sees this result as an interactive dashboard next to your reply: "
+    "headline numbers, alerts, spend per campaign and a sortable table of every "
+    "campaign. Don't repeat those numbers as a table; say what stands out and "
+    "what to do next."
+)
 VIEW_MIME_TYPE = "text/html;profile=mcp-app"
 
 
@@ -77,9 +85,9 @@ def with_view(name: str, fn: Callable) -> Callable:
             return result
         from fastmcp.tools import ToolResult
 
-        # content=result is converted exactly like a plain dict return, so
-        # the AI reads the same text with or without the view.
-        return ToolResult(content=result, structured_content=app)
+        # content is converted exactly like a plain dict return: the AI reads
+        # the same result, plus a note that the user is looking at the view.
+        return ToolResult(content={**result, "view_note": VIEW_NOTE}, structured_content=app)
 
     return wrapper
 
