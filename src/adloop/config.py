@@ -120,6 +120,14 @@ class SafetyConfig:
 
 
 @dataclass
+class ViewsConfig:
+    # Views (MCP Apps): read results also drawn as a dashboard in apps that
+    # show them (Claude, ChatGPT, VS Code). The answer the AI reads is the
+    # same either way. Needs the optional prefab-ui package.
+    enabled: bool = False
+
+
+@dataclass
 class AdLoopConfig:
     google: GoogleConfig = field(default_factory=GoogleConfig)
     ga4: GA4Config = field(default_factory=GA4Config)
@@ -131,6 +139,7 @@ class AdLoopConfig:
     reddit: RedditConfig = field(default_factory=RedditConfig)
     microsoft_ads: MicrosoftAdsConfig = field(default_factory=MicrosoftAdsConfig)
     safety: SafetyConfig = field(default_factory=SafetyConfig)
+    views: ViewsConfig = field(default_factory=ViewsConfig)
     # Absolute path the config was resolved from (even if it did not exist
     # on disk when loaded). Used by the runtime to tell callers exactly
     # which file to edit when a safety flag overrides their request.
@@ -260,5 +269,6 @@ def load_config(config_path: str | None = None) -> AdLoopConfig:
             log_file=_text(safety_raw, "log_file", "~/.adloop/audit.log"),
             blocked_operations=safety_raw.get("blocked_operations", []),
         ),
+        views=ViewsConfig(enabled=_flag(raw.get("views") or {}, "enabled")),
         source_path=resolved,
     )

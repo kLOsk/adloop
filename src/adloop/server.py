@@ -16,6 +16,7 @@ from pydantic import BeforeValidator
 from adloop import diagnostics
 from adloop.runtime import current_config
 from adloop.uploads import STORE_UPLOAD_TOOL, UPLOAD_CARD_URI
+from adloop.views import VIEW_MIME_TYPE, VIEW_URI, VIEWS, ViewMeta, renderer_html, with_view
 from adloop.safety.approval import (
     APPROVE_TOOL,
     CARD_MIME_TYPE,
@@ -245,6 +246,21 @@ def upload_card() -> str:
     return resources.files("adloop").joinpath("upload_card.html").read_text(encoding="utf-8")
 
 
+@mcp.resource(
+    VIEW_URI,
+    name="adloop_view",
+    title="AdLoop view",
+    description="Draws a read result as a dashboard (charts and tables).",
+    mime_type=VIEW_MIME_TYPE,
+    meta={"ui": {"prefersBorder": False}},
+)
+def adloop_view() -> str:
+    return renderer_html()
+
+
+mcp.add_transform(ViewMeta())
+
+
 # App-only tools and the card that calls each one.
 _APP_ONLY_TOOLS = {
     APPROVE_TOOL: "AdLoop approval card",
@@ -429,6 +445,10 @@ def _tool(*, title: str, annotations: ToolAnnotations, tags: set[str], **kwargs)
             # render it as the approval card.
             options["meta"] = {**(options.get("meta") or {}), "ui": {"resourceUri": CARD_URI}}
             fn = _with_approval_card(fn)
+        if name in VIEWS:
+            # Read tools with a view: apps that show MCP Apps also get it
+            # as a dashboard while views are on (see adloop.views).
+            fn = with_view(name, fn)
         if not is_app_only(options.get("meta")):
             _TOOL_TAGS[name] = frozenset(tool_tags)
         return mcp.tool(
