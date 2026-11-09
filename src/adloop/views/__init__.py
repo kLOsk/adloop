@@ -92,10 +92,98 @@ def with_view(name: str, fn: Callable) -> Callable:
     return wrapper
 
 
+# Where a hosted runtime serves the renderer files (see set_renderer_base).
+_renderer_base = ""
+
+_STUB = """<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>AdLoop view</title>
+  <link rel="stylesheet" crossorigin href="{base}/{digest}/renderer.css">
+  <script type="module" crossorigin src="{base}/{digest}/renderer.js"></script>
+</head>
+<body>
+  <div id="root"></div>
+</body>
+</html>
+"""
+
+
+def set_renderer_base(url: str) -> None:
+    """Serve the renderer from a host instead of inlining it in every view.
+
+    Self-hosted, the view resource carries Prefab's whole renderer (about
+    7 MB) and the app loads nothing from anywhere else. A hosted runtime can
+    serve the same renderer as two files (``renderer_assets``) under ``url``
+    at ``<url>/<digest>/renderer.js`` and ``renderer.css``. The resource is
+    then a small page loading them, and the app's browser caches them across
+    conversations. Empty switches back to the inline renderer.
+    """
+    global _renderer_base
+    _renderer_base = str(url or "").rstrip("/")
+
+
+@functools.lru_cache(maxsize=1)
+def renderer_assets() -> tuple[str, dict[str, tuple[bytes, str]]]:
+    """Prefab's bundled renderer split into the files a host serves.
+
+    Returns ``(digest, {"renderer.js": (bytes, type), "renderer.css": ...})``.
+    The digest names this renderer build, so a host can cache the files
+    forever: a new prefab-ui release changes the digest, and with it the
+    URLs the view resource points at.
+    """
+    import hashlib
+
+    from prefab_ui.renderer import get_renderer_html
+
+    html = get_renderer_html("bundled")
+    # Vite inlines one module script and one stylesheet. The script escapes
+    # "</script>" in its own strings, so its first literal closing tag is the
+    # real one (the same rule prefab_ui.renderer relies on).
+    opening = '<script type="module" crossorigin>'
+    start = html.index(opening) + len(opening)
+    end = html.index("</script>", start)
+    script = html[start:end]
+    style_open = html.index("<style", end)
+    style_start = html.index(">", style_open) + 1
+    style = html[style_start : html.index("</style>", style_start)]
+
+    js, css = script.encode(), style.encode()
+    digest = hashlib.sha256(js + b"\0" + css).hexdigest()[:16]
+    return digest, {
+        "renderer.js": (js, "text/javascript; charset=utf-8"),
+        "renderer.css": (css, "text/css; charset=utf-8"),
+    }
+
+
 def renderer_html() -> str:
+    """The page the view resource serves: hosted files, or all inline."""
+    if _renderer_base:
+        digest, _files = renderer_assets()
+        return _STUB.format(base=_renderer_base, digest=digest)
     from prefab_ui.renderer import get_renderer_html
 
     return get_renderer_html("bundled")
+
+
+def renderer_meta() -> dict:
+    """The resource's MCP Apps metadata, including what the page may load."""
+    ui: dict = {"prefersBorder": False}
+    if _renderer_base:
+        from urllib.parse import urlsplit
+
+        parts = urlsplit(_renderer_base)
+        ui["csp"] = {"resourceDomains": [f"{parts.scheme}://{parts.netloc}"]}
+    return {"ui": ui}
+
+
+def view_resource() -> Any:
+    """The ``ui://adloop/view.html`` read, with its metadata decided per read."""
+    from fastmcp.resources import ResourceContent, ResourceResult
+
+    return ResourceResult([ResourceContent(renderer_html(), mime_type=VIEW_MIME_TYPE, meta=renderer_meta())])
 
 
 try:

@@ -16,7 +16,7 @@ from pydantic import BeforeValidator
 from adloop import diagnostics
 from adloop.runtime import current_config
 from adloop.uploads import STORE_UPLOAD_TOOL, UPLOAD_CARD_URI
-from adloop.views import VIEW_MIME_TYPE, VIEW_URI, VIEWS, ViewMeta, renderer_html, with_view
+from adloop.views import VIEW_MIME_TYPE, VIEW_URI, VIEWS, ViewMeta, view_resource, with_view
 from adloop.safety.approval import (
     APPROVE_TOOL,
     CARD_MIME_TYPE,
@@ -254,8 +254,10 @@ def upload_card() -> str:
     mime_type=VIEW_MIME_TYPE,
     meta={"ui": {"prefersBorder": False}},
 )
-def adloop_view() -> str:
-    return renderer_html()
+def adloop_view():
+    # Inline renderer self-hosted; hosted files plus their CSP when a
+    # runtime serves them (set_renderer_base).
+    return view_resource()
 
 
 mcp.add_transform(ViewMeta())

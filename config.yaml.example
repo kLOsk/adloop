@@ -153,3 +153,13 @@ safety:
 
   # List of operations to block entirely (e.g. ["remove_entity"]).
   blocked_operations: []
+
+# Views (experimental). In AI apps that support MCP Apps (Claude, ChatGPT,
+# VS Code), read results such as campaign performance also appear as an
+# interactive dashboard: headline numbers, what needs attention, spend per
+# campaign and a sortable table. The answer the AI reads stays the same.
+# Needs the optional package: pip install "adloop[views]". Restart the MCP
+# server and reconnect the app after switching it, since apps keep the tool
+# list from when they connected.
+views:
+  enabled: false

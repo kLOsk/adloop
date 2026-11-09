@@ -144,6 +144,30 @@ async def test_the_view_resource_serves_the_bundled_renderer():
     assert 'src="https://cdn.jsdelivr.net' not in resource.text
 
 
+async def test_a_hosted_runtime_serves_the_renderer_as_files():
+    from adloop import views
+
+    digest, files = views.renderer_assets()
+    views.set_renderer_base("https://mcp.example.com/views/prefab/")
+    try:
+        async with Client(server.mcp) as client:
+            resource = (await client.read_resource(VIEW_URI))[0]
+    finally:
+        views.set_renderer_base("")
+
+    # A small page loading this build's files from the host, which the CSP allows.
+    assert len(resource.text) < 2000
+    assert f'src="https://mcp.example.com/views/prefab/{digest}/renderer.js"' in resource.text
+    assert f'href="https://mcp.example.com/views/prefab/{digest}/renderer.css"' in resource.text
+    assert resource.meta["ui"]["csp"] == {"resourceDomains": ["https://mcp.example.com"]}
+    # The files are the whole inline renderer: script and stylesheet, nothing cut.
+    js, css = files["renderer.js"][0], files["renderer.css"][0]
+    inline = renderer_html().encode()
+    assert js in inline and css in inline
+    assert len(js) > 1_000_000 and len(css) > 10_000
+    assert b"</script>" not in js
+
+
 async def test_the_view_handles_compact_and_empty_results():
     from adloop.views.performance import campaign_performance_view
 
