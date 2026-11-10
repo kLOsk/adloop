@@ -1020,7 +1020,8 @@ def health_check() -> dict:
                 status["chatgpt_ads_hint"] = parsed["hint"]
             if "auth_error" in parsed:
                 status["chatgpt_ads_auth_error"] = parsed["auth_error"]
-    else:
+    elif "get_chatgpt_ads_account" in _offered_tool_names():
+        # Only where its tools are offered, as for Microsoft Advertising.
         status["chatgpt_ads"] = "not_configured"
 
     if status["ga4"] == "error" or status["ads"] == "error":
@@ -8345,13 +8346,17 @@ def remove_microsoft_entity(ad_account_id: str = "", entity_type: str = "", enti
 
 
 def _chatgpt_ads_configured() -> bool:
+    """Set up here: hosted, the credentials provider must supply ChatGPT Ads
+    keys and the runtime must offer its tools to this caller (a hosted
+    runtime may offer them only to workspaces that added a key);
+    self-hosted, the config or environment holds a key."""
     from adloop.auth import get_credentials_provider
     from adloop.runtime import deployment_mode
 
     if deployment_mode() == "server":
-        # Hosted: the provider supplies keys; one without ChatGPT support
-        # means the integration is simply not offered there.
-        return hasattr(get_credentials_provider(), "chatgpt_ads_api_key")
+        return hasattr(get_credentials_provider(), "chatgpt_ads_api_key") and (
+            "get_chatgpt_ads_account" in _offered_tool_names()
+        )
     # The same check that decides whether a local server shows the tools.
     return _chatgpt_ads_has_key(current_config())
 
