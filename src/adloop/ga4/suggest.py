@@ -25,7 +25,9 @@ _STATUS_VERBS = {
 _REDDIT_STATUS = {"PAUSED": "paused", "ACTIVE": "enabled", "ARCHIVED": "archived"}
 # update_campaign keys that change who sees the ads or how much they cost;
 # URL options and tracking templates do not move traffic.
-_TARGETING_KEYS = ("geo_target_ids", "language_ids", "location_option", "negative_location_option")
+_TARGETING_KEYS = (
+    "geo_target_ids", "geo_exclude_ids", "language_ids", "location_option", "negative_location_option",
+)
 _NETWORK_KEYS = ("search_partners_enabled", "display_network_enabled")
 
 
@@ -52,6 +54,8 @@ def _google_parts(plan: ChangePlan) -> list[str]:
         parts.append(f"max CPC {_amount(changes['max_cpc'])}")
     if any(k in changes for k in _TARGETING_KEYS):
         parts.append("targeting")
+    if "ad_schedule" in changes:
+        parts.append("ad schedule")
     if any(k in changes for k in _NETWORK_KEYS):
         parts.append("networks")
     if "keyword_match_type" in changes:

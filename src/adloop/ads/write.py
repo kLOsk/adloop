@@ -2105,15 +2105,12 @@ def draft_campaign(
         URL options. Omitted or empty leaves them unset.
     geo_exclude_ids: geo target constant IDs to exclude; may not overlap
         geo_target_ids.
-    ad_schedule: serving windows, validated like add_ad_schedule. They are the
-        campaign's first schedule, so the plan needs a double confirmation.
+    ad_schedule: serving windows, validated like add_ad_schedule. The preview
+        warns that the campaign serves only inside them once it is enabled. No
+        double confirmation: the campaign is created PAUSED, so nothing stops
+        serving.
     """
-    from adloop.ads.assets import (
-        _account_settings,
-        _first_schedule_warning,
-        _time_zone_note,
-        _validate_schedule,
-    )
+    from adloop.ads.assets import _account_settings, _time_zone_note, _validate_schedule
     from adloop.safety.guards import (
         SafetyViolation,
         check_blocked_operation,
@@ -2185,7 +2182,12 @@ def draft_campaign(
         target_changes["ad_schedule"] = schedule
         target_changes["account_time_zone"] = time_zone
         warnings.append(_time_zone_note(time_zone))
-        warnings.append(_first_schedule_warning(campaign_name))
+        # Only a warning: the new campaign is PAUSED, so nothing stops serving.
+        # update_campaign double-confirms a live campaign's first schedule.
+        warnings.append(
+            f"Campaign '{campaign_name}' is created PAUSED. Once it is enabled it serves "
+            "only inside these windows: no ads at other hours or on days without a window."
+        )
     location_changes = {}
     if location_option:
         location_changes["location_option"] = location_option
@@ -2214,8 +2216,6 @@ def draft_campaign(
             **url_options,
             **target_changes,
         },
-        # A campaign's first windows switch off every hour outside them.
-        requires_double_confirm=bool(schedule),
     )
     store_plan(plan)
     preview = plan.to_preview()

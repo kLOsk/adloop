@@ -18,6 +18,7 @@ from adloop.ads import write
 from adloop.ads.client import GOOGLE_ADS_API_VERSION
 from adloop.config import AdLoopConfig, AdsConfig, SafetyConfig
 from adloop.safety import preview as preview_store
+from adloop.safety.approval import confirmation_message
 
 CAMPAIGN = "1001"
 MONDAY = {"day_of_week": "MONDAY", "start_hour": 8, "end_hour": 17}
@@ -49,6 +50,10 @@ class _Service:
             return iter(self._client.window_rows)
         if "campaign_criterion.negative = TRUE" in query:
             return iter(self._client.exclude_rows)
+        if "campaign_criterion.negative = FALSE" in query:
+            return iter(self._client.target_rows)
+        if "FROM campaign WHERE" in query:
+            return iter(self._client.campaign_rows)
         return iter([])
 
     def __getattr__(self, attr):
@@ -75,6 +80,8 @@ class _Client:
         self.sent = []
         self.window_rows = []
         self.exclude_rows = []
+        self.target_rows = []
+        self.campaign_rows = []
 
     def get_service(self, name, *_args, **_kwargs):
         return _Service(self, name)
@@ -90,6 +97,26 @@ class _Client:
     def created(self):
         return [op.campaign_criterion_operation.create for op in self.operations()
                 if not op.campaign_criterion_operation.remove and op.campaign_criterion_operation.create.campaign]
+
+    def order(self):
+        """The request's operations in the order sent, as short tuples."""
+        summary = []
+        for op in self.operations():
+            criterion_op = op.campaign_criterion_operation
+            created = criterion_op.create
+            if op.campaign_operation.update.resource_name:
+                summary.append(("campaign", *op.campaign_operation.update_mask.paths))
+            elif criterion_op.remove:
+                summary.append(("remove", criterion_op.remove.rsplit("~", 1)[-1]))
+            elif created.location.geo_target_constant:
+                geo_id = created.location.geo_target_constant.rsplit("/", 1)[-1]
+                summary.append(("exclude" if created.negative else "target", geo_id))
+            elif created.language.language_constant:
+                summary.append(("language", created.language.language_constant.rsplit("/", 1)[-1]))
+            else:
+                window = created.ad_schedule
+                summary.append(("window", window.day_of_week.name, window.start_hour, window.end_hour))
+        return summary
 
 
 @pytest.fixture
@@ -127,7 +154,10 @@ def _account(monkeypatch, *, windows=(), excludes=(), status="ENABLED", found=Tr
         if "FROM campaign WHERE campaign.id" in query:
             if not found:
                 return []
-            return [{"campaign.name": "Brand", "campaign.status": status, "customer.time_zone": "America/Chicago"}]
+            # Also answers update_campaign's keyword match type read (#117).
+            return [{"campaign.name": "Brand", "campaign.status": status, "customer.time_zone": "America/Chicago",
+                     "campaign.keyword_match_type": "UNSPECIFIED",
+                     "campaign.bidding_strategy_type": "MAXIMIZE_CONVERSIONS"}]
         raise AssertionError(f"unexpected query: {query}")
 
     monkeypatch.setattr("adloop.ads.gaql.execute_query", execute_query)
@@ -171,13 +201,17 @@ class TestDraftCampaign:
         assert (windows[0].ad_schedule.start_hour, windows[0].ad_schedule.end_hour) == (8, 17)
         assert windows[0].ad_schedule.day_of_week == client.enums.DayOfWeekEnum.MONDAY
 
-    def test_a_schedule_is_a_first_schedule(self, config, client, monkeypatch):
+    def test_a_schedule_only_warns_because_the_campaign_is_created_paused(self, config, client, monkeypatch):
         _account(monkeypatch)
         preview = _draft(config, ad_schedule=[MONDAY])
-        assert preview["requires_double_confirm"] is True
+        assert preview["requires_double_confirm"] is False
         assert preview["changes"]["account_time_zone"] == "America/Chicago"
         assert any("account time zone (America/Chicago)" in w for w in preview["warnings"])
-        assert any("serves only inside them" in w for w in preview["warnings"])
+        assert any("created PAUSED" in w and "Once it is enabled it serves only inside these windows" in w
+                   for w in preview["warnings"])
+        assert not any("stops serving" in w for w in preview["warnings"])
+        dialog = confirmation_message(preview_store.get_plan(preview["plan_id"]))
+        assert "cannot be undone" not in dialog
 
     def test_exclusions_alone_need_no_double_confirmation_or_read(self, config, client):
         # no_live_gaql from conftest fails this test if the draft queries anything.
@@ -230,7 +264,7 @@ class TestDraftCampaign:
 class TestUpdateGeoExcludes:
     def test_replaces_and_only_touches_what_differs(self, config, client, monkeypatch):
         _account(monkeypatch, excludes=["111", "222"])
-        client.exclude_rows = [_exclude_row("111"), _exclude_row("222")]
+        client.exclude_rows = [_location_row("111"), _location_row("222")]
         preview = _update(config, geo_exclude_ids=["222", "333"])
         assert preview["changes"]["current_geo_exclude_ids"] == ["111", "222"]
         assert preview["changes"]["geo_exclude_ids"] == ["222", "333"]
@@ -245,7 +279,7 @@ class TestUpdateGeoExcludes:
 
     def test_empty_list_clears_them(self, config, client, monkeypatch):
         _account(monkeypatch, excludes=["111"])
-        client.exclude_rows = [_exclude_row("111")]
+        client.exclude_rows = [_location_row("111")]
         preview = _update(config, geo_exclude_ids=[])
         assert preview["requires_double_confirm"] is True
         _apply_check(config, preview)
@@ -274,7 +308,7 @@ class TestUpdateGeoExcludes:
 
     def test_apply_refuses_when_they_changed_after_the_preview(self, config, client, monkeypatch):
         _account(monkeypatch, excludes=["111"])
-        client.exclude_rows = [_exclude_row("111"), _exclude_row("999")]
+        client.exclude_rows = [_location_row("111"), _location_row("999")]
         result = _dry_run(config, _update(config, geo_exclude_ids=["333"]))
         assert result["status"] == "DRY_RUN_FAILED"
         assert "changed after this preview" in str(result)
@@ -282,18 +316,10 @@ class TestUpdateGeoExcludes:
 
     def test_replacing_positive_geos_no_longer_promises_to_preserve_them(self, config, client, monkeypatch):
         _account(monkeypatch, excludes=["111"])
-        client.exclude_rows = [_exclude_row("111")]
+        client.exclude_rows = [_location_row("111")]
         preview = _update(config, geo_target_ids=["2840"], geo_exclude_ids=[])
         assert "preserved_negative_geo_target_ids" not in preview
         assert not any("PRESERVED" in w for w in preview["warnings"])
-
-    def test_moving_a_location_from_excluded_to_targeted_removes_it_first(self, config, client, monkeypatch):
-        _account(monkeypatch, excludes=["111"])
-        client.exclude_rows = [_exclude_row("111")]
-        _apply_check(config, _update(config, geo_target_ids=["111"], geo_exclude_ids=[]))
-        ops = client.operations()
-        assert ops[0].campaign_criterion_operation.remove.endswith("~111")
-        assert ops[1].campaign_criterion_operation.create.location.geo_target_constant == "geoTargetConstants/111"
 
     def test_omitted_leaves_them_preserved(self, config, monkeypatch):
         _account(monkeypatch, excludes=["111"])
@@ -302,7 +328,7 @@ class TestUpdateGeoExcludes:
         assert "geo_exclude_ids" not in preview["changes"]
 
 
-def _exclude_row(geo_id):
+def _location_row(geo_id):
     return SimpleNamespace(campaign_criterion=SimpleNamespace(
         resource_name=f"customers/1/campaignCriteria/{CAMPAIGN}~{geo_id}",
         location=SimpleNamespace(geo_target_constant=f"geoTargetConstants/{geo_id}"),
@@ -324,6 +350,7 @@ class TestUpdateAdSchedule:
         assert any("'Brand' has no ad schedule" in w and "stops serving" in w for w in preview["warnings"])
         assert any("account time zone (America/Chicago)" in w for w in preview["warnings"])
         assert preview["changes"]["current_ad_schedule"] == []
+        assert "cannot be undone" in confirmation_message(preview_store.get_plan(preview["plan_id"]))
         _apply_check(config, preview)
         assert client.removed() == []
         assert client.created()[0].ad_schedule.start_hour == 8
@@ -388,6 +415,83 @@ class TestUpdateAdSchedule:
         assert "was not found" in _update(config, **kwargs)["error"]
         _account(monkeypatch, status="REMOVED")
         assert "is removed" in _update(config, **kwargs)["error"]
+
+
+class TestOneRequestOrder:
+    """update_campaign sends one mutate, in this order: the campaign's own
+    fields, exclusion removes, positive geo removes, positive geo creates,
+    languages, exclusion creates, then schedule removes before schedule creates.
+
+    A location criterion's id is its geo target constant, so a location moving
+    between the targets and the exclusions is the same criterion removed and
+    created again: the remove has to come first in the request.
+    """
+
+    def test_a_location_moving_from_excluded_to_targeted_is_removed_first(self, config, client, monkeypatch):
+        _account(monkeypatch, excludes=["111", "222"])
+        client.exclude_rows = [_location_row("111"), _location_row("222")]
+        client.target_rows = [_location_row("2840")]
+        preview = _update(config, geo_target_ids=["2840", "111"], geo_exclude_ids=["222"])
+        assert preview["requires_double_confirm"] is True  # 111 is no longer excluded
+        _apply_check(config, preview)
+        assert client.order() == [
+            ("remove", "111"),  # the exclusion
+            ("remove", "2840"),  # positive targets are replaced as a whole
+            ("target", "2840"),
+            ("target", "111"),
+        ]
+
+    def test_a_location_moving_from_targeted_to_excluded_is_removed_first(self, config, client, monkeypatch):
+        _account(monkeypatch)
+        client.target_rows = [_location_row("111"), _location_row("2840")]
+        _apply_check(config, _update(config, geo_target_ids=["2840"], geo_exclude_ids=["111"]))
+        assert client.order() == [
+            ("remove", "111"),  # the positive target
+            ("remove", "2840"),
+            ("target", "2840"),
+            ("exclude", "111"),
+        ]
+
+    def test_a_shifted_window_is_removed_before_its_replacement_is_added(self, config, client, monkeypatch):
+        _account(monkeypatch, windows=[_window_row(5, **MONDAY), _window_row(6, **{**TUESDAY, "start_minute": "THIRTY"})])
+        client.window_rows = [_criterion_row(5), _criterion_row(6)]
+        later = {"day_of_week": "MONDAY", "start_hour": 9, "end_hour": 18}  # overlaps the 8-17 window
+        _apply_check(config, _update(config, ad_schedule=[later, TUESDAY]))
+        assert client.order() == [("remove", "5"), ("window", "MONDAY", 9, 18)]
+
+    def test_a_full_day_of_windows_is_swapped_removals_first(self, config, client, monkeypatch):
+        # Six windows is Google's limit for a day: adding before removing would exceed it.
+        old = [{"day_of_week": "MONDAY", "start_hour": 2 * i, "end_hour": 2 * i + 1} for i in range(6)]
+        new = [{"day_of_week": "MONDAY", "start_hour": 2 * i + 1, "end_hour": 2 * i + 2} for i in range(6)]
+        _account(monkeypatch, windows=[_window_row(i + 1, **window) for i, window in enumerate(old)])
+        client.window_rows = [_criterion_row(i + 1) for i in range(6)]
+        _apply_check(config, _update(config, ad_schedule=new))
+        assert [step[0] for step in client.order()] == ["remove"] * 6 + ["window"] * 6
+
+    def test_broad_match_and_both_replacements_go_in_one_request(self, config, client, monkeypatch):
+        _account(monkeypatch, excludes=["111"], windows=[_window_row(5, **MONDAY)])
+        client.exclude_rows = [_location_row("111")]
+        client.target_rows = [_location_row("2840")]
+        client.window_rows = [_criterion_row(5)]
+        client.campaign_rows = [SimpleNamespace(campaign=SimpleNamespace(
+            bidding_strategy_type="MAXIMIZE_CONVERSIONS", keyword_match_type="UNSPECIFIED"))]
+        preview = _update(config, keyword_match_type="BROAD", geo_target_ids=["2840", "111"],
+                          geo_exclude_ids=["222"], ad_schedule=[TUESDAY])
+        assert preview["changes"]["keyword_match_type"] == "BROAD"
+        assert preview["changes"]["geo_exclude_ids"] == ["222"]
+        assert preview["changes"]["ad_schedule"][0]["day_of_week"] == "TUESDAY"
+        assert preview["requires_double_confirm"] is True
+        _apply_check(config, preview)
+        assert client.order() == [
+            ("campaign", "keyword_match_type"),
+            ("remove", "111"),
+            ("remove", "2840"),
+            ("target", "2840"),
+            ("target", "111"),
+            ("exclude", "222"),
+            ("remove", "5"),
+            ("window", "TUESDAY", 9, 12),
+        ]
 
 
 @pytest.mark.asyncio
