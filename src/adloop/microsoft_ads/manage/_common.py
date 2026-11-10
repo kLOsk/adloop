@@ -34,7 +34,21 @@ _CONVERSION_BASED = CONVERSION_BASED_STRATEGIES
 _MANUAL = {"ManualCpc", "EnhancedCpc"}
 # Strategies that take a maximum CPC cap.
 _CAPPED = {"MaxClicks", "MaxConversions"}
-_ALTERNATIVES = "MaxClicks, EnhancedCpc or ManualCpc"
+_ALTERNATIVES = "MaxClicks or EnhancedCpc"
+# Microsoft retired manual CPC for search campaigns in 2021: it accepts a
+# ManualCpc scheme and stores EnhancedCpc instead. Drafts ask for EnhancedCpc
+# right away, so the preview shows what the account will have.
+_MANUAL_RETIRED = (
+    "Microsoft retired manual CPC bidding for search campaigns and stores it as Enhanced CPC: your own "
+    "bids, which Microsoft raises or lowers in auctions it expects to convert or not. This uses EnhancedCpc."
+)
+
+
+def search_strategy(strategy: str) -> tuple[str, str | None]:
+    """The strategy Microsoft will actually store, and a note when it differs."""
+    if strategy == "ManualCpc":
+        return "EnhancedCpc", _MANUAL_RETIRED
+    return strategy, None
 MATCH_TYPES = ("Exact", "Phrase", "Broad")
 NEGATIVE_MATCH_TYPES = ("Exact", "Phrase")
 NETWORKS = ("OwnedAndOperatedOnly", "OwnedAndOperatedAndSyndicatedSearch")

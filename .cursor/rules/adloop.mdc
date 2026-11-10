@@ -285,7 +285,7 @@ Microsoft Advertising (Bing, Yahoo, AOL, DuckDuckGo search ads) through the REST
 | `update_microsoft_campaign_budget` | Draft a new daily budget (own budget only; capped by `max_daily_budget`) | `campaign_id`, `daily_budget` |
 | `pause_microsoft_entity` / `enable_microsoft_entity` | Draft pausing or enabling a campaign, ad group, keyword or ad | `entity_type`, `entity_id`, `parent_id` (optional) |
 | `search_microsoft_locations` | Location ids (country, state, metro, city, postal code) by name; Microsoft's file is cached | `query`, `location_type` |
-| `update_microsoft_campaign` | Name, bid strategy (ManualCpc, EnhancedCpc, MaxClicks, MaxConversions + target CPA), tracking template, final URL suffix | `campaign_id` + fields |
+| `update_microsoft_campaign` | Name, bid strategy (EnhancedCpc, MaxClicks, MaxConversions + target CPA; Microsoft retired manual CPC for search and stores it as EnhancedCpc), tracking template, final URL suffix | `campaign_id` + fields |
 | `update_microsoft_campaign_targeting` | Included / excluded locations (full lists), location intent, ad schedule (replaces; account time zone, or the searcher's when the campaign uses AdScheduleUseSearcherTimeZone: the preview's `hours_in` says which) | `campaign_id`, `location_ids`, `excluded_location_ids`, `location_intent`, `ad_schedule` |
 | `draft_microsoft_campaign` | New Search campaign, paused, with budget, bidding, languages, locations, intent | `name`, `daily_budget`, `languages`, `location_ids` |
 | `draft_microsoft_ad_group` / `update_microsoft_ad_group` | New ad group (with keywords) / name, default bid, network, Audience Network adjustment | `campaign_id` or `ad_group_id` + fields |

@@ -7684,9 +7684,10 @@ def update_microsoft_campaign(
 ) -> dict:
     """Draft Microsoft Advertising campaign setting changes: name, bid strategy and targets, tracking template, final URL suffix.
 
-    Bid strategies: ManualCpc, EnhancedCpc, MaxClicks, MaxConversions (with
-    an optional target_cpa; TargetCpa is accepted and becomes MaxConversions,
-    as Microsoft now does). Moving to a strategy that is not conversion-based
+    Bid strategies: EnhancedCpc, MaxClicks, MaxConversions (with an optional
+    target_cpa; TargetCpa is accepted and becomes MaxConversions, as Microsoft
+    now does). Microsoft retired manual CPC for search campaigns and stores it
+    as EnhancedCpc, so ManualCpc is drafted as EnhancedCpc with a note. Moving to a strategy that is not conversion-based
     (manual bids or MaxClicks) is refused while the campaign has active
     broad-match keywords, and moving to MaxConversions is refused while the
     account has no active conversion goal. The daily budget has its own
@@ -7698,7 +7699,7 @@ def update_microsoft_campaign(
         ad_account_id: Microsoft ad account id. Empty uses the config default.
         campaign_id: Campaign id.
         name: New name (at most 128 characters, unique in the account).
-        bidding_strategy: ManualCpc, EnhancedCpc, MaxClicks or MaxConversions.
+        bidding_strategy: EnhancedCpc, MaxClicks or MaxConversions (ManualCpc becomes EnhancedCpc).
         target_cpa: Target cost per conversion for MaxConversions.
         max_cpc: Maximum CPC for MaxClicks / MaxConversions (only changes an existing cap).
         tracking_url_template: New template ({lpurl}...); "" removes it.
@@ -7769,7 +7770,8 @@ def draft_microsoft_campaign(
     included locations (languages=["All"] is refused). Defaults to
     MaxConversions and PeopleIn; MaxConversions is refused while no active
     conversion goal counts toward Conversions, because Microsoft refuses the
-    campaign then (pass MaxClicks, EnhancedCpc or ManualCpc). The apply creates the
+    campaign then (pass MaxClicks or EnhancedCpc; Microsoft stores manual CPC as
+    EnhancedCpc, so ManualCpc is drafted as EnhancedCpc). The apply creates the
     campaign, then its location criteria, and names what was created if the
     second step fails. The returned plan_id is applied with confirm_and_apply.
 
@@ -7777,7 +7779,7 @@ def draft_microsoft_campaign(
         ad_account_id: Microsoft ad account id. Empty uses the config default.
         name: Campaign name (unique, at most 128 characters).
         daily_budget: Daily budget in the account currency.
-        bidding_strategy: MaxConversions (default), MaxClicks, EnhancedCpc or ManualCpc.
+        bidding_strategy: MaxConversions (default), MaxClicks or EnhancedCpc (ManualCpc becomes EnhancedCpc).
         target_cpa: Optional target cost per conversion.
         languages: Ad languages, e.g. ["English"].
         location_ids: Included location ids (search_microsoft_locations).

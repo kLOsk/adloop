@@ -609,6 +609,16 @@ class TestNewCampaign:
                                                         location_ids=["190"], bidding_strategy="ManualCpc", target_cpa=30)
         assert "target_cpa goes with MaxConversions" in _text(manual_target)
 
+    def test_manual_cpc_is_drafted_as_the_enhanced_cpc_microsoft_stores(self, api, config):
+        # Seen live: Microsoft created a ManualCpc draft with Enhanced CPC.
+        preview = manage.draft_microsoft_campaign(config, name="Manual", daily_budget=10, languages=["English"],
+                                                  location_ids=["190"], bidding_strategy="ManualCpc")
+        assert _payload(preview)["campaign"]["BiddingScheme"]["Type"] == "EnhancedCpc"
+        assert any("retired manual CPC" in w for w in preview["warnings"])
+        update = manage.update_microsoft_campaign(config, campaign_id="600", bidding_strategy="ManualCpc")
+        assert _payload(update)["update"]["BiddingScheme"]["Type"] == "EnhancedCpc"
+        assert any("retired manual CPC" in w for w in update["warnings"])
+
     def test_conversion_bidding_without_a_goal_is_refused_at_the_draft(self, api, config):
         # Seen live: the dry run passed, then Microsoft refused the create with
         # ConversionGoalCriteriaNotMetForBiddingScheme.
@@ -616,7 +626,7 @@ class TestNewCampaign:
         refused = manage.draft_microsoft_campaign(config, name="New", daily_budget=10, languages=["English"],
                                                   location_ids=["190"])
         assert "plan_id" not in refused and "needs an active conversion goal" in _text(refused)
-        assert "MaxClicks, EnhancedCpc or ManualCpc" in _text(refused)
+        assert "MaxClicks or EnhancedCpc" in _text(refused)
         clicks = manage.draft_microsoft_campaign(config, name="New", daily_budget=10, languages=["English"],
                                                  location_ids=["190"], bidding_strategy="MaxClicks")
         assert "plan_id" in clicks

@@ -27,6 +27,7 @@ from adloop.microsoft_ads.manage._common import (
     _require_unchanged,
     _strategy_name,
     bidding_scheme,
+    search_strategy,
 )
 from adloop.microsoft_ads.read import (
     _bidding,
@@ -71,6 +72,7 @@ def update_microsoft_campaign(
         strategy = "MaxConversions"
     if strategy and strategy not in STRATEGIES:
         errors.append(f"bidding_strategy must be one of {list(STRATEGIES)}.")
+    strategy, strategy_note = search_strategy(strategy)
     if target_cpa is not None and (strategy or "") not in ("", "MaxConversions"):
         errors.append("target_cpa goes with MaxConversions.")
     if max_cpc is not None and strategy and strategy not in _CAPPED:
@@ -123,6 +125,8 @@ def update_microsoft_campaign(
         update["BiddingScheme"] = scheme
         touched.append("BiddingScheme")
         shown["bidding"] = {"from": _bidding(current_scheme), "to": _bidding(scheme), "currency": meta["currency"]}
+        if strategy_note:
+            warnings.append(strategy_note)
         switching = chosen != _strategy_name(current_scheme)
         if switching:
             warnings.append("Changing the bid strategy restarts Microsoft's learning period; expect a week or two of unsettled results.")
@@ -198,6 +202,7 @@ def draft_microsoft_campaign(
     strategy = "MaxConversions" if bidding_strategy == "TargetCpa" else (bidding_strategy or "MaxConversions")
     if strategy not in STRATEGIES:
         errors.append(f"bidding_strategy must be one of {list(STRATEGIES)}.")
+    strategy, strategy_note = search_strategy(strategy)
     if target_cpa is not None and strategy != "MaxConversions":
         errors.append(f"target_cpa goes with MaxConversions, not {strategy}.")
     langs = _clean(languages)
@@ -224,7 +229,7 @@ def draft_microsoft_campaign(
     existing = {str(c.get("Name")).lower() for c in _campaigns(config, account, customer)}
     if name.lower() in existing:
         return _validation_error([f"A campaign named '{name}' already exists."])
-    warnings: list[str] = []
+    warnings: list[str] = [strategy_note] if strategy_note else []
     if strategy in _CONVERSION_BASED:
         goals = _counted_goals(config, account, customer)
         if goals == 0:
