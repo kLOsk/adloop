@@ -94,6 +94,11 @@ CLOUD_DROPPED_SECTIONS = [
     # Community-contributed in the open-source package; Cloud offers it once
     # we take it over (remove this entry and the marker below then).
     "### Microsoft Advertising Tools",
+    # Community-contributed as well: its tools and its two orchestration
+    # patterns (remove these entries and the chatgpt_ marker below then).
+    "### ChatGPT Ads Tools",
+    "### When user wants to change or build ChatGPT Ads campaigns",
+    "### When user asks about ChatGPT Ads",
 ]
 
 # Anything matching these after the drop names a tool Cloud doesn't offer.
@@ -103,6 +108,7 @@ CLOUD_UNAVAILABLE_MARKERS = [
     r"\bupload_conversion_csv\b",
     r"\bdraft_upload_\w+",
     r"\b\w*microsoft_\w+",
+    r"\b\w*chatgpt_\w+",
 ]
 
 # (old, new) pairs. Every ``old`` must occur in the source at least once.
@@ -238,9 +244,10 @@ CLOUD_REPLACEMENTS: list[tuple[str, str]] = [
         "- **Property ID**: Use the property chosen in the AdLoop Cloud "
         "dashboard (no need to ask)",
     ),
-    # Microsoft Advertising is not on Cloud yet (see CLOUD_DROPPED_SECTIONS).
+    # Microsoft Advertising and ChatGPT Ads are not on Cloud yet (see
+    # CLOUD_DROPPED_SECTIONS).
     (
-        "(when configured) Reddit Ads and Microsoft Advertising connectivity",
+        "(when configured) Reddit Ads, Microsoft Advertising and ChatGPT Ads connectivity",
         "(when configured) Reddit Ads connectivity",
     ),
     (
