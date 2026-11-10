@@ -91,9 +91,6 @@ CLOUD_DROPPED_SECTIONS = [
     # Hidden on Cloud until the data processing agreement covers the CSVs'
     # personal data; remove this entry when the runtime switch goes on.
     "### Offline Conversion Uploads",
-    # Community-contributed in the open-source package; Cloud offers it once
-    # we take it over (remove this entry and the marker below then).
-    "### Microsoft Advertising Tools",
 ]
 
 # Anything matching these after the drop names a tool Cloud doesn't offer.
@@ -102,7 +99,6 @@ CLOUD_UNAVAILABLE_MARKERS = [
     r"\bdraft_\w*gtm\w*",
     r"\bupload_conversion_csv\b",
     r"\bdraft_upload_\w+",
-    r"\b\w*microsoft_\w+",
 ]
 
 # (old, new) pairs. Every ``old`` must occur in the source at least once.
@@ -238,15 +234,28 @@ CLOUD_REPLACEMENTS: list[tuple[str, str]] = [
         "- **Property ID**: Use the property chosen in the AdLoop Cloud "
         "dashboard (no need to ask)",
     ),
-    # Microsoft Advertising is not on Cloud yet (see CLOUD_DROPPED_SECTIONS).
+    # Microsoft Advertising on Cloud: connected in the dashboard, not with
+    # the self-hosted developer token, Entra app and sign-in command.
     (
-        "(when configured) Reddit Ads and Microsoft Advertising connectivity",
-        "(when configured) Reddit Ads connectivity",
+        "Toolset `microsoft_ads`; needs `microsoft_ads.developer_token`, `microsoft_ads.client_id` "
+        "(an Entra app with public client flows and the msads.manage permission) and a one-time "
+        "`adloop microsoft-login` (browser sign-in; the Entra app registers `http://localhost/callback` "
+        "and the sign-in listens on a free port of it, since Entra ignores the port of localhost "
+        "redirects. Sign in with the user that has access to the ad accounts. Directories with "
+        "security defaults block the device-code flow with sign-in error 530035, so `--device-code` "
+        "is only a fallback).",
+        "Toolset `microsoft_ads`; the workspace connects its Microsoft account in the AdLoop Cloud "
+        "dashboard (Settings → Microsoft; agencies pick the ad account per client). Work accounts may "
+        "need their organisation's administrator to approve AdLoop Cloud once; the dashboard shows "
+        "the link to send them.",
     ),
     (
-        '`draft_image_assets(upload_ids=["up_..."])` for Google Ads; '
-        '`draft_microsoft_image_extension(upload_ids=["up_..."])` for Microsoft Advertising; ',
-        '`draft_image_assets(upload_ids=["up_..."])` for Google Ads; ',
+        "invite a Microsoft account or work (Entra) user and sign in as that user. `customer_id` is "
+        "the manager account, `ad_account_id` the default ad account; `list_microsoft_ads_accounts` "
+        "shows both.",
+        "invite a Microsoft account or work (Entra) user to the ad account and reconnect Microsoft in "
+        "the dashboard as that user. Tools take `ad_account_id` (the selected account is the default); "
+        "`list_microsoft_ads_accounts` lists the accounts the connection reaches.",
     ),
 ]
 
