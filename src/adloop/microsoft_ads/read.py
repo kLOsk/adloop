@@ -73,7 +73,7 @@ _TIME_ZONES = {
     "Brisbane": "Australia/Brisbane",
     "BrusselsCopenhagenMadridParis": "Europe/Paris",
     "Bucharest": "Europe/Bucharest",
-    "BuenosAiresGeorgetown": "America/Buenos_Aires",
+    "BuenosAiresGeorgetown": "America/Argentina/Buenos_Aires",
     "Cairo": "Africa/Cairo",
     "CanberraMelbourneSydney": "Australia/Sydney",
     "CapeVerdeIsland": "Atlantic/Cape_Verde",

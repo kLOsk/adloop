@@ -22,6 +22,7 @@ dependencies = [
     # Reddit Ads has no SDK; the REST client (adloop.reddit.client) and the
     # PageSpeed helper call requests directly.
     "requests>=2.31",
+    "tzdata>=2024.1",
 ]
 
 [project.urls]
