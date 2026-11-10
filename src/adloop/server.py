@@ -8670,7 +8670,9 @@ def draft_update_conversion_action(
             to the configured account.
         category: ConversionActionCategory to move the action to, e.g.
             PHONE_CALL_LEAD; that decides which goal it belongs to. The preview
-            shows the current one (current_category). Empty leaves it unchanged.
+            pins the current one (current_category); if the category is changed
+            in Google Ads before the apply, nothing is sent. Empty leaves it
+            unchanged.
     """
     from adloop.ads.conversion_actions import (
         draft_update_conversion_action as _impl,

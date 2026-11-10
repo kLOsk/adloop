@@ -313,7 +313,8 @@ def draft_update_conversion_action(
     Only the parameters you pass non-empty/non-default will be sent to the
     API. Use this to rename, demote a Primary to Secondary, change value,
     adjust the call-duration threshold, change attribution settings, or move
-    the action to another goal (category; the preview shows the current one).
+    the action to another goal (category; the preview shows the current one,
+    and the apply sends nothing if it changed in Google Ads since).
 
     include_in_conversions_metric is refused: Google answers IMMUTABLE_FIELD
     at apply, and validate_only does not catch it. It derives the value from
@@ -548,10 +549,40 @@ def _apply_create_conversion_action(client: object, cid: str, changes: dict) -> 
     return {"resource_name": response.results[0].resource_name}
 
 
+def _check_category_unchanged(client: object, cid: str, changes: dict) -> None:
+    """Refuse a category move when the category changed in Google Ads after the preview.
+
+    Moving an action to another goal can start or stop campaigns bidding on
+    it, so the move is pinned to ``current_category``, the category the
+    preview showed. A read, so it also runs in the dry run: the validate-only
+    client passes searches through. The value is converted as the draft's GAQL
+    read converts it (the enum name), so the two compare like for like.
+    """
+    from adloop.ads.gaql import _extract_field
+
+    action_id = str(changes["conversion_action_id"]).strip()
+    service = client.get_service("GoogleAdsService")
+    rows = list(service.search(customer_id=cid, query=(
+        "SELECT conversion_action.category FROM conversion_action "
+        f"WHERE conversion_action.id = {action_id}")))
+    if not rows:
+        raise RuntimeError(f"Conversion action {action_id} no longer exists; nothing was sent.")
+    now = str(_extract_field(rows[0], "conversion_action.category") or "")
+    pinned = changes.get("current_category", "")
+    if now != pinned:
+        raise RuntimeError(
+            f"Conversion action {action_id} was changed in Google Ads after this preview "
+            f"(its category is now {now}, the preview showed {pinned}); nothing was sent. "
+            "Draft the edit again so the preview shows the current category."
+        )
+
+
 def _apply_update_conversion_action(client: object, cid: str, changes: dict) -> dict:
     """Partial update of an existing ConversionAction.
 
     Builds a FieldMask listing only the fields the caller wanted to update.
+    A category move first re-reads the action and sends nothing if its
+    category changed in Google Ads since the preview (dry run included).
     """
     from google.protobuf import field_mask_pb2
 
@@ -568,6 +599,8 @@ def _apply_update_conversion_action(client: object, cid: str, changes: dict) -> 
             "include_in_conversions_metric cannot be changed; nothing was sent. "
             "Draft again with primary_for_goal or category."
         )
+    if "category" in changes:
+        _check_category_unchanged(client, cid, changes)
 
     paths: list[str] = []
 
