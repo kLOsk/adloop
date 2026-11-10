@@ -8345,18 +8345,15 @@ def remove_microsoft_entity(ad_account_id: str = "", entity_type: str = "", enti
 
 
 def _chatgpt_ads_configured() -> bool:
-    import os
-
     from adloop.auth import get_credentials_provider
-    from adloop.chatgpt_ads.client import API_KEY_ENV
     from adloop.runtime import deployment_mode
 
     if deployment_mode() == "server":
         # Hosted: the provider supplies keys; one without ChatGPT support
         # means the integration is simply not offered there.
         return hasattr(get_credentials_provider(), "chatgpt_ads_api_key")
-    cfg = current_config().chatgpt_ads
-    return bool(cfg.api_key or cfg.accounts or os.environ.get(API_KEY_ENV))
+    # The same check that decides whether a local server shows the tools.
+    return _chatgpt_ads_has_key(current_config())
 
 
 @_tool(title="ChatGPT Ads account", annotations=_READONLY, tags={"chatgpt_ads"})
@@ -10248,6 +10245,15 @@ def _reddit_configured(config) -> bool:
     return bool(config.reddit.client_id or config.reddit.ad_account_id)
 
 
+def _chatgpt_ads_has_key(config) -> bool:
+    """A key the ChatGPT Ads client can use (see local_api_key): one under
+    chatgpt_ads.accounts, chatgpt_ads.api_key, or OPENAI_ADS_API_KEY."""
+    from adloop.chatgpt_ads.client import API_KEY_ENV
+
+    cfg = config.chatgpt_ads
+    return bool(cfg.accounts or cfg.api_key.strip() or _os.environ.get(API_KEY_ENV, "").strip())
+
+
 # Platforms whose tools a local server hides until they are set up, so a
 # setup without them doesn't carry their tool schemas into every session:
 # toolset -> (is it set up in this config?, how to set it up). Google is not
@@ -10263,6 +10269,12 @@ _PLATFORM_SETUP: dict[str, tuple[Callable, str]] = {
         "Microsoft Advertising: add a `microsoft_ads` section with your developer token and "
         "Entra app's client_id to the config (see config.yaml.example), then run "
         "`adloop microsoft-login`.",
+    ),
+    "chatgpt_ads": (
+        _chatgpt_ads_has_key,
+        "ChatGPT Ads: add an Advertiser API key from OpenAI Ads Manager (Settings → API keys) "
+        "as `chatgpt_ads.api_key` in the config (see config.yaml.example), or set "
+        "`OPENAI_ADS_API_KEY`.",
     ),
 }
 

@@ -48,6 +48,23 @@ def test_hidden_platforms_say_how_to_set_them_up(monkeypatch, stub_other_service
     assert not [n for n in status["tools_offered"] if "reddit" in n]
 
 
+def test_hidden_chatgpt_ads_names_the_key_to_add(monkeypatch, stub_other_services):
+    monkeypatch.delenv("OPENAI_ADS_API_KEY", raising=False)
+    monkeypatch.setattr(server, "_HIDDEN_TAGS", {"chatgpt_ads"})
+
+    status = _health(
+        monkeypatch,
+        config=AdLoopConfig(),
+        summaries=_summaries(),
+        probe=lambda _c, _p: None,
+    )
+
+    how = status["hidden_toolsets"]["chatgpt_ads"]
+    assert "chatgpt_ads.api_key" in how and "OPENAI_ADS_API_KEY" in how
+    # chatgpt_attribution_check included: it needs the key as much as the rest.
+    assert not [n for n in status["tools_offered"] if "chatgpt" in n]
+
+
 def test_nothing_hidden_means_no_note(monkeypatch, stub_other_services):
     status = _health(
         monkeypatch,

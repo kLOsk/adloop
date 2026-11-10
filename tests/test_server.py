@@ -550,6 +550,12 @@ def restore_visibility():
 class TestUnconfiguredPlatforms:
     """A local server hides the tools of a platform that isn't set up."""
 
+    @pytest.fixture(autouse=True)
+    def no_chatgpt_key_in_the_environment(self, monkeypatch):
+        # OPENAI_ADS_API_KEY alone sets ChatGPT Ads up; a key in the
+        # developer's own environment must not change what these tests see.
+        monkeypatch.delenv("OPENAI_ADS_API_KEY", raising=False)
+
     @pytest.mark.asyncio
     async def test_importing_the_server_hides_nothing(self):
         # Embedders (a hosted runtime) import the module and decide
@@ -565,7 +571,7 @@ class TestUnconfiguredPlatforms:
         server = restore_visibility
         from adloop.config import AdLoopConfig
 
-        assert server.hide_unconfigured_platforms(AdLoopConfig()) == ["microsoft_ads", "reddit"]
+        assert server.hide_unconfigured_platforms(AdLoopConfig()) == ["chatgpt_ads", "microsoft_ads", "reddit"]
 
         names = {t.name for t in await server.mcp.list_tools()}
         assert not {n for n in names if "reddit" in n}
@@ -578,7 +584,7 @@ class TestUnconfiguredPlatforms:
         from adloop.config import AdLoopConfig, RedditConfig
 
         config = AdLoopConfig(reddit=RedditConfig(client_id="app"))
-        assert server.hide_unconfigured_platforms(config) == ["microsoft_ads"]
+        assert server.hide_unconfigured_platforms(config) == ["chatgpt_ads", "microsoft_ads"]
         names = {t.name for t in await server.mcp.list_tools()}
         assert "get_reddit_campaigns" in names
         assert "get_microsoft_campaigns" not in names
@@ -589,9 +595,54 @@ class TestUnconfiguredPlatforms:
         from adloop.config import AdLoopConfig, MicrosoftAdsConfig
 
         config = AdLoopConfig(microsoft_ads=MicrosoftAdsConfig(developer_token="dev"))
-        assert server.hide_unconfigured_platforms(config) == ["reddit"]
+        assert server.hide_unconfigured_platforms(config) == ["chatgpt_ads", "reddit"]
         names = {t.name for t in await server.mcp.list_tools()}
         assert "get_microsoft_campaigns" in names
+
+    @pytest.mark.asyncio
+    async def test_chatgpt_ads_without_a_key_is_hidden_with_its_ga4_cross_check(self, restore_visibility):
+        server = restore_visibility
+        from adloop.config import AdLoopConfig
+
+        assert "chatgpt_ads" in server.hide_unconfigured_platforms(AdLoopConfig())
+
+        names = {t.name for t in await server.mcp.list_tools()}
+        assert not {n for n in names if "chatgpt" in n}
+        # chatgpt_attribution_check carries ga4 as well, but it reads ChatGPT
+        # Ads, so it leaves with the ChatGPT tools while GA4's stay.
+        assert "chatgpt_attribution_check" not in server._offered_tool_names()
+        assert {"run_ga4_report", "health_check", "confirm_and_apply"} <= names
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("chatgpt_ads", "environment_key"),
+        [
+            ({"api_key": "sk-ads-example"}, ""),
+            ({"accounts": {"adacct_example": "sk-ads-example"}}, ""),
+            ({}, "sk-ads-example"),
+        ],
+        ids=["api_key", "accounts", "OPENAI_ADS_API_KEY"],
+    )
+    async def test_chatgpt_ads_with_a_key_stays(self, monkeypatch, restore_visibility, chatgpt_ads, environment_key):
+        server = restore_visibility
+        from adloop.config import AdLoopConfig, ChatGPTAdsConfig
+
+        if environment_key:
+            monkeypatch.setenv("OPENAI_ADS_API_KEY", environment_key)
+        config = AdLoopConfig(chatgpt_ads=ChatGPTAdsConfig(**chatgpt_ads))
+        assert server.hide_unconfigured_platforms(config) == ["microsoft_ads", "reddit"]
+        names = {t.name for t in await server.mcp.list_tools()}
+        assert {"get_chatgpt_campaigns", "chatgpt_attribution_check"} <= names
+
+    def test_a_blank_chatgpt_key_variable_is_no_key(self, monkeypatch):
+        # The client strips OPENAI_ADS_API_KEY, so a blank one would show
+        # tools that have no key to call OpenAI with.
+        from adloop import server
+        from adloop.config import AdLoopConfig
+
+        monkeypatch.setenv("OPENAI_ADS_API_KEY", "  ")
+        configured, _how = server._PLATFORM_SETUP["chatgpt_ads"]
+        assert not configured(AdLoopConfig())
 
     @pytest.mark.asyncio
     async def test_naming_a_platform_in_adloop_toolsets_shows_it_anyway(self, monkeypatch, restore_visibility):
@@ -631,10 +682,11 @@ class TestUnconfiguredPlatforms:
             runtime.set_default_config(None)
 
         assert ran == [True]
-        assert server._HIDDEN_TAGS == {"microsoft_ads", "reddit"}
+        assert server._HIDDEN_TAGS == {"chatgpt_ads", "microsoft_ads", "reddit"}
         names = {t.name for t in await server.mcp.list_tools()}
         assert "get_reddit_campaigns" not in names
         assert "get_microsoft_campaigns" not in names
+        assert "get_chatgpt_campaigns" not in names
 
 
 class TestDirectoryReadiness:
