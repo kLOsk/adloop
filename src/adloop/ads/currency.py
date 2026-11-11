@@ -37,21 +37,26 @@ _CURRENCY_SYMBOLS: dict[str, str] = {
     "UAH": "\u20b4",
 }
 
-# Module-level cache: customer_id -> currency_code (one API call per session)
-_cache: dict[str, str] = {}
+# Module-level cache: (tenant, customer_id) -> currency_code (one API call
+# per session). The tenant is part of the key because a hosted server runs
+# many tenants in one process: what one of them reads, or fails to read,
+# about an account must never be served to another.
+_cache: dict[tuple[str, str], str] = {}
 
 
 def get_currency_code(config: AdLoopConfig, customer_id: str) -> str:
     """Detect the account's currency via ``customer.currency_code``.
 
-    Result is cached per *customer_id* for the lifetime of the server process.
-    Falls back to ``"EUR"`` on any error.
+    A successful lookup is cached per tenant and *customer_id* for the
+    lifetime of the server process. Falls back to ``"EUR"`` on any error;
+    the fallback is not cached, so a passing failure does not stick.
     """
     from adloop.ads.client import normalize_customer_id
+    from adloop.runtime import current_tenant
 
-    cid = normalize_customer_id(customer_id)
-    if cid in _cache:
-        return _cache[cid]
+    key = (current_tenant(), normalize_customer_id(customer_id))
+    if key in _cache:
+        return _cache[key]
 
     try:
         from adloop.ads.gaql import execute_query
@@ -59,11 +64,13 @@ def get_currency_code(config: AdLoopConfig, customer_id: str) -> str:
         rows = execute_query(
             config, customer_id, "SELECT customer.currency_code FROM customer LIMIT 1"
         )
-        code = (rows[0].get("customer.currency_code", "EUR") if rows else "EUR") or "EUR"
+        code = rows[0].get("customer.currency_code") if rows else None
     except Exception:
-        code = "EUR"
+        code = None
+    if not code:
+        return "EUR"
 
-    _cache[cid] = code
+    _cache[key] = code
     return code
 
 

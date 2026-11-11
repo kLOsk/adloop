@@ -93,6 +93,40 @@ def test_get_currency_code_fallback_on_empty_rows(mock_eq: MagicMock) -> None:
     assert result == "EUR"
 
 
+@patch("adloop.ads.gaql.execute_query")
+def test_a_failed_lookup_is_not_remembered(mock_eq: MagicMock) -> None:
+    """A passing error used to pin the account to EUR until a restart."""
+    config = _make_config()
+    mock_eq.side_effect = Exception("API failure")
+    assert get_currency_code(config, "123-456-7890") == "EUR"
+
+    mock_eq.side_effect = None
+    mock_eq.return_value = [{"customer.currency_code": "PLN"}]
+    assert get_currency_code(config, "123-456-7890") == "PLN"
+
+
+@patch("adloop.ads.gaql.execute_query")
+def test_currency_is_cached_per_tenant(mock_eq: MagicMock) -> None:
+    """On a hosted server one tenant's lookup of an account id, failed or
+    not, must not decide what another tenant sees for that id."""
+    from adloop import runtime
+
+    config = _make_config()
+    runtime.set_deployment_mode("server")
+    try:
+        mock_eq.return_value = [{"customer.currency_code": "PLN"}]
+        with runtime.use_runtime(config, tenant="1"):
+            assert get_currency_code(config, "123-456-7890") == "PLN"
+        mock_eq.return_value = [{"customer.currency_code": "USD"}]
+        with runtime.use_runtime(config, tenant="2"):
+            assert get_currency_code(config, "123-456-7890") == "USD"
+        with runtime.use_runtime(config, tenant="1"):
+            assert get_currency_code(config, "123-456-7890") == "PLN"
+    finally:
+        runtime.set_deployment_mode("local")
+    assert mock_eq.call_count == 2
+
+
 # ---------------------------------------------------------------------------
 # _enrich_cost_fields with currency_code
 # ---------------------------------------------------------------------------
