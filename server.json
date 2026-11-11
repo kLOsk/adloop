@@ -3,7 +3,7 @@
   "name": "com.getadloop/adloop",
   "title": "AdLoop",
   "description": "Google Ads MCP server with Reddit Ads, GA4 and Tag Manager. Every change is previewed first.",
-  "version": "0.41.2",
+  "version": "0.41.3",
   "websiteUrl": "https://getadloop.com",
   "icons": [
     {
@@ -35,7 +35,7 @@
     {
       "registryType": "pypi",
       "identifier": "adloop",
-      "version": "0.41.2",
+      "version": "0.41.3",
       "transport": {
         "type": "stdio"
       }
