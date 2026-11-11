@@ -11,7 +11,7 @@ from fastmcp import FastMCP
 from fastmcp.server.middleware import Middleware
 from fastmcp.utilities.docstring_parsing import parse_docstring
 from mcp.types import Icon, ToolAnnotations
-from pydantic import BeforeValidator
+from pydantic import BeforeValidator, TypeAdapter
 
 from adloop import diagnostics
 from adloop.runtime import current_config
@@ -308,11 +308,27 @@ class _AppOnlyToolsForCardClients(Middleware):
 mcp.add_middleware(_AppOnlyToolsForCardClients())
 
 
+_DRY_RUN_FLAG = TypeAdapter(bool)
+
+
 def _wants_real_apply(arguments: dict | None) -> bool:
-    value = (arguments or {}).get("dry_run", True)
+    """Whether a confirm_and_apply call asks for a real apply.
+
+    Only a clear dry run skips the dialog. The tool reads ``dry_run`` with
+    pydantic's lax booleans, which take more spellings of "no" than any
+    list kept here ("off", "f", "n", ...), so the value is read the same
+    way, and anything that is not a plain yes counts as a real apply.
+    """
+    args = arguments or {}
+    if "dry_run" not in args:
+        return False  # the tool's default is a dry run
+    value = args["dry_run"]
     if isinstance(value, str):
-        return value.strip().lower() in {"false", "0", "no"}
-    return value is False or value == 0
+        value = value.strip()
+    try:
+        return _DRY_RUN_FLAG.validate_python(value) is not True
+    except ValueError:
+        return True
 
 
 class _ConfirmationDialog(Middleware):
