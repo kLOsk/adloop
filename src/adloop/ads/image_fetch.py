@@ -3,9 +3,9 @@
 The fetched bytes are uploaded into the user's Google Ads account, where
 they become visible. A fetch that could be steered at an internal address
 (cloud metadata, a database admin page, a loopback service) would therefore
-be a way to exfiltrate whatever lives there. So, unlike the up/down
-reachability check for landing pages, this fetcher closes the DNS-rebinding
-gap:
+be a way to exfiltrate whatever lives there. So this fetcher closes the
+DNS-rebinding gap (the reachability check for landing pages reuses its
+pinned connections):
 
 * the hostname is resolved exactly once per request, and every resolved
   address must be public;

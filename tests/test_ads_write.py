@@ -2810,3 +2810,90 @@ def test_extract_error_message_reads_proto_plus_failures():
         "[mutate_error=RESOURCE_NOT_FOUND] Resource was not found. "
         "(trigger: 999999999999) [request_id=req123]"
     )
+
+
+# --- URL check: the connection goes to the address that was checked --------
+
+
+def _serve_once(handler_cls):
+    """A loopback HTTP server on a free port; returns (server, port)."""
+    import http.server
+    import threading
+
+    server = http.server.HTTPServer(("127.0.0.1", 0), handler_cls)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    return server, server.server_address[1]
+
+
+def test_url_check_connects_to_the_checked_address_not_a_second_lookup(monkeypatch):
+    """DNS rebinding: the name answers "public" when checked and would answer
+    "loopback" on a second lookup. The check must never look it up again."""
+    import http.server
+    import socket
+
+    from adloop.ads import image_fetch, write
+
+    hits = []
+
+    class Internal(http.server.BaseHTTPRequestHandler):
+        def do_HEAD(self):
+            hits.append(self.path)
+            self.send_response(200)
+            self.end_headers()
+
+        def log_message(self, *args):
+            pass
+
+    server, port = _serve_once(Internal)
+    lookups = []
+
+    def rebinding_dns(host, *args, **kwargs):
+        lookups.append(host)
+        # First answer (the check): a public address. Later answers: loopback.
+        ip = "93.184.216.34" if len(lookups) == 1 else "127.0.0.1"
+        return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", (ip, port))]
+
+    monkeypatch.setattr(socket, "getaddrinfo", rebinding_dns)
+    monkeypatch.setattr(write, "_ssrf_error", lambda u: None)  # the check passed
+    monkeypatch.setattr("urllib.request.getproxies", lambda: {})
+    dialled = []
+    real_connect = socket.create_connection
+
+    def record(address, *args, **kwargs):
+        dialled.append(address[0])
+        raise OSError("unreachable in the test")
+
+    monkeypatch.setattr(socket, "create_connection", record)
+    try:
+        url = f"http://rebind.example:{port}/admin"
+        errors, _ = write._validate_urls([url], timeout=2)
+    finally:
+        monkeypatch.setattr(socket, "create_connection", real_connect)
+        server.shutdown()
+
+    assert dialled == ["93.184.216.34"], "the connection must use the one checked answer"
+    assert lookups == ["rebind.example"]
+    assert hits == []
+    assert errors[url]
+
+
+def test_url_check_refuses_a_name_that_resolves_to_an_internal_address(monkeypatch):
+    import socket
+
+    from adloop.ads import write
+
+    monkeypatch.setattr(
+        socket, "getaddrinfo",
+        lambda host, *a, **k: [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("169.254.169.254", 80))],
+    )
+    monkeypatch.setattr(write, "_ssrf_error", lambda u: None)  # as if the check had been passed
+    monkeypatch.setattr("urllib.request.getproxies", lambda: {})
+    monkeypatch.setattr(
+        socket, "create_connection",
+        lambda *a, **k: (_ for _ in ()).throw(AssertionError("must not connect")),
+    )
+
+    url = "http://metadata.example/latest/meta-data/"
+    errors, _ = write._validate_urls([url], timeout=2)
+
+    assert "non-public" in errors[url]

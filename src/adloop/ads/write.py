@@ -216,12 +216,10 @@ def _ssrf_error(url: str) -> str | None:
     pointing at such addresses could never serve anyway. Returns an error
     string, or None if the URL looks safe to fetch.
 
-    Note: the fetch re-resolves DNS after this check, so a hostile DNS
-    server could still rebind between check and fetch — acceptable here
-    because the fetch result is only an up/down signal, never returned
-    to the caller. Fetches whose bytes ARE used (image assets) go through
-    ``adloop.ads.image_fetch``, which pins the connection to the checked
-    address.
+    This check is the readable refusal. What holds against a hostile DNS
+    server (one answer for this check, another for the fetch) is the opener
+    from ``_build_public_only_opener``: it resolves the name once more,
+    refuses a non-public answer and connects to exactly that address.
     """
     import ipaddress
     import socket
@@ -262,8 +260,48 @@ def _ssrf_error(url: str) -> str | None:
     return None
 
 
+def _pinned_connection_factory(scheme: str):
+    """A connection class for urllib that dials only a checked, public address.
+
+    urllib resolves the hostname when it connects, after any check made
+    beforehand, so a DNS server can answer the check with a public address
+    and the connection with an internal one (DNS rebinding). This factory
+    resolves once, refuses a non-public answer and connects to that very
+    address; the request keeps its Host header, and TLS still verifies the
+    certificate against the hostname.
+    """
+    import urllib.error
+    from urllib.parse import urlsplit
+
+    from adloop.ads import image_fetch
+
+    def connect(host, timeout=image_fetch.TIMEOUT_SECONDS, **kwargs):
+        parts = urlsplit(f"//{host}")
+        name = parts.hostname or host
+        port = parts.port or (443 if scheme == "https" else 80)
+        try:
+            pinned_ip = image_fetch.resolve_public_address(name, port)
+        except image_fetch.ImageFetchError as e:
+            raise urllib.error.URLError(str(e)) from e
+        if scheme == "https":
+            return image_fetch._PinnedHTTPSConnection(
+                name, port, pinned_ip=pinned_ip, timeout=timeout,
+                context=kwargs.get("context") or image_fetch._tls_context(),
+            )
+        return image_fetch._PinnedHTTPConnection(name, port, pinned_ip=pinned_ip, timeout=timeout)
+
+    return connect
+
+
 def _build_public_only_opener():
-    """Return a urllib opener that re-checks every redirect hop for SSRF."""
+    """Return a urllib opener that can only reach public addresses.
+
+    Every redirect hop is checked, and every connection (the first request
+    and each redirect) goes to an address that was resolved once and found
+    public, so the check cannot be passed with one DNS answer and the fetch
+    made with another. Behind an HTTP proxy the proxy does the resolving,
+    so there the stock connections are kept.
+    """
     import urllib.error
     import urllib.request
 
@@ -274,7 +312,20 @@ def _build_public_only_opener():
                 raise urllib.error.URLError(f"redirect blocked: {err}")
             return super().redirect_request(req, fp, code, msg, headers, newurl)
 
-    return urllib.request.build_opener(_PublicOnlyRedirectHandler)
+    if urllib.request.getproxies():
+        return urllib.request.build_opener(_PublicOnlyRedirectHandler)
+
+    class _PinnedHTTPHandler(urllib.request.HTTPHandler):
+        def http_open(self, req):
+            return self.do_open(_pinned_connection_factory("http"), req)
+
+    class _PinnedHTTPSHandler(urllib.request.HTTPSHandler):
+        def https_open(self, req):
+            return self.do_open(_pinned_connection_factory("https"), req)
+
+    return urllib.request.build_opener(
+        _PublicOnlyRedirectHandler, _PinnedHTTPHandler, _PinnedHTTPSHandler
+    )
 
 
 # Statuses that say nothing about whether the landing page is any good:
