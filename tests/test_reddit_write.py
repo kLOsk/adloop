@@ -40,6 +40,23 @@ def _config(**safety) -> AdLoopConfig:
 _ACCOUNT = {"data": {"id": "a2_acct", "name": "Acme", "currency": "EUR", "time_zone_id": "Europe/Berlin"}}
 
 
+def _owned(method: str, target: str, payload):
+    """Reddit returns the owning ad account on every campaign, ad group and
+    ad; fixtures that leave it out belong to the test account."""
+    import re
+
+    data = payload.get("data") if isinstance(payload, dict) else None
+    if (
+        method == "GET"
+        and isinstance(data, dict)
+        and data
+        and re.fullmatch(r"(campaigns|ad_groups|ads)/[^/]+", target.rstrip("/"))
+        and "ad_account_id" not in data
+    ):
+        return {**payload, "data": {**data, "ad_account_id": "a2_acct"}}
+    return payload
+
+
 def _fake_api(routes: dict):
     calls: list[tuple[str, str, dict | None]] = []
 
@@ -48,7 +65,7 @@ def _fake_api(routes: dict):
         calls.append((method, target, json_body))
         for (m, suffix), payload in routes.items():
             if m == method and target.rstrip("/").endswith(suffix):
-                return payload(json_body) if callable(payload) else payload
+                return _owned(method, target, payload(json_body) if callable(payload) else payload)
         raise AssertionError(f"unexpected Reddit call {method} {target}")
 
     return calls, patch("adloop.reddit.client.reddit_request", side_effect=fake)
@@ -69,6 +86,72 @@ _AD_GROUP = {"data": {"id": "g1", "name": "DE", "campaign_id": "c1", "configured
                        "goal_type": "DAILY_SPEND", "goal_value": 20_000_000, "bid_value": 1_000_000,
                        "is_campaign_budget_optimization": False,
                        "targeting": {"geolocations": ["DE"], "communities": ["r/python"]}}}
+
+
+_LIFETIME_GROUP = {"data": {**_AD_GROUP["data"], "goal_type": "LIFETIME_SPEND", "goal_value": 3_000_000_000}}
+
+
+def _in_days(days: int) -> str:
+    from datetime import datetime, timedelta, timezone
+
+    moment = datetime.now(timezone.utc).replace(microsecond=0) + timedelta(days=days, hours=1)
+    return moment.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+class TestAccountBinding:
+    """Reddit takes a campaign, ad group or ad id from any account the login
+    reaches; a change is only ever made in the account it was drafted for."""
+
+    _FOREIGN = {"data": {**_CAMPAIGN["data"], "ad_account_id": "a2_other_client"}}
+
+    def test_status_draft_does_not_find_another_accounts_campaign(self):
+        _, ctx = _fake_api({("GET", "campaigns/c1"): self._FOREIGN, ("GET", "ad_accounts/a2_acct"): _ACCOUNT})
+        with ctx:
+            for draft in (write.pause_reddit_entity, write.enable_reddit_entity, write.remove_reddit_entity):
+                result = draft(_config(), entity_type="campaign", entity_id="c1")
+                assert "was not found" in result["error"]
+
+    def test_update_drafts_do_not_find_another_accounts_entities(self):
+        foreign_group = {"data": {**_AD_GROUP["data"], "ad_account_id": "a2_other_client"}}
+        foreign_ad = {"data": {"id": "ad1", "name": "x", "post_id": "t3_p", "ad_account_id": "a2_other_client"}}
+        _, ctx = _fake_api({
+            ("GET", "campaigns/c1"): self._FOREIGN, ("GET", "ad_groups/g1"): foreign_group,
+            ("GET", "ads/ad1"): foreign_ad, ("GET", "ad_accounts/a2_acct"): _ACCOUNT,
+        })
+        with ctx:
+            assert "not found" in write.update_reddit_campaign(_config(), campaign_id="c1", name="n")["error"]
+            assert "not found" in write.update_reddit_ad_group(_config(), ad_group_id="g1", name="n")["error"]
+            assert "not found" in write.update_reddit_ad(_config(), ad_id="ad1", name="n")["error"]
+
+    def test_an_entity_without_an_owner_is_looked_up_in_the_accounts_listing(self):
+        bare = {"data": {**_CAMPAIGN["data"], "ad_account_id": ""}}
+        for listed, found in (([{"id": "c1"}], True), ([{"id": "c7"}], False)):
+            _, ctx = _fake_api({
+                ("GET", "campaigns/c1"): bare, ("GET", "ad_accounts/a2_acct"): _ACCOUNT,
+                ("GET", "ad_accounts/a2_acct/campaigns"): {"data": listed},
+            })
+            with ctx:
+                result = write.pause_reddit_entity(_config(), entity_type="campaign", entity_id="c1")
+            assert ("plan_id" in result) is found
+
+    def test_ids_that_are_not_ids_never_reach_the_request_path(self):
+        calls, ctx = _fake_api({("GET", "ad_accounts/a2_acct"): _ACCOUNT})
+        with ctx:
+            result = write.pause_reddit_entity(_config(), entity_type="campaign", entity_id="../ad_accounts/a2_x")
+        assert "was not found" in result["error"]
+        assert not [c for c in calls if "a2_x" in c[1]]
+
+    def test_apply_refuses_when_the_entity_is_not_in_the_plans_account(self):
+        from adloop.safety.preview import ChangePlan
+
+        plan = ChangePlan(
+            platform="reddit", operation="reddit_set_status", entity_type="campaign", entity_id="c1",
+            customer_id="a2_acct", changes={"ad_account_id": "a2_acct", "target_status": "ACTIVE"},
+        )
+        calls, ctx = _fake_api({("GET", "campaigns/c1"): self._FOREIGN})
+        with ctx, _no_scope_check(), pytest.raises(ValueError, match="not in Reddit ad account a2_acct"):
+            write.apply_plan(_config(), plan)
+        assert not [c for c in calls if c[0] == "PATCH"]
 
 
 class TestStatusDrafts:
@@ -144,9 +227,45 @@ class TestUpdateDrafts:
             # 300 over 10 days = 30/day, under the 50 cap, but goal_type differs from DAILY_SPEND.
             result = write.update_reddit_ad_group(
                 _config(), ad_group_id="g1", lifetime_budget=300,
-                start_time="2026-10-01", end_time="2026-10-11",
+                start_time=_in_days(1), end_time=_in_days(11),
             )
         assert any("goal_type cannot change" in d for d in result["details"])
+
+    def test_lifetime_budget_is_spread_over_the_days_left_not_the_days_gone(self):
+        """15,100 on a group that started 300 days ago and ends in 2 days is
+        7,550 a day, not 50: the days that passed cannot dilute it."""
+        group = {"data": {**_LIFETIME_GROUP["data"], "start_time": _in_days(-300), "end_time": _in_days(2)}}
+        _, ctx = _fake_api({("GET", "ad_groups/g1"): group, ("GET", "ad_accounts/a2_acct"): _ACCOUNT})
+        with ctx:
+            refused = write.update_reddit_ad_group(_config(), ad_group_id="g1", lifetime_budget=15_100)
+            allowed = write.update_reddit_ad_group(_config(), ad_group_id="g1", lifetime_budget=90)
+        assert "exceeds" in refused["error"].lower() or "max_daily_budget" in refused["error"]
+        assert allowed["changes"]["daily_equivalent"] == 45.0
+
+    def test_pulling_the_end_date_in_is_checked_against_the_cap(self):
+        """No budget argument, but 3,000 that had 100 days now has one."""
+        group = {"data": {**_LIFETIME_GROUP["data"], "start_time": _in_days(-1), "end_time": _in_days(100)}}
+        _, ctx = _fake_api({("GET", "ad_groups/g1"): group, ("GET", "ad_accounts/a2_acct"): _ACCOUNT})
+        with ctx:
+            refused = write.update_reddit_ad_group(_config(), ad_group_id="g1", end_time=_in_days(1))
+            allowed = write.update_reddit_ad_group(_config(), ad_group_id="g1", end_time=_in_days(120))
+        assert "fewer days" in refused["error"]
+        assert allowed["changes"]["patch"] == {"end_time": _in_days(120)}
+        assert allowed["changes"]["daily_equivalent"] == 25.0
+
+    def test_cbo_campaign_end_date_is_checked_against_the_cap(self):
+        campaign = {"data": {**_CBO_CAMPAIGN["data"], "goal_type": "LIFETIME_SPEND", "goal_value": 3_000_000_000,
+                             "start_time": _in_days(-1), "end_time": _in_days(100)}}
+        _, ctx = _fake_api({("GET", "campaigns/c9"): campaign, ("GET", "ad_accounts/a2_acct"): _ACCOUNT})
+        with ctx:
+            refused = write.update_reddit_campaign(_config(), campaign_id="c9", end_time=_in_days(1))
+        assert "fewer days" in refused["error"]
+
+    def test_a_schedule_change_on_a_daily_budget_needs_no_cap_check(self):
+        _, ctx = _fake_api({("GET", "ad_groups/g1"): _AD_GROUP, ("GET", "ad_accounts/a2_acct"): _ACCOUNT})
+        with ctx:
+            result = write.update_reddit_ad_group(_config(), ad_group_id="g1", end_time=_in_days(1))
+        assert result["changes"]["daily_equivalent"] is None
 
     def test_bid_increase_guard(self):
         _, ctx = _fake_api({("GET", "ad_groups/g1"): _AD_GROUP, ("GET", "ad_accounts/a2_acct"): _ACCOUNT})
@@ -924,13 +1043,14 @@ class TestConfirmAndApplyIntegration:
 
         plan_id = self._paused_plan()
         calls, ctx = _fake_api({
+            ("GET", "campaigns/c1"): _CAMPAIGN,
             ("PATCH", "campaigns/c1"): lambda body: {"data": {"id": "c1", "configured_status": body["data"]["configured_status"], "effective_status": "PAUSED"}},
         })
         with ctx, _no_scope_check(), patch("adloop.ads.client.get_ads_client", side_effect=AssertionError("google touched")):
             result = ads_write.confirm_and_apply(_config(), plan_id=plan_id, dry_run=False)
         assert result["status"] == "APPLIED"
         assert result["result"]["configured_status"] == "PAUSED"
-        assert calls[0][2] == {"data": {"configured_status": "PAUSED"}}
+        assert [c[2] for c in calls if c[0] == "PATCH"] == [{"data": {"configured_status": "PAUSED"}}]
         assert preview_store.get_plan(plan_id) is None
 
     def test_create_ad_reports_orphan_post_when_ad_fails(self):

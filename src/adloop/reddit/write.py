@@ -18,6 +18,7 @@ entity after review, exactly like new Google campaigns and RSAs.
 
 from __future__ import annotations
 
+import re
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any
 
@@ -151,13 +152,44 @@ def _iso_time(value: str, field: str, errors: list[str]) -> str:
     return candidate
 
 
+def _parse_time(value: str) -> datetime:
+    parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+
+
 def _days_between(start: str, end: str) -> int:
+    """Whole days a lifetime budget still has to be spent in.
+
+    Counted from now when the schedule already started: a budget is spent in
+    the days that are left, so days that have passed must not thin out its
+    per-day share. An unreadable schedule counts as one day.
+    """
+    now = datetime.now(timezone.utc)
     try:
-        s = datetime.fromisoformat(start.replace("Z", "+00:00")) if start else datetime.now(timezone.utc)
-        e = datetime.fromisoformat(end.replace("Z", "+00:00"))
+        s = max(_parse_time(start), now) if start else now
+        e = _parse_time(end)
     except ValueError:
         return 1
     return max(int((e - s).total_seconds() // 86400), 1)
+
+
+def _rescheduled_equivalent(current: dict, start_time: str, end_time: str) -> float | None:
+    """Per-day share of an existing lifetime budget under a new schedule.
+
+    Moving the end date closer squeezes the same budget into fewer days, so a
+    schedule change on a lifetime budget is a budget change for the cap. What
+    was already spent is not known here; the whole budget is counted.
+    """
+    if current.get("goal_type") != "LIFETIME_SPEND" or not (start_time or end_time):
+        return None
+    lifetime = from_micro(current.get("goal_value"))
+    if not lifetime:
+        return None
+    days = _days_between(
+        start_time or str(current.get("start_time") or ""),
+        end_time or str(current.get("end_time") or ""),
+    )
+    return round(float(lifetime) / days, 2)
 
 
 def _daily_equivalent(
@@ -215,17 +247,45 @@ def _store(plan_kwargs: dict, *, warnings: list[str] | None = None) -> dict:
     return store_draft(ChangePlan(platform=PLATFORM, **plan_kwargs), warnings=warnings)
 
 
-def _fetch(config: AdLoopConfig, entity_type: str, entity_id: str) -> dict:
-    collection = _COLLECTIONS[entity_type]
-    return data_of(reddit_get(config, f"{collection}/{entity_id}"))
+_ENTITY_ID = re.compile(r"[A-Za-z0-9_]+")
 
 
-def _exists(config: AdLoopConfig, entity_type: str, entity_id: str) -> bool:
-    """Whether the entity exists; a 404 is a no, other errors propagate."""
+def _in_account(config: AdLoopConfig, entity_type: str, entity: dict, account: str) -> bool:
+    """Whether a fetched campaign, ad group or ad belongs to ``account``."""
+    owner = str(entity.get("ad_account_id") or "").strip()
+    if owner:
+        return owner == account
+    # No owner on the entity: the account's own listing decides.
+    from adloop.reddit.client import reddit_get_all
+
+    listed = reddit_get_all(config, f"ad_accounts/{account}/{_COLLECTIONS[entity_type]}")
+    return any(str(row.get("id")) == str(entity.get("id")) for row in listed)
+
+
+def _fetch(config: AdLoopConfig, entity_type: str, entity_id: str, account: str) -> dict:
+    """The entity, or ``{}`` when it is not one of ``account``'s.
+
+    Reddit addresses campaigns, ad groups and ads by id alone, without the ad
+    account in the path, and one Reddit login often reaches several accounts.
+    A change is drafted, previewed, capped and logged for one account, so an
+    id from another account is treated as not found. Ids are checked too:
+    they go into the request path.
+    """
+    entity_id = str(entity_id or "")
+    if not account or not _ENTITY_ID.fullmatch(entity_id):
+        return {}
+    entity = data_of(reddit_get(config, f"{_COLLECTIONS[entity_type]}/{entity_id}"))
+    if not entity or not _in_account(config, entity_type, entity, account):
+        return {}
+    return entity
+
+
+def _exists(config: AdLoopConfig, entity_type: str, entity_id: str, account: str) -> bool:
+    """Whether the entity exists in ``account``; a 404 is a no, other errors propagate."""
     from adloop.reddit.auth import RedditApiError
 
     try:
-        return bool(_fetch(config, entity_type, entity_id))
+        return bool(_fetch(config, entity_type, entity_id, account))
     except RedditApiError as e:
         if getattr(e, "status", None) == 404:
             return False
@@ -283,7 +343,7 @@ def _draft_status(
     if errors:
         return _validation_error(errors)
 
-    current = _fetch(config, entity_type, entity_id)
+    current = _fetch(config, entity_type, entity_id, account)
     if not current:
         return {"error": f"Reddit {entity_type} '{entity_id}' was not found."}
     warnings: list[str] = []
@@ -390,7 +450,7 @@ def update_reddit_campaign(
     if errors:
         return _validation_error(errors)
 
-    current = _fetch(config, "campaign", campaign_id)
+    current = _fetch(config, "campaign", campaign_id, account)
     if not current:
         return {"error": f"Reddit campaign '{campaign_id}' was not found."}
     meta = account_meta(config, account)
@@ -415,6 +475,12 @@ def update_reddit_campaign(
         errors.append("Bid settings live on the ad groups of a non-CBO campaign.")
     if errors:
         return _validation_error(errors)
+    if goal_value is None:
+        daily_equivalent = _rescheduled_equivalent(current, start_time, end_time)
+        try:
+            _budget_cap(daily_equivalent, config, meta["currency"])
+        except SafetyViolation as e:
+            return {"error": f"{e} The new schedule spreads the lifetime budget over fewer days."}
 
     patch: dict[str, Any] = {}
     display: dict[str, Any] = {}
@@ -792,7 +858,7 @@ def update_reddit_ad_group(
     if errors:
         return _validation_error(errors)
 
-    current = _fetch(config, "ad_group", ad_group_id)
+    current = _fetch(config, "ad_group", ad_group_id, account)
     if not current:
         return {"error": f"Reddit ad group '{ad_group_id}' was not found."}
     meta = account_meta(config, account)
@@ -815,6 +881,12 @@ def update_reddit_ad_group(
         )
     if errors:
         return _validation_error(errors)
+    if goal_value is None:
+        daily_equivalent = _rescheduled_equivalent(current, start_time, end_time)
+        try:
+            _budget_cap(daily_equivalent, config, meta["currency"])
+        except SafetyViolation as e:
+            return {"error": f"{e} The new schedule spreads the lifetime budget over fewer days."}
 
     patch: dict[str, Any] = {}
     display: dict[str, Any] = {}
@@ -949,7 +1021,7 @@ def update_reddit_ad(
         if errors:
             return _validation_error(errors)
 
-    current = _fetch(config, "ad", ad_id)
+    current = _fetch(config, "ad", ad_id, account)
     if not current:
         return {"error": f"Reddit ad '{ad_id}' was not found."}
     if click_url and current.get("post_id"):
@@ -1299,7 +1371,7 @@ def draft_reddit_ad_group(
     if errors:
         return _validation_error(errors)
 
-    campaign = _fetch(config, "campaign", campaign_id)
+    campaign = _fetch(config, "campaign", campaign_id, account)
     if not campaign:
         return {"error": f"Reddit campaign '{campaign_id}' was not found."}
     is_cbo = bool(campaign.get("is_campaign_budget_optimization"))
@@ -1555,7 +1627,7 @@ def _draft_ad_from_post(
         if errors:
             return _validation_error(errors)
 
-    ad_group = _fetch(config, "ad_group", ad_group_id)
+    ad_group = _fetch(config, "ad_group", ad_group_id, account)
     if not ad_group:
         return {"error": f"Reddit ad group '{ad_group_id}' was not found."}
 
@@ -1866,7 +1938,7 @@ def draft_reddit_ad(
     if errors:
         return _validation_error(errors)
 
-    ad_group = _fetch(config, "ad_group", ad_group_id)
+    ad_group = _fetch(config, "ad_group", ad_group_id, account)
     if not ad_group:
         return {"error": f"Reddit ad group '{ad_group_id}' was not found."}
 
@@ -2060,7 +2132,7 @@ def draft_reddit_custom_audience(
                 f"(known: {', '.join(sorted(pixels)) or 'none'})"
             ])
     else:
-        missing = [c for c in payload["engagement_audience_config"]["campaign_ids"] if not _exists(config, "campaign", c)]
+        missing = [c for c in payload["engagement_audience_config"]["campaign_ids"] if not _exists(config, "campaign", c, account)]
         if missing:
             return _validation_error([f"campaigns not found in this account: {', '.join(missing)}"])
 
@@ -2085,6 +2157,13 @@ def draft_reddit_custom_audience(
 # ---------------------------------------------------------------------------
 
 
+# Plans that change an existing campaign, ad group or ad by its id.
+_ENTITY_OPERATIONS = frozenset({
+    "reddit_set_status", "reddit_archive_entity", "reddit_update_ad",
+    "reddit_update_campaign", "reddit_update_ad_group",
+})
+
+
 def is_reddit_plan(plan: ChangePlan) -> bool:
     return str(plan.operation or "").startswith(OPERATION_PREFIX)
 
@@ -2105,20 +2184,20 @@ def preflight(config: AdLoopConfig, plan: ChangePlan) -> dict:
     checks: dict[str, Any] = {"ad_account_id": account, "currency": meta["currency"]}
 
     if plan.operation in ("reddit_set_status", "reddit_archive_entity"):
-        current = _fetch(config, plan.entity_type, plan.entity_id)
+        current = _fetch(config, plan.entity_type, plan.entity_id, account)
         if not current:
             raise ValueError(f"{plan.entity_type} '{plan.entity_id}' no longer exists.")
         checks["entity"] = current.get("name")
         checks["configured_status_now"] = current.get("configured_status")
         checks["already_in_target_status"] = current.get("configured_status") == changes.get("target_status")
     elif plan.operation == "reddit_update_ad":
-        current = _fetch(config, "ad", plan.entity_id)
+        current = _fetch(config, "ad", plan.entity_id, account)
         if not current:
             raise ValueError(f"ad '{plan.entity_id}' no longer exists.")
         checks["entity"] = current.get("name")
         checks["post_id"] = current.get("post_id")
     elif plan.operation in ("reddit_update_campaign", "reddit_update_ad_group"):
-        current = _fetch(config, plan.entity_type, plan.entity_id)
+        current = _fetch(config, plan.entity_type, plan.entity_id, account)
         if not current:
             raise ValueError(f"{plan.entity_type} '{plan.entity_id}' no longer exists.")
         checks["entity"] = current.get("name")
@@ -2141,7 +2220,7 @@ def preflight(config: AdLoopConfig, plan: ChangePlan) -> dict:
         checks["funding_instrument_id"] = (changes.get("payload") or {}).get("funding_instrument_id")
     elif plan.operation == "reddit_create_ad_group":
         campaign_id = (changes.get("payload") or {}).get("campaign_id", "")
-        campaign = _fetch(config, "campaign", campaign_id)
+        campaign = _fetch(config, "campaign", campaign_id, account)
         if not campaign:
             raise ValueError(f"campaign '{campaign_id}' no longer exists.")
         checks["campaign"] = campaign.get("name")
@@ -2150,7 +2229,7 @@ def preflight(config: AdLoopConfig, plan: ChangePlan) -> dict:
             checks["budget_cap_ok"] = True
     elif plan.operation == "reddit_create_ad":
         ad_group_id = (changes.get("ad") or {}).get("ad_group_id", "")
-        group = _fetch(config, "ad_group", ad_group_id)
+        group = _fetch(config, "ad_group", ad_group_id, account)
         if not group:
             raise ValueError(f"ad group '{ad_group_id}' no longer exists.")
         checks["ad_group"] = group.get("name")
@@ -2169,7 +2248,7 @@ def preflight(config: AdLoopConfig, plan: ChangePlan) -> dict:
                 raise ValueError(f"pixel '{pixel_ids[0]}' is no longer available to this ad account.")
             checks["pixel_id"] = pixel_ids[0]
         for campaign_id in (payload.get("engagement_audience_config") or {}).get("campaign_ids") or []:
-            if not _exists(config, "campaign", campaign_id):
+            if not _exists(config, "campaign", campaign_id, account):
                 raise ValueError(f"campaign '{campaign_id}' no longer exists.")
         checks["audience_name"] = payload.get("name")
     else:
@@ -2188,6 +2267,13 @@ def apply_plan(config: AdLoopConfig, plan: ChangePlan) -> dict:
     changes = plan.changes or {}
     account = changes.get("ad_account_id") or plan.customer_id
     op = plan.operation
+
+    if op in _ENTITY_OPERATIONS and not _fetch(config, plan.entity_type, plan.entity_id, account):
+        # The dry run checked this too, but it is the apply that changes
+        # something, and Reddit would take the id whatever account it is in.
+        raise ValueError(
+            f"{plan.entity_type} '{plan.entity_id}' is not in Reddit ad account {account}; nothing was changed."
+        )
 
     if op in ("reddit_set_status", "reddit_archive_entity"):
         collection = _COLLECTIONS[plan.entity_type]
