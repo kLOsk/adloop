@@ -48,6 +48,15 @@ TOOLSETS: dict[str, str] = {
     "merchant": "Merchant Center reads",
     "reddit": "Reddit Ads reads, writes, and planning",
     "microsoft_ads": "Microsoft Advertising (Bing) reads and campaign management",
+    "chatgpt_ads": "ChatGPT Ads (OpenAI) reads, campaign management and conversion diagnostics",
+}
+
+# Tools that need two platforms carry both toolset tags, so a filter that
+# hides an unconfigured platform's tools hides them too. Every other tool
+# carries exactly one.
+CROSS_PLATFORM_TOOLS: dict[str, frozenset[str]] = {
+    # ChatGPT Ads clicks against GA4 sessions and key events.
+    "chatgpt_attribution_check": frozenset({"chatgpt_ads", "ga4"}),
 }
 
 # Finer selections inside "ads" (issue #56): every ads tool also carries
@@ -405,6 +414,7 @@ _API_DOCS: dict[str, str] = {
     "merchant": "Merchant API: https://developers.google.com/merchant/api/overview",
     "reddit": "Reddit Ads API: https://ads-api.reddit.com/docs/v3/",
     "microsoft_ads": "Microsoft Advertising API: https://learn.microsoft.com/advertising/guides/",
+    "chatgpt_ads": "OpenAI Advertiser API: https://developers.openai.com/ads/api-overview",
     # health_check and confirm_and_apply act on whichever platform is set up.
     "core": (
         "Google Ads API: https://developers.google.com/google-ads/api/docs/start, "
@@ -645,6 +655,58 @@ def _microsoft_ads_structured_error(exc: Exception) -> dict | None:
     return None
 
 
+def _chatgpt_ads_structured_error(exc: Exception) -> dict | None:
+    """ChatGPT Ads translations, keyed on exception type like Reddit's."""
+    from adloop.chatgpt_ads.client import (
+        SETTINGS_URL,
+        ChatGPTAdsApiError,
+        ChatGPTAdsAuthError,
+    )
+
+    if isinstance(exc, ChatGPTAdsAuthError):
+        code = {
+            "missing_key": "CHATGPT_ADS_NOT_CONNECTED",
+            "invalid_key": "CHATGPT_ADS_INVALID_KEY",
+        }.get(exc.error_code, "CHATGPT_ADS_ACCOUNT_KEY")
+        return {
+            "error": str(exc),
+            "hint": (
+                f"Create an Advertiser API key in OpenAI Ads Manager → Settings → API "
+                f"keys ({SETTINGS_URL}) and put it in chatgpt_ads.api_key (or "
+                "chatgpt_ads.accounts for more accounts), then restart the MCP server."
+            ),
+            "auth_error": code,
+        }
+    if isinstance(exc, ChatGPTAdsApiError):
+        if exc.status == 429:
+            return {
+                "error": str(exc),
+                "hint": "Wait for the reset before calling again; do not retry in a loop.",
+                "auth_error": "CHATGPT_ADS_RATE_LIMITED",
+                "retry_after": exc.retry_after,
+            }
+        if exc.status == 403:
+            return {
+                "error": str(exc),
+                "hint": (
+                    "The key's account lacks this feature or permission (some endpoints, "
+                    "such as spending limits, need billing access; pixel and event-stream "
+                    "endpoints must be enabled by OpenAI for the account)."
+                ),
+                "auth_error": "CHATGPT_ADS_FORBIDDEN",
+            }
+        if exc.status == 404:
+            return {
+                "error": str(exc),
+                "hint": (
+                    "The id does not exist in this key's ad account, or the endpoint is "
+                    "not enabled for the account."
+                ),
+            }
+        return {"error": str(exc), "chatgpt_ads_status": exc.status}
+    return None
+
+
 def _structured_error(fn_name: str, exc: Exception) -> dict:
     """Translate common auth failures into actionable structured errors."""
     reddit = _reddit_structured_error(exc)
@@ -655,6 +717,10 @@ def _structured_error(fn_name: str, exc: Exception) -> dict:
     if microsoft is not None:
         microsoft.setdefault("tool", fn_name)
         return microsoft
+    chatgpt = _chatgpt_ads_structured_error(exc)
+    if chatgpt is not None:
+        chatgpt.setdefault("tool", fn_name)
+        return chatgpt
 
     err = str(exc)
     err_lower = err.lower()
@@ -805,7 +871,8 @@ def _safe(fn: Callable) -> Callable:
 @_safe
 def health_check() -> dict:
     """Test AdLoop connectivity — checks OAuth token, GA4 API, Google Ads API,
-    and (when configured) the Reddit Ads and Microsoft Advertising APIs.
+    and (when configured) the Reddit Ads, Microsoft Advertising and ChatGPT
+    Ads APIs.
 
     Returns the status of each service and actionable guidance when something
     is broken, which makes it the diagnostic for failures in other tools.
@@ -952,6 +1019,26 @@ def health_check() -> dict:
         # offer Microsoft Advertising shouldn't send the user to set it up,
         # and a local server that hid it says so under hidden_toolsets.
         status["microsoft_ads"] = "not_configured"
+
+    if _chatgpt_ads_configured():
+        try:
+            from adloop.chatgpt_ads.read import account_meta
+
+            meta = account_meta(current_config(), "", fresh=True)
+            status["chatgpt_ads"] = "ok"
+            status["chatgpt_ads_account"] = meta["ad_account_id"]
+            status["chatgpt_ads_account_name"] = meta["name"]
+        except Exception as e:
+            parsed = _structured_error("health_check", e)
+            status["chatgpt_ads"] = "error"
+            status["chatgpt_ads_error"] = parsed["error"]
+            if "hint" in parsed:
+                status["chatgpt_ads_hint"] = parsed["hint"]
+            if "auth_error" in parsed:
+                status["chatgpt_ads_auth_error"] = parsed["auth_error"]
+    elif "get_chatgpt_ads_account" in _offered_tool_names():
+        # Only where its tools are offered, as for Microsoft Advertising.
+        status["chatgpt_ads"] = "not_configured"
 
     if status["ga4"] == "error" or status["ads"] == "error":
         if status.get("ads_hint"):
@@ -5861,6 +5948,14 @@ def confirm_and_apply(
     Reddit plans: Reddit has no validate-only mode, so the dry run re-reads
     the target entity and re-checks the safety caps (returned as `checks`).
 
+    ChatGPT Ads plans: OpenAI has no validate-only mode either. The dry run
+    re-reads the target by id, confirms that what the plan sends was not
+    edited since the preview, and re-checks the budget cap, the bid cap, the
+    landing page and the image's checksum. When an answer from OpenAI was
+    lost, the error says the outcome is unknown; confirming the same plan
+    again sends nothing for a change that is already in place, and repeats a
+    create with the same Idempotency-Key.
+
     A DRY_RUN_FAILED result means the change does not go through as previewed.
     The real apply fails the same way, unless Google rejected only part of the
     request: then it carries out the rest and reports those operations again.
@@ -8292,6 +8387,748 @@ def remove_microsoft_entity(ad_account_id: str = "", entity_type: str = "", enti
 
 
 # ---------------------------------------------------------------------------
+# ChatGPT Ads Tools
+# ---------------------------------------------------------------------------
+# Another ad platform (OpenAI Advertiser API). Each API key belongs to one ad
+# account, so ``ad_account_id`` only selects which configured key to use;
+# empty means the default key (chatgpt_ads.api_key / OPENAI_ADS_API_KEY).
+
+
+def _chatgpt_ads_configured() -> bool:
+    """Set up here: hosted, the credentials provider must supply ChatGPT Ads
+    keys and the runtime must offer its tools to this caller (a hosted
+    runtime may offer them only to workspaces that added a key);
+    self-hosted, the config or environment holds a key."""
+    from adloop.auth import get_credentials_provider
+    from adloop.runtime import deployment_mode
+
+    if deployment_mode() == "server":
+        return hasattr(get_credentials_provider(), "chatgpt_ads_api_key") and (
+            "get_chatgpt_ads_account" in _offered_tool_names()
+        )
+    # The same check that decides whether a local server shows the tools.
+    return _chatgpt_ads_has_key(current_config())
+
+
+@_tool(title="ChatGPT Ads account", annotations=_READONLY, tags={"chatgpt_ads"})
+@_safe
+def get_chatgpt_ads_account(ad_account_id: str = "") -> dict:
+    """ChatGPT Ads account details: name, currency, time zone, brand and integrity reviews, spending limits.
+
+    Returns the account's status and reviews (an account cannot serve until
+    its brand review is approved), campaign counts by status, account-level
+    blockers reported on campaigns (payment method, identity verification,
+    spending limit reached), the daily and date-range spending limits when
+    the key may read billing, and insights. Account-level problems are the
+    usual reason no ChatGPT ad serves at all.
+
+    Args:
+        ad_account_id: ChatGPT ad account id (adacct_...) whose API key to
+            use; empty uses the default key (chatgpt_ads.api_key).
+    """
+    from adloop.chatgpt_ads.read import get_chatgpt_ads_account as _impl
+
+    return _impl(current_config(), ad_account_id=ad_account_id)
+
+
+@_tool(title="ChatGPT Ads campaigns", annotations=_READONLY, tags={"chatgpt_ads"})
+@_safe
+def get_chatgpt_campaigns(ad_account_id: str = "", include_archived: bool = False) -> dict:
+    """List ChatGPT Ads campaigns with status, serving state, budget, bidding, targeting and conversion events.
+
+    Each campaign carries status (what was set: active, paused, archived),
+    serving_state and serving_issues (what OpenAI reports as blocking
+    delivery: payment, reviews, no ad groups, budget spent, ...), bidding_type
+    (impressions, clicks, or conversions = oCPC), budget in account currency,
+    location and platform targeting, the conversion events attached, and the
+    tracking template. Insights flag active campaigns that cannot serve,
+    campaigns without a conversion event (they always report 0 conversions)
+    and campaigns without location targeting.
+
+    Args:
+        ad_account_id: ChatGPT ad account id (adacct_...) whose API key to
+            use; empty uses the default key (chatgpt_ads.api_key).
+        include_archived: Include archived campaigns, which are left out by
+            default.
+    """
+    from adloop.chatgpt_ads.read import get_chatgpt_campaigns as _impl
+
+    return _impl(current_config(), ad_account_id=ad_account_id, include_archived=include_archived)
+
+
+@_tool(title="ChatGPT Ads ad groups", annotations=_READONLY, tags={"chatgpt_ads"})
+@_safe
+def get_chatgpt_ad_groups(
+    ad_account_id: str = "", campaign_id: str = "", include_archived: bool = False, compact: bool = False
+) -> dict:
+    """List ChatGPT Ads ad groups with bids, context hints and serving state, plus their campaign's status.
+
+    Bids are in account currency with their meaning: maximum per click,
+    per impression, or the target cost per conversion of an oCPC campaign.
+    Context hints are the free-text descriptions that steer which
+    conversations an ad group appears in; an ad group can hold up to 2,000,
+    so each lists at most 50 and context_hint_count has the total. Insights
+    flag ad groups without ads, active ad groups that cannot serve and ad
+    groups without hints.
+
+    Args:
+        ad_account_id: ChatGPT ad account id (adacct_...) whose API key to
+            use; empty uses the default key (chatgpt_ads.api_key).
+        campaign_id: Campaign id (cmpn_..., from get_chatgpt_campaigns) to
+            limit the list to; empty lists every campaign's ad groups.
+        include_archived: Include archived ad groups and campaigns.
+        compact: Leave the context hint lists out (counts only), for
+            account overviews.
+    """
+    from adloop.chatgpt_ads.read import get_chatgpt_ad_groups as _impl
+
+    return _impl(
+        current_config(),
+        ad_account_id=ad_account_id,
+        campaign_id=campaign_id,
+        include_archived=include_archived,
+        compact=compact,
+    )
+
+
+@_tool(title="ChatGPT Ads ads", annotations=_READONLY, tags={"chatgpt_ads"})
+@_safe
+def get_chatgpt_ads(
+    ad_account_id: str = "",
+    campaign_id: str = "",
+    ad_group_id: str = "",
+    include_archived: bool = False,
+) -> dict:
+    """List ChatGPT Ads ads with copy, destination URL, review status, serving state and click parameters.
+
+    Each ad carries its title and body, target_url, image, review_status
+    (in_review, approved, rejected) with the rejection reason, serving_state,
+    the status of its ad group and campaign, and click_parameters: the utm_*
+    values a click carries after the campaign, ad group and ad tracking
+    templates are applied. Insights flag rejected ads, ads still in review,
+    approved ads that cannot serve and ads without utm_source.
+
+    Args:
+        ad_account_id: ChatGPT ad account id (adacct_...) whose API key to
+            use; empty uses the default key (chatgpt_ads.api_key).
+        campaign_id: Campaign id (cmpn_...) to limit the list to; empty
+            means every campaign.
+        ad_group_id: Ad group id (adgrp_...) to limit the list to; empty
+            means every ad group.
+        include_archived: Include archived ads, ad groups and campaigns.
+    """
+    from adloop.chatgpt_ads.read import get_chatgpt_ads as _impl
+
+    return _impl(
+        current_config(),
+        ad_account_id=ad_account_id,
+        campaign_id=campaign_id,
+        ad_group_id=ad_group_id,
+        include_archived=include_archived,
+    )
+
+
+@_tool(title="ChatGPT Ads performance", annotations=_READONLY, tags={"chatgpt_ads"})
+@_safe
+def get_chatgpt_performance(
+    ad_account_id: str = "",
+    level: str = "campaign",
+    date_range_start: str = "",
+    date_range_end: str = "",
+    breakdown: str = "",
+    compact: bool = False,
+    click_window_days: int = 30,
+    view_window_days: int = 1,
+) -> dict:
+    """ChatGPT Ads performance: spend, impressions, clicks, CTR, CPC, CPM, conversions, CPA, ROAS.
+
+    Returns rows per entity for the chosen level with names and the status
+    of every level above it, totals and insights[] (zero-conversion
+    spenders, spenders whose campaign has no conversion event, entities
+    paused since they spent). Money is in account currency. Conversions are
+    goal conversions from clicks and views within the attribution windows.
+    Windows are whole days in the account's time zone and end yesterday at
+    the latest, because conversion data needs whole days.
+
+    Args:
+        ad_account_id: ChatGPT ad account id (adacct_...) whose API key to
+            use; empty uses the default key (chatgpt_ads.api_key).
+        level: Row granularity: "account", "campaign" (default), "ad_group"
+            or "ad".
+        date_range_start: First day, YYYY-MM-DD, account time zone. Empty
+            means 29 days before date_range_end (a 30-day window).
+        date_range_end: Last day (inclusive), YYYY-MM-DD. Empty means
+            yesterday; today is moved back to yesterday.
+        breakdown: Optional extra dimension: "date", "country", "device" or
+            "platform" (ChatGPT app or web browser). Country, device and
+            platform rows carry delivery metrics only.
+        compact: When true, returns totals, the top 10 rows by spend and the
+            zero-conversion spenders instead of every row.
+        click_window_days: Click attribution window: 7, 14 or 30 (default).
+        view_window_days: View attribution window: 1 (default) or 0 to count
+            clicks only.
+    """
+    from adloop.chatgpt_ads.read import get_chatgpt_performance as _impl
+
+    return _impl(
+        current_config(),
+        ad_account_id=ad_account_id,
+        level=level,
+        date_range_start=date_range_start,
+        date_range_end=date_range_end,
+        breakdown=breakdown,
+        compact=compact,
+        click_window_days=click_window_days,
+        view_window_days=view_window_days,
+    )
+
+
+@_tool(title="ChatGPT Ads conversions", annotations=_READONLY, tags={"chatgpt_ads"})
+@_safe
+def get_chatgpt_conversions(
+    ad_account_id: str = "",
+    level: str = "campaign",
+    date_range_start: str = "",
+    date_range_end: str = "",
+    breakdown: str = "",
+    include_events: bool = True,
+    event_names: _StrListOpt = None,
+    click_window_days: int = 30,
+    view_window_days: int = 1,
+    time_basis: str = "ad_event_time",
+) -> dict:
+    """ChatGPT Ads conversions: goal conversions split into click-through and view-through, purchase value, and every attributed event.
+
+    Per entity: goal conversions (only the events attached to the campaign),
+    click_through and view_through counts, purchase value, the conversion
+    events attached, and events[]: every attributed event (lead_created,
+    page_viewed, order_created, custom events) whether or not it is a goal,
+    with counts, value and which goal setting counted it. That is how to see
+    a campaign whose site sends leads that the campaign does not count.
+
+    Args:
+        ad_account_id: ChatGPT ad account id (adacct_...) whose API key to
+            use; empty uses the default key (chatgpt_ads.api_key).
+        level: "account", "campaign" (default), "ad_group" or "ad".
+        date_range_start: First day, YYYY-MM-DD, account time zone. Empty
+            means 29 days before date_range_end.
+        date_range_end: Last day (inclusive), YYYY-MM-DD. Empty means
+            yesterday.
+        breakdown: Optional: "date", "country" or "device". Empty means none.
+        include_events: Add the attributed events per row (default true).
+        event_names: Limit events[] to these exact event names (standard
+            names like "lead_created" or custom event names). Needs
+            include_events.
+        click_window_days: Click attribution window: 7, 14 or 30 (default).
+        view_window_days: View attribution window: 1 (default) or 0.
+        time_basis: "ad_event_time" (default: date of the ad click or view)
+            or "conversion_time" (date of the conversion).
+    """
+    from adloop.chatgpt_ads.read import get_chatgpt_conversions as _impl
+
+    return _impl(
+        current_config(),
+        ad_account_id=ad_account_id,
+        level=level,
+        date_range_start=date_range_start,
+        date_range_end=date_range_end,
+        breakdown=breakdown,
+        include_events=include_events,
+        event_names=event_names,
+        click_window_days=click_window_days,
+        view_window_days=view_window_days,
+        time_basis=time_basis,
+    )
+
+
+@_tool(title="ChatGPT Ads conversion setup audit", annotations=_READONLY, tags={"chatgpt_ads"})
+@_safe
+def get_chatgpt_conversion_setup(
+    ad_account_id: str = "",
+    date_range_start: str = "",
+    date_range_end: str = "",
+    check_recent_events: bool = True,
+    min_clicks: int = 30,
+) -> dict:
+    """Audit ChatGPT Ads conversion tracking link by link and return a verdict.
+
+    Checks the whole chain: a conversion source exists (pixel or Conversions
+    API); conversion events are defined, are real outcomes rather than page
+    views, and have a source; every campaign has an event attached (without
+    one it reports 0 conversions whatever fires); oCPC campaigns optimize for
+    an active standard event; ad clicks lead to attributed events at all;
+    the goal event itself fires; events arrived in the last 15 minutes and
+    through which channel (browser pixel or server API); and ads carry
+    utm_source for Google Analytics. Returns verdict (ok, needs attention,
+    broken), checks[] (fail/warn/info/pass with details), the pixels, event
+    settings, per-campaign clicks, goal conversions and attributed events,
+    and insights. ChatGPT conversion numbers are only meaningful when this
+    audit passes.
+
+    Args:
+        ad_account_id: ChatGPT ad account id (adacct_...) whose API key to
+            use; empty uses the default key (chatgpt_ads.api_key).
+        date_range_start: First day of the activity window, YYYY-MM-DD.
+            Empty means 29 days before date_range_end.
+        date_range_end: Last day (inclusive), YYYY-MM-DD. Empty means
+            yesterday.
+        check_recent_events: Also sample the events received in the last
+            15 minutes per pixel (default true).
+        min_clicks: Clicks below which "no events" is a warning rather than
+            a failure (default 30).
+    """
+    from adloop.chatgpt_ads.read import get_chatgpt_conversion_setup as _impl
+
+    return _impl(
+        current_config(),
+        ad_account_id=ad_account_id,
+        date_range_start=date_range_start,
+        date_range_end=date_range_end,
+        check_recent_events=check_recent_events,
+        min_clicks=min_clicks,
+    )
+
+
+@_tool(title="ChatGPT Ads change history", annotations=_READONLY, tags={"chatgpt_ads"})
+@_safe
+def get_chatgpt_change_history(
+    ad_account_id: str = "",
+    date_range_start: str = "",
+    date_range_end: str = "",
+    campaign_id: str = "",
+    ad_group_id: str = "",
+    ad_id: str = "",
+    limit: int = 200,
+) -> dict:
+    """ChatGPT Ads change history: who changed which campaign, ad group or ad, and when.
+
+    Returns changes newest first with time (account time zone), change type,
+    object, actor and the before/after values, plus counts by type, actor
+    and day, and insights that flag budget, bid, status, targeting and
+    conversion-event changes, which explain most sudden performance moves.
+
+    Args:
+        ad_account_id: ChatGPT ad account id (adacct_...) whose API key to
+            use; empty uses the default key (chatgpt_ads.api_key).
+        date_range_start: First day, YYYY-MM-DD. Empty means 29 days before
+            date_range_end.
+        date_range_end: Last day (inclusive), YYYY-MM-DD. Empty means today.
+        campaign_id: Only this campaign and its ad groups and ads.
+        ad_group_id: Only this ad group and its ads.
+        ad_id: Only this ad.
+        limit: Maximum changes to return (default 200, max 2000).
+    """
+    from adloop.chatgpt_ads.read import get_chatgpt_change_history as _impl
+
+    return _impl(
+        current_config(),
+        ad_account_id=ad_account_id,
+        date_range_start=date_range_start,
+        date_range_end=date_range_end,
+        campaign_id=campaign_id,
+        ad_group_id=ad_group_id,
+        ad_id=ad_id,
+        limit=limit,
+    )
+
+
+@_tool(title="ChatGPT Ads vs Analytics check", annotations=_READONLY, tags={"chatgpt_ads", "ga4"})
+@_safe
+def chatgpt_attribution_check(
+    ad_account_id: str = "",
+    property_id: str = "",
+    date_range_start: str = "",
+    date_range_end: str = "",
+) -> dict:
+    """Compare ChatGPT Ads clicks and conversions with Google Analytics sessions and key events.
+
+    Finds the utm_source/utm_medium the ads send, then splits GA4's ChatGPT
+    traffic into paid (a utm_source with a paid medium such as cpc), unpaid
+    (people following links in ChatGPT answers) and ambiguous (sessions that
+    could be either, because an ad that got clicks is untagged or its tag has
+    no paid medium). Returns ChatGPT Ads clicks, spend and conversions, GA4
+    paid sessions, engaged sessions and key events by event name, the unpaid
+    and ambiguous ChatGPT sessions, and insights: untagged ads, clicks that
+    never became sessions, GA4 key events from paid ChatGPT visits while
+    ChatGPT Ads reports none (the OpenAI setup may miss that action), and
+    large gaps.
+
+    Queries the OpenAI Advertiser API: https://developers.openai.com/ads/api-overview
+    and the Google Analytics Data API: https://developers.google.com/analytics/devguides/reporting/data/v1
+
+    Args:
+        ad_account_id: ChatGPT ad account id (adacct_...) whose API key to
+            use; empty uses the default key (chatgpt_ads.api_key).
+        property_id: GA4 property as "properties/123456789". Empty uses
+            ga4.property_id from the config.
+        date_range_start: First day, YYYY-MM-DD. Empty means 29 days before
+            date_range_end.
+        date_range_end: Last day (inclusive), YYYY-MM-DD. Empty means
+            yesterday.
+    """
+    from adloop.chatgpt_ads.read import chatgpt_attribution_check as _impl
+
+    return _impl(
+        current_config(),
+        ad_account_id=ad_account_id,
+        property_id=property_id or current_config().ga4.property_id,
+        date_range_start=date_range_start,
+        date_range_end=date_range_end,
+    )
+
+
+@_tool(title="Search ChatGPT Ads locations", annotations=_READONLY, tags={"chatgpt_ads"})
+@_safe
+def search_chatgpt_locations(ad_account_id: str = "", query: str = "", limit: int = 20) -> dict:
+    """Find ChatGPT Ads location ids (countries, regions, markets, cities) by name for campaign targeting.
+
+    Returns location_id, name, canonical name, type, country and region
+    codes and the parent id, the values update_chatgpt_campaign and
+    draft_chatgpt_campaign take as location_ids.
+
+    Args:
+        ad_account_id: ChatGPT ad account id whose key to use; empty uses the default key.
+        query: Place name, e.g. "Chicago" or "Illinois".
+        limit: Most results (1–100).
+    """
+    from adloop.chatgpt_ads.read import search_chatgpt_locations as _impl
+
+    return _impl(current_config(), ad_account_id=ad_account_id, query=query, limit=limit)
+
+
+@_tool(title="Draft pausing a ChatGPT Ads entity", annotations=_WRITE, tags={"chatgpt_ads"})
+@_safe
+def pause_chatgpt_entity(ad_account_id: str = "", entity_type: str = "", entity_id: str = "") -> dict:
+    """Draft pausing a ChatGPT Ads campaign, ad group or ad (preview only; nothing changes yet).
+
+    The preview names the entity, its campaign and ad group, and its current
+    status. The returned plan_id is applied with confirm_and_apply, which
+    refuses if the status changed since the preview.
+
+    Args:
+        ad_account_id: ChatGPT ad account id whose key to use; empty uses the default key.
+        entity_type: "campaign", "ad_group" or "ad".
+        entity_id: The entity's id (cmpn_..., adgrp_..., ad_...).
+    """
+    from adloop.chatgpt_ads.write import pause_chatgpt_entity as _impl
+
+    return _impl(current_config(), ad_account_id=ad_account_id, entity_type=entity_type, entity_id=entity_id)
+
+
+@_tool(title="Draft enabling a ChatGPT Ads entity", annotations=_WRITE, tags={"chatgpt_ads"})
+@_safe
+def enable_chatgpt_entity(ad_account_id: str = "", entity_type: str = "", entity_id: str = "") -> dict:
+    """Draft activating a paused ChatGPT Ads campaign, ad group or ad (preview only).
+
+    Warnings name a paused parent, an ad still in review or rejected, and
+    other serving issues that would keep it from serving. The returned
+    plan_id is applied with confirm_and_apply.
+
+    Args:
+        ad_account_id: ChatGPT ad account id whose key to use; empty uses the default key.
+        entity_type: "campaign", "ad_group" or "ad".
+        entity_id: The entity's id.
+    """
+    from adloop.chatgpt_ads.write import enable_chatgpt_entity as _impl
+
+    return _impl(current_config(), ad_account_id=ad_account_id, entity_type=entity_type, entity_id=entity_id)
+
+
+@_tool(title="Draft archiving a ChatGPT Ads entity", annotations=_DESTRUCTIVE, tags={"chatgpt_ads"})
+@_safe
+def archive_chatgpt_entity(ad_account_id: str = "", entity_type: str = "", entity_id: str = "") -> dict:
+    """Draft archiving a ChatGPT Ads campaign, ad group or ad: permanent, it can never serve again.
+
+    OpenAI has no delete; archive is the end state and cannot be undone, so
+    the plan needs a double confirmation. Pausing keeps an entity reusable.
+
+    Args:
+        ad_account_id: ChatGPT ad account id whose key to use; empty uses the default key.
+        entity_type: "campaign", "ad_group" or "ad".
+        entity_id: The entity's id.
+    """
+    from adloop.chatgpt_ads.write import archive_chatgpt_entity as _impl
+
+    return _impl(current_config(), ad_account_id=ad_account_id, entity_type=entity_type, entity_id=entity_id)
+
+
+@_tool(title="Draft ChatGPT Ads campaign changes", annotations=_WRITE, tags={"chatgpt_ads"})
+@_safe
+def update_chatgpt_campaign(
+    ad_account_id: str = "",
+    campaign_id: str = "",
+    name: str = "",
+    daily_budget: float | None = None,
+    lifetime_budget: float | None = None,
+    start_date: str = "",
+    end_date: str = "",
+    location_ids: _StrListOpt = None,
+    countries: _StrListOpt = None,
+    excluded_location_ids: _StrListOpt = None,
+    excluded_countries: _StrListOpt = None,
+    platforms: _StrListOpt = None,
+    query_string_template: str = "",
+    conversion_event_setting_ids: _StrListOpt = None,
+    clear_fields: _StrListOpt = None,
+) -> dict:
+    """Draft changes to a ChatGPT Ads campaign: name, budget, dates, locations, platforms, tracking, conversion events.
+
+    Only the fields passed change. The preview shows each field from → to in
+    the account currency. Location and audience targeting is replaced as a
+    whole (the preview lists the full new set; custom audiences are kept).
+    The daily budget (or a lifetime budget's daily equivalent) is capped by
+    max_daily_budget; raising it by more than half needs a double
+    confirmation. OpenAI allows lifetime → daily budgets but not the
+    reverse, and never changes bidding_type. The returned plan_id is applied
+    with confirm_and_apply, which refuses if any changed field was edited in
+    Ads Manager after the preview.
+
+    Args:
+        ad_account_id: ChatGPT ad account id whose key to use; empty uses the default key.
+        campaign_id: Campaign id (cmpn_...).
+        name: New name (3–1000 characters).
+        daily_budget: New daily budget in the account currency.
+        lifetime_budget: New lifetime budget (only for campaigns that already have one).
+        start_date: New first day, YYYY-MM-DD (account time zone).
+        end_date: New last day, YYYY-MM-DD; the campaign stops at the end of that day.
+        location_ids: Full new list of included location ids (search_chatgpt_locations).
+        countries: Full new list of included countries as ISO codes, instead of location_ids.
+        excluded_location_ids: Full new list of excluded location ids.
+        excluded_countries: Full new list of excluded countries.
+        platforms: Full new list among android_app, android_web, desktop_web, ios_app, ios_web, web.
+        query_string_template: Click tracking appended to landing pages, e.g.
+            "utm_source=chatgpt&utm_medium=cpc&utm_campaign={campaign_id}&utm_content={ad_id}".
+        conversion_event_setting_ids: Full new list of attached conversion events (ces_...);
+            not for conversion-optimized campaigns.
+        clear_fields: Fields to remove: start_date, end_date, platforms,
+            excluded_locations, query_string_template.
+    """
+    from adloop.chatgpt_ads.write import update_chatgpt_campaign as _impl
+
+    return _impl(
+        current_config(), ad_account_id=ad_account_id, campaign_id=campaign_id, name=name,
+        daily_budget=daily_budget, lifetime_budget=lifetime_budget, start_date=start_date,
+        end_date=end_date, location_ids=location_ids, countries=countries,
+        excluded_location_ids=excluded_location_ids, excluded_countries=excluded_countries,
+        platforms=platforms, query_string_template=query_string_template,
+        conversion_event_setting_ids=conversion_event_setting_ids, clear_fields=clear_fields,
+    )
+
+
+@_tool(title="Draft ChatGPT Ads ad group changes", annotations=_WRITE, tags={"chatgpt_ads"})
+@_safe
+def update_chatgpt_ad_group(
+    ad_account_id: str = "",
+    ad_group_id: str = "",
+    name: str = "",
+    strategy: str = "",
+    max_bid: float | None = None,
+    context_hints: _StrListOpt = None,
+    add_context_hints: _StrListOpt = None,
+    remove_context_hints: _StrListOpt = None,
+) -> dict:
+    """Draft changes to a ChatGPT Ads ad group: name, bid strategy and max bid, context hints.
+
+    Strategies follow the campaign's bidding type: impressions → fixed_bid;
+    clicks → fixed_bid or maximize_clicks; conversions → fixed_bid or
+    maximize_conversions (automatic strategies need a daily campaign budget
+    and drop audience bid multipliers). A fixed-bid raise is capped by
+    max_bid_increase_pct. Context hints are replaced as a whole, or changed
+    with add/remove lists; the preview lists what is added and removed.
+    The returned plan_id is applied with confirm_and_apply, which refuses
+    if a changed field was edited after the preview.
+
+    Args:
+        ad_account_id: ChatGPT ad account id whose key to use; empty uses the default key.
+        ad_group_id: Ad group id (adgrp_...).
+        name: New name (3–1000 characters).
+        strategy: fixed_bid, maximize_clicks or maximize_conversions.
+        max_bid: Fixed bid in the account currency: per click, per impression,
+            or the target cost per conversion on conversion campaigns.
+        context_hints: Full new list of context hints (up to 2,000).
+        add_context_hints: Hints to add to the current list.
+        remove_context_hints: Hints to remove from the current list.
+    """
+    from adloop.chatgpt_ads.write import update_chatgpt_ad_group as _impl
+
+    return _impl(
+        current_config(), ad_account_id=ad_account_id, ad_group_id=ad_group_id, name=name,
+        strategy=strategy, max_bid=max_bid, context_hints=context_hints,
+        add_context_hints=add_context_hints, remove_context_hints=remove_context_hints,
+    )
+
+
+@_tool(title="Draft ChatGPT Ads ad changes", annotations=_WRITE, tags={"chatgpt_ads"})
+@_safe
+def update_chatgpt_ad(
+    ad_account_id: str = "",
+    ad_id: str = "",
+    name: str = "",
+    title: str = "",
+    body: str = "",
+    target_url: str = "",
+    image_url: str = "",
+    image_path: str = "",
+) -> dict:
+    """Draft changes to a ChatGPT Ads chat-card ad: internal name, title, body, landing page or image.
+
+    Copy, landing page or image edits submit a new version for OpenAI's
+    review; the ad serves again once approved. The landing page is checked
+    for reachability; a new image is checksummed now and uploaded at apply as
+    the same bytes. Multi-image ads keep their images. The returned plan_id
+    is applied with confirm_and_apply.
+
+    Args:
+        ad_account_id: ChatGPT ad account id whose key to use; empty uses the default key.
+        ad_id: Ad id (ad_...).
+        name: New internal name (not shown to users).
+        title: New title (3–50 characters).
+        body: New body text (up to 100 characters).
+        target_url: New landing page (http/https, reachable).
+        image_url: Public JPEG/PNG/WebP link for a new image (at least 640×640).
+        image_path: Local image file instead of image_url (self-hosted only).
+    """
+    from adloop.chatgpt_ads.write import update_chatgpt_ad as _impl
+
+    return _impl(
+        current_config(), ad_account_id=ad_account_id, ad_id=ad_id, name=name, title=title,
+        body=body, target_url=target_url, image_url=image_url, image_path=image_path,
+    )
+
+
+@_tool(title="Draft a ChatGPT Ads campaign", annotations=_WRITE, tags={"chatgpt_ads"})
+@_safe
+def draft_chatgpt_campaign(
+    ad_account_id: str = "",
+    name: str = "",
+    bidding_type: str = "clicks",
+    daily_budget: float = 0.0,
+    lifetime_budget: float = 0.0,
+    location_ids: _StrListOpt = None,
+    countries: _StrListOpt = None,
+    excluded_location_ids: _StrListOpt = None,
+    platforms: _StrListOpt = None,
+    start_date: str = "",
+    end_date: str = "",
+    query_string_template: str = "",
+    conversion_event_setting_ids: _StrListOpt = None,
+    description: str = "",
+) -> dict:
+    """Draft a new ChatGPT Ads campaign, created PAUSED (preview only; nothing is created yet).
+
+    Requires a budget (daily, or lifetime with an end date; capped by
+    max_daily_budget) and location targeting. Without a tracking template
+    the campaign gets utm_source=chatgpt&utm_medium=cpc plus campaign and
+    ad ids, so Google Analytics can tell its clicks from unpaid ChatGPT
+    referrals. Conversion bidding needs exactly one active standard event
+    setting. The returned plan_id is applied with confirm_and_apply; the
+    apply sends an Idempotency-Key, and OpenAI returns the existing campaign
+    for a repeated create once it can see the first one.
+
+    Args:
+        ad_account_id: ChatGPT ad account id whose key to use; empty uses the default key.
+        name: Campaign name (3–1000 characters).
+        bidding_type: clicks (default), conversions or impressions. Cannot change later.
+        daily_budget: Daily budget in the account currency.
+        lifetime_budget: Lifetime budget instead of daily (needs end_date).
+        location_ids: Included location ids (search_chatgpt_locations).
+        countries: Included countries as ISO codes, instead of location_ids.
+        excluded_location_ids: Excluded location ids.
+        platforms: Limit to android_app, android_web, desktop_web, ios_app, ios_web or web.
+        start_date: First day, YYYY-MM-DD; empty starts when enabled.
+        end_date: Last day, YYYY-MM-DD.
+        query_string_template: Click tracking template; empty uses the default above.
+        conversion_event_setting_ids: Conversion events to attach (ces_...).
+        description: Optional internal description.
+    """
+    from adloop.chatgpt_ads.write import draft_chatgpt_campaign as _impl
+
+    return _impl(
+        current_config(), ad_account_id=ad_account_id, name=name, bidding_type=bidding_type,
+        daily_budget=daily_budget, lifetime_budget=lifetime_budget, location_ids=location_ids,
+        countries=countries, excluded_location_ids=excluded_location_ids, platforms=platforms,
+        start_date=start_date, end_date=end_date, query_string_template=query_string_template,
+        conversion_event_setting_ids=conversion_event_setting_ids, description=description,
+    )
+
+
+@_tool(title="Draft a ChatGPT Ads ad group", annotations=_WRITE, tags={"chatgpt_ads"})
+@_safe
+def draft_chatgpt_ad_group(
+    ad_account_id: str = "",
+    campaign_id: str = "",
+    name: str = "",
+    context_hints: _StrListOpt = None,
+    strategy: str = "",
+    max_bid: float | None = None,
+) -> dict:
+    """Draft a new ad group in a ChatGPT Ads campaign, created PAUSED (preview only).
+
+    Without a strategy, a clicks or conversions campaign with a daily budget
+    gets automatic bidding (maximize_clicks / maximize_conversions) unless
+    max_bid is given; impression campaigns need a fixed max_bid. The
+    returned plan_id is applied with confirm_and_apply.
+
+    Args:
+        ad_account_id: ChatGPT ad account id whose key to use; empty uses the default key.
+        campaign_id: Parent campaign id (cmpn_...).
+        name: Ad group name (3–1000 characters).
+        context_hints: Phrases describing conversations the ads fit (up to 2,000); not keywords.
+        strategy: fixed_bid, maximize_clicks or maximize_conversions.
+        max_bid: Fixed bid in the account currency.
+    """
+    from adloop.chatgpt_ads.write import draft_chatgpt_ad_group as _impl
+
+    return _impl(
+        current_config(), ad_account_id=ad_account_id, campaign_id=campaign_id, name=name,
+        context_hints=context_hints, strategy=strategy, max_bid=max_bid,
+    )
+
+
+@_tool(title="Draft a ChatGPT Ads ad", annotations=_WRITE, tags={"chatgpt_ads"})
+@_safe
+def draft_chatgpt_ad(
+    ad_account_id: str = "",
+    ad_group_id: str = "",
+    name: str = "",
+    title: str = "",
+    body: str = "",
+    target_url: str = "",
+    image_url: str = "",
+    image_path: str = "",
+    file_id: str = "",
+) -> dict:
+    """Draft a new ChatGPT Ads chat-card ad, created PAUSED (preview only).
+
+    Checks the copy limits (title 3–50, body up to 100 characters), that the
+    landing page is reachable and that the image is a JPEG, PNG or WebP.
+    The image is fetched and checksummed now; the dry run and the apply read
+    it again and refuse different bytes, and the apply uploads exactly those
+    bytes. file_id reuses an image already in the account. Every new ad goes
+    through OpenAI's review. The returned plan_id is applied with
+    confirm_and_apply.
+
+    Args:
+        ad_account_id: ChatGPT ad account id whose key to use; empty uses the default key.
+        ad_group_id: Parent ad group id (adgrp_...).
+        name: Internal name; empty uses the title.
+        title: Card title (3–50 characters).
+        body: Card text (up to 100 characters).
+        target_url: Landing page (http/https, reachable).
+        image_url: Public JPEG/PNG/WebP link (at least 640×640).
+        image_path: Local image file instead (self-hosted only).
+        file_id: An image already uploaded to the account (file_...).
+    """
+    from adloop.chatgpt_ads.write import draft_chatgpt_ad as _impl
+
+    return _impl(
+        current_config(), ad_account_id=ad_account_id, ad_group_id=ad_group_id, name=name,
+        title=title, body=body, target_url=target_url, image_url=image_url,
+        image_path=image_path, file_id=file_id,
+    )
+
+
+# ---------------------------------------------------------------------------
 # Tracking Tools
 # ---------------------------------------------------------------------------
 
@@ -9470,6 +10307,15 @@ def _reddit_configured(config) -> bool:
     return bool(config.reddit.client_id or config.reddit.ad_account_id)
 
 
+def _chatgpt_ads_has_key(config) -> bool:
+    """A key the ChatGPT Ads client can use (see local_api_key): one under
+    chatgpt_ads.accounts, chatgpt_ads.api_key, or OPENAI_ADS_API_KEY."""
+    from adloop.chatgpt_ads.client import API_KEY_ENV
+
+    cfg = config.chatgpt_ads
+    return bool(cfg.accounts or cfg.api_key.strip() or _os.environ.get(API_KEY_ENV, "").strip())
+
+
 # Platforms whose tools a local server hides until they are set up, so a
 # setup without them doesn't carry their tool schemas into every session:
 # toolset -> (is it set up in this config?, how to set it up). Google is not
@@ -9485,6 +10331,12 @@ _PLATFORM_SETUP: dict[str, tuple[Callable, str]] = {
         "Microsoft Advertising: add a `microsoft_ads` section with your developer token and "
         "Entra app's client_id to the config (see config.yaml.example), then run "
         "`adloop microsoft-login`.",
+    ),
+    "chatgpt_ads": (
+        _chatgpt_ads_has_key,
+        "ChatGPT Ads: add an Advertiser API key from OpenAI Ads Manager (Settings → API keys) "
+        "as `chatgpt_ads.api_key` in the config (see config.yaml.example), or set "
+        "`OPENAI_ADS_API_KEY`.",
     ),
 }
 

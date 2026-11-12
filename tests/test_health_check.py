@@ -48,6 +48,25 @@ def test_hidden_platforms_say_how_to_set_them_up(monkeypatch, stub_other_service
     assert not [n for n in status["tools_offered"] if "reddit" in n]
 
 
+def test_hidden_chatgpt_ads_names_the_key_to_add(monkeypatch, stub_other_services):
+    monkeypatch.delenv("OPENAI_ADS_API_KEY", raising=False)
+    monkeypatch.setattr(server, "_HIDDEN_TAGS", {"chatgpt_ads"})
+
+    status = _health(
+        monkeypatch,
+        config=AdLoopConfig(),
+        summaries=_summaries(),
+        probe=lambda _c, _p: None,
+    )
+
+    # Said once, under hidden_toolsets, as for Microsoft Advertising.
+    assert "chatgpt_ads" not in status
+    how = status["hidden_toolsets"]["chatgpt_ads"]
+    assert "chatgpt_ads.api_key" in how and "OPENAI_ADS_API_KEY" in how
+    # chatgpt_attribution_check included: it needs the key as much as the rest.
+    assert not [n for n in status["tools_offered"] if "chatgpt" in n]
+
+
 def test_nothing_hidden_means_no_note(monkeypatch, stub_other_services):
     status = _health(
         monkeypatch,
@@ -224,3 +243,74 @@ def test_a_hosted_workspace_without_microsoft_is_not_probed(monkeypatch):
         runtime.set_tool_visibility(None)
         auth.set_credentials_provider(previous)
     assert "microsoft_ads" not in status
+
+
+def test_hosted_provider_without_chatgpt_ads_reports_not_configured(monkeypatch, stub_other_services):
+    """Hosted, a provider without ChatGPT Ads support means the platform is not
+    offered, even when shared config holds a key; no local key is read."""
+    import adloop.ga4.reports as reports
+    from adloop import auth
+    from adloop.config import ChatGPTAdsConfig
+
+    class OlderProvider:
+        pass
+
+    def no_local_keys(*_a, **_k):
+        raise AssertionError("hosted mode must not read local ChatGPT Ads keys")
+
+    monkeypatch.setattr("adloop.runtime.deployment_mode", lambda: "server")
+    monkeypatch.setattr("adloop.chatgpt_ads.client.local_api_key", no_local_keys)
+    monkeypatch.setenv("OPENAI_ADS_API_KEY", "sk-ads-from-env")
+    monkeypatch.setattr(reports, "get_account_summaries", lambda _c: _summaries())
+    monkeypatch.setattr(reports, "probe_data_api", lambda _c, _p: None)
+    previous = auth.get_credentials_provider()
+    auth.set_credentials_provider(OlderProvider())
+    runtime.set_default_config(AdLoopConfig(chatgpt_ads=ChatGPTAdsConfig(api_key="sk-ads-shared")))
+    try:
+        status = server.health_check()
+    finally:
+        auth.set_credentials_provider(previous)
+    assert status["chatgpt_ads"] == "not_configured"
+
+
+def test_a_host_that_does_not_offer_chatgpt_ads_does_not_report_it(monkeypatch, stub_other_services):
+    """As for Microsoft Advertising: a runtime hiding the ChatGPT Ads tools
+    must not send its users to set it up; where they are offered,
+    not_configured stays."""
+    monkeypatch.delenv("OPENAI_ADS_API_KEY", raising=False)
+    runtime.set_tool_visibility(lambda tools: {n: t for n, t in tools.items() if "chatgpt_ads" not in t})
+    try:
+        status = _health(monkeypatch, config=AdLoopConfig(), summaries=_summaries(), probe=lambda _c, _p: None)
+    finally:
+        runtime.set_tool_visibility(None)
+    assert "chatgpt_ads" not in status
+    assert "get_chatgpt_ads_account" not in status["tools_offered"]
+
+    status = _health(monkeypatch, config=AdLoopConfig(), summaries=_summaries(), probe=lambda _c, _p: None)
+    assert status["chatgpt_ads"] == "not_configured"
+
+
+def test_a_hosted_workspace_without_chatgpt_ads_is_not_probed(monkeypatch):
+    """Hosted runtimes may offer ChatGPT Ads only to workspaces that added a
+    key. The others must not get a ChatGPT Ads error in their health check."""
+    import adloop.ga4.reports as reports
+    from adloop import auth
+
+    class ChatGPTProvider:
+        def chatgpt_ads_api_key(self, config, ad_account_id):
+            raise AssertionError("a workspace without ChatGPT Ads must not be probed")
+
+    monkeypatch.setattr("adloop.runtime.deployment_mode", lambda: "server")
+    monkeypatch.setattr(reports, "get_account_summaries", lambda _c: _summaries())
+    monkeypatch.setattr(reports, "probe_data_api", lambda _c, _p: None)
+    previous = auth.get_credentials_provider()
+    auth.set_credentials_provider(ChatGPTProvider())
+    runtime.set_default_config(AdLoopConfig())
+    runtime.set_tool_visibility(lambda tools: {n: t for n, t in tools.items() if "chatgpt_ads" not in t})
+    try:
+        status = server.health_check()
+    finally:
+        runtime.set_tool_visibility(None)
+        auth.set_credentials_provider(previous)
+        runtime.set_default_config(None)
+    assert "chatgpt_ads" not in status

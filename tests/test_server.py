@@ -390,17 +390,22 @@ class TestToolsets:
         assert list(TOOLSETS) == [
             "ads", "ga4", "tracking", "gtm", "gsc", "web", "merchant", "reddit",
             "microsoft_ads",
+            "chatgpt_ads",
         ]
 
     @pytest.mark.asyncio
     async def test_every_tool_carries_exactly_one_toolset_tag(self):
         """New tools MUST be tagged — untagged tools would silently vanish
         for every ADLOOP_TOOLSETS user and every restricted cloud key."""
-        from adloop.server import TOOLSETS, mcp
+        from adloop.server import CROSS_PLATFORM_TOOLS, TOOLSETS, mcp
 
         known = set(TOOLSETS) | {"core"}
         for tool in await mcp.list_tools():
             hits = (tool.tags or set()) & known
+            if tool.name in CROSS_PLATFORM_TOOLS:
+                # Needs both platforms, so it carries both toolset tags.
+                assert hits == CROSS_PLATFORM_TOOLS[tool.name], f"{tool.name}: toolset tags {hits}"
+                continue
             assert len(hits) == 1, f"{tool.name}: toolset tags {hits or 'MISSING'}"
 
     @pytest.mark.asyncio
@@ -545,6 +550,12 @@ def restore_visibility():
 class TestUnconfiguredPlatforms:
     """A local server hides the tools of a platform that isn't set up."""
 
+    @pytest.fixture(autouse=True)
+    def no_chatgpt_key_in_the_environment(self, monkeypatch):
+        # OPENAI_ADS_API_KEY alone sets ChatGPT Ads up; a key in the
+        # developer's own environment must not change what these tests see.
+        monkeypatch.delenv("OPENAI_ADS_API_KEY", raising=False)
+
     @pytest.mark.asyncio
     async def test_importing_the_server_hides_nothing(self):
         # Embedders (a hosted runtime) import the module and decide
@@ -560,7 +571,7 @@ class TestUnconfiguredPlatforms:
         server = restore_visibility
         from adloop.config import AdLoopConfig
 
-        assert server.hide_unconfigured_platforms(AdLoopConfig()) == ["microsoft_ads", "reddit"]
+        assert server.hide_unconfigured_platforms(AdLoopConfig()) == ["chatgpt_ads", "microsoft_ads", "reddit"]
 
         names = {t.name for t in await server.mcp.list_tools()}
         assert not {n for n in names if "reddit" in n}
@@ -573,7 +584,7 @@ class TestUnconfiguredPlatforms:
         from adloop.config import AdLoopConfig, RedditConfig
 
         config = AdLoopConfig(reddit=RedditConfig(client_id="app"))
-        assert server.hide_unconfigured_platforms(config) == ["microsoft_ads"]
+        assert server.hide_unconfigured_platforms(config) == ["chatgpt_ads", "microsoft_ads"]
         names = {t.name for t in await server.mcp.list_tools()}
         assert "get_reddit_campaigns" in names
         assert "get_microsoft_campaigns" not in names
@@ -584,9 +595,54 @@ class TestUnconfiguredPlatforms:
         from adloop.config import AdLoopConfig, MicrosoftAdsConfig
 
         config = AdLoopConfig(microsoft_ads=MicrosoftAdsConfig(developer_token="dev"))
-        assert server.hide_unconfigured_platforms(config) == ["reddit"]
+        assert server.hide_unconfigured_platforms(config) == ["chatgpt_ads", "reddit"]
         names = {t.name for t in await server.mcp.list_tools()}
         assert "get_microsoft_campaigns" in names
+
+    @pytest.mark.asyncio
+    async def test_chatgpt_ads_without_a_key_is_hidden_with_its_ga4_cross_check(self, restore_visibility):
+        server = restore_visibility
+        from adloop.config import AdLoopConfig
+
+        assert "chatgpt_ads" in server.hide_unconfigured_platforms(AdLoopConfig())
+
+        names = {t.name for t in await server.mcp.list_tools()}
+        assert not {n for n in names if "chatgpt" in n}
+        # chatgpt_attribution_check carries ga4 as well, but it reads ChatGPT
+        # Ads, so it leaves with the ChatGPT tools while GA4's stay.
+        assert "chatgpt_attribution_check" not in server._offered_tool_names()
+        assert {"run_ga4_report", "health_check", "confirm_and_apply"} <= names
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("chatgpt_ads", "environment_key"),
+        [
+            ({"api_key": "sk-ads-example"}, ""),
+            ({"accounts": {"adacct_example": "sk-ads-example"}}, ""),
+            ({}, "sk-ads-example"),
+        ],
+        ids=["api_key", "accounts", "OPENAI_ADS_API_KEY"],
+    )
+    async def test_chatgpt_ads_with_a_key_stays(self, monkeypatch, restore_visibility, chatgpt_ads, environment_key):
+        server = restore_visibility
+        from adloop.config import AdLoopConfig, ChatGPTAdsConfig
+
+        if environment_key:
+            monkeypatch.setenv("OPENAI_ADS_API_KEY", environment_key)
+        config = AdLoopConfig(chatgpt_ads=ChatGPTAdsConfig(**chatgpt_ads))
+        assert server.hide_unconfigured_platforms(config) == ["microsoft_ads", "reddit"]
+        names = {t.name for t in await server.mcp.list_tools()}
+        assert {"get_chatgpt_campaigns", "chatgpt_attribution_check"} <= names
+
+    def test_a_blank_chatgpt_key_variable_is_no_key(self, monkeypatch):
+        # The client strips OPENAI_ADS_API_KEY, so a blank one would show
+        # tools that have no key to call OpenAI with.
+        from adloop import server
+        from adloop.config import AdLoopConfig
+
+        monkeypatch.setenv("OPENAI_ADS_API_KEY", "  ")
+        configured, _how = server._PLATFORM_SETUP["chatgpt_ads"]
+        assert not configured(AdLoopConfig())
 
     @pytest.mark.asyncio
     async def test_naming_a_platform_in_adloop_toolsets_shows_it_anyway(self, monkeypatch, restore_visibility):
@@ -626,10 +682,11 @@ class TestUnconfiguredPlatforms:
             runtime.set_default_config(None)
 
         assert ran == [True]
-        assert server._HIDDEN_TAGS == {"microsoft_ads", "reddit"}
+        assert server._HIDDEN_TAGS == {"chatgpt_ads", "microsoft_ads", "reddit"}
         names = {t.name for t in await server.mcp.list_tools()}
         assert "get_reddit_campaigns" not in names
         assert "get_microsoft_campaigns" not in names
+        assert "get_chatgpt_campaigns" not in names
 
 
 class TestDirectoryReadiness:
@@ -706,6 +763,8 @@ class TestDirectoryReadiness:
         # A sentence opening with "Call <tool>" (not "gtag call in ...").
         r"(\A|[.:;!]\s+|\n\s*\n)\s*call [a-z_]+",
         r"\bcall [a-z_]+ (to|with|for)\b",
+        # "Apply with confirm_and_apply." tells the model what to do next.
+        r"(\A|[.:;!]\s+)apply (it )?with [a-z_]+",
         r"\brun this first\b",
         r"\brun (it|this) before\b",
         r"\bdo not stop\b",
@@ -788,6 +847,7 @@ class TestDirectoryReadiness:
             "You MUST explicitly pass dry_run=false",
             "call this tool again with a much higher limit",
             "Call confirm_and_apply with the returned plan_id to execute.",
+            "safety cap. Apply with confirm_and_apply.",
             "Run this first if other tools are failing.",
             "do not stop at the truncated list",
             "Pass the remediation on to the user and stop retrying",
