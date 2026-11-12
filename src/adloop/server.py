@@ -8590,9 +8590,8 @@ def draft_create_conversion_action(
             category). 0 leaves Google's default.
         primary_for_goal: True (default) makes it a Primary action that Smart
             Bidding optimizes toward; False makes it Secondary (recorded only).
-        include_in_conversions_metric: IMMUTABLE on create — Google derives it
-            from the category, so this value is not sent; change it later via
-            draft_update_conversion_action.
+        include_in_conversions_metric: IMMUTABLE — Google derives it from
+            primary_for_goal and the category's goal, so this value is not sent.
         click_through_window_days: Click-through attribution window in days,
             1-90. 0 leaves Google's default.
         view_through_window_days: View-through attribution window in days,
@@ -8641,12 +8640,14 @@ def draft_update_conversion_action(
     view_through_window_days: int = 0,
     attribution_model: str = "",
     customer_id: str = "",
+    category: str = "",
 ) -> dict:
     """Draft a partial UPDATE of an existing ConversionAction — returns PREVIEW.
 
     Only parameters passed non-empty/non-default are sent to the API.
     Covers renaming, demoting a Primary to Secondary, changing value,
-    adjusting the call-duration threshold, or changing attribution.
+    adjusting the call-duration threshold, changing attribution, or moving
+    the action to another goal with category.
     SMART_CAMPAIGN_* and GOOGLE_HOSTED types reject mutations with
     MUTATE_NOT_ALLOWED at apply time. Returns a preview with a plan_id (plus
     warnings where relevant); nothing changes until confirm_and_apply applies
@@ -8671,9 +8672,10 @@ def draft_update_conversion_action(
             unchanged.
         phone_call_duration_seconds: Minimum call length in seconds for a call
             to count. 0 leaves it unchanged.
-        include_in_conversions_metric: True shows the action in the
-            "Conversions" column; False in "All conversions" only. Mutable here
-            (unlike on create). Omit to leave unchanged.
+        include_in_conversions_metric: Refused when passed: Google answers
+            IMMUTABLE_FIELD at apply, and a dry run does not catch it. It derives
+            the value from primary_for_goal and whether the goal of the action's
+            category is biddable; use those instead.
         click_through_window_days: Click-through attribution window in days,
             1-90. 0 leaves it unchanged.
         view_through_window_days: View-through attribution window in days,
@@ -8682,6 +8684,11 @@ def draft_update_conversion_action(
             GOOGLE_SEARCH_ATTRIBUTION_DATA_DRIVEN. Empty leaves it unchanged.
         customer_id: Google Ads customer ID (digits, dashes allowed). Defaults
             to the configured account.
+        category: ConversionActionCategory to move the action to, e.g.
+            PHONE_CALL_LEAD; that decides which goal it belongs to. The preview
+            pins the current one (current_category); if the category is changed
+            in Google Ads before the apply, nothing is sent. Empty leaves it
+            unchanged.
     """
     from adloop.ads.conversion_actions import (
         draft_update_conversion_action as _impl,
@@ -8702,6 +8709,7 @@ def draft_update_conversion_action(
         click_through_window_days=click_through_window_days,
         view_through_window_days=view_through_window_days,
         attribution_model=attribution_model,
+        category=category,
     )
 
 
