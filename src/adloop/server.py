@@ -3875,11 +3875,14 @@ def draft_campaign(
     tracking_url_template: str | None = None,
     final_url_suffix: str | None = None,
     url_custom_parameters: _DictListOpt = None,
+    geo_exclude_ids: _StrListOpt = None,
+    ad_schedule: _DictListOpt = None,
 ) -> dict:
     """Draft a full campaign structure — returns a PREVIEW, does NOT create anything.
 
     Creates: CampaignBudget + Campaign (PAUSED) + AdGroup + optional Keywords
-    + geo targeting + language targeting.
+    + geo targeting + language targeting + optional geo exclusions and ad
+    schedule, all in one atomic request.
     Ads are NOT included — draft_responsive_search_ad adds them once the
     campaign exists. Only SEARCH campaigns can be created: Performance Max
     needs an asset group with all its assets in one request, and DISPLAY,
@@ -3946,6 +3949,15 @@ def draft_campaign(
         url_custom_parameters: List of {"key": "grp", "value": "b2c"}, used as
             {_grp} in the template. Keys alphanumeric, max 8 characters; values
             up to 250.
+        geo_exclude_ids: Geo target constant IDs to exclude (negative location
+            criteria), e.g. a city inside a targeted state. May not overlap
+            geo_target_ids.
+        ad_schedule: Windows the campaign serves in: list of {day_of_week
+            (MONDAY..SUNDAY), start_hour 0-23, end_hour 0-24, start_minute,
+            end_minute (0, 15, 30 or 45)}, whole numbers, in the account time
+            zone. No overlaps, at most six a day. Once the campaign is enabled it
+            serves only inside them; the preview warns about that. No double
+            confirmation, since the campaign is created PAUSED.
     """
     from adloop.ads.write import draft_campaign as _impl
 
@@ -3971,6 +3983,8 @@ def draft_campaign(
         tracking_url_template=tracking_url_template,
         final_url_suffix=final_url_suffix,
         url_custom_parameters=url_custom_parameters,
+        geo_exclude_ids=geo_exclude_ids,
+        ad_schedule=ad_schedule,
     )
 
 
@@ -4039,16 +4053,19 @@ def update_campaign(
     final_url_suffix: str | None = None,
     url_custom_parameters: _DictListOpt = None,
     keyword_match_type: str = "",
+    geo_exclude_ids: _StrListOpt = None,
+    ad_schedule: _DictListOpt = None,
 ) -> dict:
     """Draft an update to an existing campaign — returns a PREVIEW, does NOT apply.
 
     Only the parameters passed are changed; omitted ones stay as they are, and at
     least one change is required. Replacing geo targets keeps the campaign's
-    negative geo exclusions (the preview lists them). A budget change shows the
-    current amount; when the budget is shared with other campaigns, the
-    preview names them and needs a double confirmation, because the new amount
-    covers all of them. A bidding change on a campaign in a portfolio bid
-    strategy takes it out of the portfolio, also with a double confirmation.
+    negative geo exclusions (the preview lists them) unless geo_exclude_ids is
+    passed too. A budget change shows the current amount; when the budget is
+    shared with other campaigns, the preview names them and needs a double
+    confirmation, because the new amount covers all of them. A bidding change
+    on a campaign in a portfolio bid strategy takes it out of the portfolio,
+    also with a double confirmation.
 
     Returns a preview with a plan_id plus any warnings; nothing changes until
     confirm_and_apply applies it.
@@ -4114,6 +4131,20 @@ def update_campaign(
             non-Smart bidding_strategy is refused unless the same call passes
             UNSPECIFIED. The preview shows the current value. Empty leaves it
             unchanged.
+        geo_exclude_ids: REPLACES the campaign's negative location criteria.
+            Omitted leaves them unchanged; [] removes them. May not overlap
+            geo_target_ids. The preview shows the current ones
+            (current_geo_exclude_ids); dropping any needs a double confirmation,
+            because the campaign can serve there again. A location can move
+            between geo_target_ids and geo_exclude_ids in one call: its old
+            criterion is removed before the new one is created.
+        ad_schedule: REPLACES the campaign's schedule windows (shape as in
+            draft_campaign). Omitted leaves them unchanged; [] removes them, so
+            the campaign serves at all hours. The preview shows the current ones
+            (current_ad_schedule). A first schedule and clearing a schedule both
+            need a double confirmation. Only windows that differ are removed or
+            added, removals first. Apply refuses if the exclusions or windows
+            changed after the preview.
     """
     from adloop.ads.write import update_campaign as _impl
 
@@ -4137,6 +4168,8 @@ def update_campaign(
         final_url_suffix=final_url_suffix,
         url_custom_parameters=url_custom_parameters,
         keyword_match_type=keyword_match_type,
+        geo_exclude_ids=geo_exclude_ids,
+        ad_schedule=ad_schedule,
     )
 
 
