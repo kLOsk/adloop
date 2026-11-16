@@ -91,18 +91,43 @@ def get_campaign_performance(
     _enrich_cost_fields(rows, currency_code)
     share_error = _attach_impression_share(config, customer_id, rows, date_clause)
     budget_limited = _budget_limited_converters(rows)
+    target_error = _classify_budget_share(config, customer_id, budget_limited)
+    flag_pct = int(_BUDGET_LOST_FLAG * 100)
 
     share_insights: list[str] = []
-    if budget_limited:
-        names = ", ".join(
-            f"{r['name']} ({r['search_budget_lost_impression_share_pct']}% lost to budget)"
-            for r in budget_limited[:5]
+    reliable = [r for r in budget_limited if not r.get(_BUDGET_SHARE_KEY)]
+    by_design = [r for r in budget_limited if r.get(_BUDGET_SHARE_KEY) == "unreliable"]
+    unknown = [r for r in budget_limited if r.get(_BUDGET_SHARE_KEY) == "unknown"]
+    if reliable:
+        share_insights.append(
+            f"{len(reliable)} converting campaign(s) lose at least "
+            f"{flag_pct}% of Search impression share to "
+            f"budget: {_budget_lost_names(reliable)}. They run out of budget while converting; "
+            f"compare their CPA with the account before moving budget to them."
+        )
+    if by_design:
+        share_insights.append(
+            f"{len(by_design)} converting campaign(s) on Maximize conversions or "
+            f"Maximize conversion value without a target also report at least "
+            f"{flag_pct}% lost to budget: {_budget_lost_names(by_design)}. Do not "
+            f"read that as room for more budget: without a target these "
+            f"strategies aim to spend the full daily budget, and Google says "
+            f"its Lost IS (budget) column is incompatible with them. Check "
+            f"Google's budget simulator before raising their budget."
+        )
+    if unknown:
+        why = (
+            f"the target lookup failed ({target_error})" if target_error
+            else "AdLoop could not read whether a target CPA or target ROAS is set"
         )
         share_insights.append(
-            f"{len(budget_limited)} converting campaign(s) lose at least "
-            f"{int(_BUDGET_LOST_FLAG * 100)}% of Search impression share to "
-            f"budget: {names}. They run out of budget while converting; "
-            f"compare their CPA with the account before moving budget to them."
+            f"{len(unknown)} converting campaign(s) on Maximize conversions or "
+            f"Maximize conversion value also report at least {flag_pct}% lost "
+            f"to budget, and {why}: {_budget_lost_names(unknown)}. Treat that "
+            f"share as unconfirmed: if no target is set, Google says its Lost "
+            f"IS (budget) column is incompatible with the strategy. Check the "
+            f"target and Google's budget simulator before treating them as "
+            f"short of budget."
         )
 
     if not compact:
@@ -174,6 +199,16 @@ _IMPRESSION_SHARE_FIELDS = (
     "metrics.search_rank_lost_impression_share",
 )
 _BUDGET_LOST_FLAG = 0.2
+# Without a target, Maximize conversions and Maximize conversion value aim to
+# spend the whole daily budget, so they count as "limited by budget" by
+# design. Google's help page says the Lost IS (budget) column is incompatible
+# with them and points to the budget simulator instead:
+# https://support.google.com/google-ads/answer/7381968
+# With a target CPA or target ROAS set they may not spend the full budget
+# (https://developers.google.com/google-ads/api/reference/rpc/v25/MaximizeConversionValue),
+# and the API reports the same strategy type either way, so the target has to
+# be read before the caveat applies.
+_SPENDS_FULL_BUDGET_STRATEGIES = ("MAXIMIZE_CONVERSIONS", "MAXIMIZE_CONVERSION_VALUE")
 _IMPRESSION_SHARE_NOTE = (
     "Search impression share fields are fractions from the API (0.25 = 25%); "
     "the matching *_pct fields carry the same value as a percentage. Google "
@@ -233,6 +268,94 @@ def _attach_impression_share(
     return error
 
 
+def _budget_lost_names(items: list[dict], limit: int = 5) -> str:
+    """The first few flagged campaigns with their share, and how many more."""
+    names = ", ".join(
+        f"{r['name']} ({r['search_budget_lost_impression_share_pct']}% lost to budget)"
+        for r in items[:limit]
+    )
+    more = len(items) - limit
+    return names + (f" and {more} more" if more > 0 else "")
+
+
+_BUDGET_SHARE_KEY = "budget_share_reliability"
+_BUDGET_SHARE_ORDER = {None: 0, "unknown": 1, "unreliable": 2}
+_UNREADABLE_STRATEGY_TYPES = ("", "UNSPECIFIED", "UNKNOWN")
+
+
+def _classify_budget_share(
+    config: AdLoopConfig, customer_id: str, flagged: list[dict]
+) -> str | None:
+    """Say how far the budget-lost share of each flagged campaign can be trusted.
+
+    Only Maximize conversions and Maximize conversion value need a second
+    look: with no target CPA and no target ROAS, Google calls the Lost IS
+    (budget) column incompatible with them. The target is read in one extra
+    query, from the campaign or from its portfolio strategy, and only when a
+    flagged campaign uses one of those strategy types.
+
+    Sets ``budget_share_reliability`` to "unreliable" (no target) or
+    "unknown" (the target could not be read) and leaves the key off every
+    campaign whose share reads as usual. Campaigns the column works with are
+    then listed first. Returns the lookup error, if there was one.
+    """
+    from adloop.ads.gaql import _parse_gaql_error, execute_query
+
+    candidates = [
+        r for r in flagged
+        if r.get("bidding_strategy_type") in _SPENDS_FULL_BUDGET_STRATEGIES
+    ]
+    if not candidates:
+        return None
+
+    error: str | None = None
+    targets: dict[str, dict] = {}
+    ids = ", ".join(str(r["id"]) for r in candidates if str(r.get("id") or "").isdigit())
+    if ids:
+        query = f"""
+            SELECT campaign.id, campaign.bidding_strategy,
+                   campaign.maximize_conversions.target_cpa_micros,
+                   campaign.maximize_conversion_value.target_roas,
+                   bidding_strategy.type,
+                   bidding_strategy.maximize_conversions.target_cpa_micros,
+                   bidding_strategy.maximize_conversion_value.target_roas
+            FROM campaign
+            WHERE campaign.id IN ({ids})
+        """
+        try:
+            targets = {
+                str(t.get("campaign.id")): t
+                for t in execute_query(config, customer_id, query)
+            }
+        except Exception as exc:  # noqa: BLE001 - report it, keep the report
+            error = _parse_gaql_error(exc)
+
+    for row in candidates:
+        state = _budget_share_state(targets.get(str(row.get("id"))))
+        if state:
+            row[_BUDGET_SHARE_KEY] = state
+    flagged.sort(key=lambda r: _BUDGET_SHARE_ORDER[r.get(_BUDGET_SHARE_KEY)])
+    return error
+
+
+def _budget_share_state(target: dict | None) -> str | None:
+    """None when a target is set, "unreliable" without one, "unknown" if unread."""
+    if target is None:
+        return "unknown"
+    prefix = "campaign"
+    if target.get("campaign.bidding_strategy"):
+        # A portfolio strategy keeps the target on the portfolio. If the
+        # lookup cannot read the portfolio's type, its target is unknown.
+        if str(target.get("bidding_strategy.type") or "") in _UNREADABLE_STRATEGY_TYPES:
+            return "unknown"
+        prefix = "bidding_strategy"
+    has_target = (
+        (target.get(f"{prefix}.maximize_conversions.target_cpa_micros") or 0) > 0
+        or (target.get(f"{prefix}.maximize_conversion_value.target_roas") or 0) > 0
+    )
+    return None if has_target else "unreliable"
+
+
 def _budget_limited_converters(rows: list[dict]) -> list[dict]:
     """Converting campaigns that lose a significant share of Search to budget."""
     limited = [
@@ -249,6 +372,7 @@ def _budget_limited_converters(rows: list[dict]) -> list[dict]:
         {
             "name": r.get("campaign.name"),
             "id": r.get("campaign.id"),
+            "bidding_strategy_type": r.get("campaign.bidding_strategy_type"),
             "conversions": r.get("metrics.conversions"),
             "cost": r.get("metrics.cost"),
             "cpa": r.get("metrics.cpa"),

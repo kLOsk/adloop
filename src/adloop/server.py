@@ -183,8 +183,10 @@ def _build_orchestration_instructions() -> str:
         "`attribution_check` — they factor this in.\n"
         "- `cost_micros / 1,000,000` = actual currency. Read tools "
         "auto-compute `metrics.cost`; only `run_gaql` returns raw micros.\n"
-        "- New campaigns MUST have `geo_target_ids` and `language_ids` set. "
-        "Untargeted campaigns waste budget."
+        "- New campaigns MUST have `geo_target_ids` set. Untargeted campaigns "
+        "waste budget. Search campaigns take no language targeting any more "
+        "(Google retired it in late September 2026): write the ads and landing "
+        "page in the language you want to reach."
     )
 
 
@@ -3892,7 +3894,7 @@ def draft_campaign(
     daily_budget: float,
     bidding_strategy: str,
     geo_target_ids: _StrList,
-    language_ids: _StrList,
+    language_ids: _StrListOpt = None,
     customer_id: str = "",
     target_cpa: float = 0,
     target_roas: float = 0,
@@ -3937,7 +3939,10 @@ def draft_campaign(
         geo_target_ids: REQUIRED list of geo target constant IDs.
             Common: "2276" Germany, "2040" Austria, "2756" Switzerland, "2840" USA,
             "2826" UK, "2250" France. Full list: Google Ads API geo target constants.
-        language_ids: REQUIRED list of language constant IDs.
+        language_ids: Optional list of language constant IDs. Google retired
+            manual language targeting for Search campaigns in late September
+            2026 (ads match on the language of the ads and landing page), so
+            leave it out; when given it is still sent and the preview warns.
             Common: "1001" German, "1000" English, "1002" French, "1003" Spanish,
             "1004" Italian, "1014" Portuguese. Full list: Google Ads API
             language constants.
@@ -4120,8 +4125,11 @@ def update_campaign(
         geo_target_ids: REPLACES all positive geo targets; must not be empty
             when given. Common IDs: "2276" Germany, "2040" Austria, "2756"
             Switzerland, "2840" USA, "2826" UK.
-        language_ids: REPLACES all language targets; must not be empty when
-            given. Common IDs: "1001" German, "1000" English, "1002" French,
+        language_ids: REPLACES all campaign-level language targets; []
+            removes them. Not for Search campaigns: Google retired manual
+            language targeting there in late September 2026 and documents
+            that existing criteria can only be removed; the preview warns.
+            Common IDs: "1001" German, "1000" English, "1002" French,
             "1003" Spanish, "1004" Italian.
         search_partners_enabled: Include ads on Search partners. Omitted leaves
             the setting unchanged.
