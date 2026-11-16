@@ -171,7 +171,14 @@ def test_create_previews_the_audience_and_sends_what_ga4_expects(config):
 
 @pytest.mark.parametrize("kwargs,needle", [
     ({"display_name": "", "include_events": ["purchase"]}, "display_name is required"),
-    ({"display_name": "A"}, "include_events is required"),
+    ({"display_name": "A"}, "say who joins"),
+    ({"display_name": "A", "include_pages": ["/"]}, "part of every URL"),
+    ({"display_name": "A", "include_pages": ["/pricing"], "exclude_pages": ["/pricing"]}, "both included and excluded"),
+    ({"display_name": "A", "include_events": ["purchase"], "sequence": ["a", "b"]}, "either sequence or include"),
+    ({"display_name": "A", "sequence": ["page_view"]}, "needs 2 to 10 steps"),
+    ({"display_name": "A", "sequence": [{"event": "a", "page": "/x"}, "b"]}, "exactly one of event or page"),
+    ({"display_name": "A", "sequence": [{"event": "a", "within_minutes": 5}, "b"]}, "from the second step on"),
+    ({"display_name": "A", "sequence": ["a", {"event": "b", "steps": 1}]}, "unknown key"),
     ({"display_name": "A", "include_events": ["Page View"]}, "is not a GA4 event name"),
     ({"display_name": "A", "include_events": ["purchase"], "exclude_events": ["purchase"]}, "both included and excluded"),
     ({"display_name": "A", "include_events": ["purchase"], "membership_duration_days": 541}, "between 1 and 540"),
@@ -219,7 +226,7 @@ def test_update_changes_name_and_description_only(config):
                                             display_name="Visitors")
         preview = audiences.draft_ga4_audience(config, property_id=PROPERTY, action="update", audience="Visitors",
                                                display_name="All visitors")
-        assert "fixes an audience's events at creation" in events["error"]
+        assert "fixes an audience's conditions at creation" in events["error"]
         assert "already exists" in taken["error"]
         assert same["status"] == "NO_CHANGE"
         assert preview["changes"]["current_display_name"] == "Visitors"
@@ -274,3 +281,79 @@ def test_ga4s_own_audiences_are_marked_predefined_not_empty(config):
     with _with(alpha, beta):
         entry = audiences.list_ga4_audiences(config, property_id=PROPERTY)["audiences"][0]
     assert entry["predefined"] is True and "include_events" not in entry
+
+
+def test_pages_become_page_view_filters_on_the_url_and_read_back(config):
+    alpha, beta = _clients(links=[_link()])
+    with _with(alpha, beta):
+        preview = audiences.draft_ga4_audience(
+            config, property_id=PROPERTY, display_name="Pricing, no sign-up",
+            include_pages=["/pricing", " /preise "], exclude_events=["sign_up"])
+        assert preview["changes"]["include_pages"] == ["/pricing", "/preise"]
+        assert "include_events" not in preview["changes"]
+        assert preview["changes"]["description"] == (
+            "Users who viewed a page containing '/pricing' or '/preise', without sign_up; 30 days.")
+        assert any("full URL contains" in w for w in preview["warnings"])
+        ads_write.confirm_and_apply(config, plan_id=preview["plan_id"], dry_run=True)
+        applied = ads_write.confirm_and_apply(config, plan_id=preview["plan_id"], dry_run=False)
+    assert applied["status"] == "APPLIED"
+    sent = alpha.create_audience.call_args.kwargs["audience"]
+    body = types.Audience.to_dict(sent, use_integers_for_enums=False)
+    first = body["filter_clauses"][0]["simple_filter"]["filter_expression"]["and_group"]["filter_expressions"][0][
+        "or_group"]["filter_expressions"][0]["event_filter"]
+    assert first["event_name"] == "page_view"
+    # The shape of Google's own sample: AND group, OR group, the parameter filter.
+    field = first["event_parameter_filter_expression"]["and_group"]["filter_expressions"][0]["or_group"][
+        "filter_expressions"][0]["dimension_or_metric_filter"]
+    assert field["field_name"] == "page_location"
+    assert field["string_filter"] == {"match_type": "CONTAINS", "value": "/pricing", "case_sensitive": False}
+    assert field["at_any_point_in_time"] is True
+
+    entry = audiences.audience_entry(sent)
+    assert entry["include_pages"] == ["/pricing", "/preise"] and entry["exclude_events"] == ["sign_up"]
+    assert "include_events" not in entry and "custom_conditions" not in entry
+
+
+def test_a_sequence_becomes_ordered_steps_and_reads_back(config):
+    steps = ["session_start", {"page": "/pricing"},
+             {"event": "begin_checkout", "directly_followed": True, "within_minutes": 30}]
+    alpha, beta = _clients(links=[_link()])
+    with _with(alpha, beta):
+        preview = audiences.draft_ga4_audience(
+            config, property_id=PROPERTY, display_name="Checkout starters", sequence=steps,
+            exclude_events=["purchase"], exclude_permanently=True)
+        assert preview["changes"]["sequence"] == [
+            {"event": "session_start"}, {"page": "/pricing"},
+            {"event": "begin_checkout", "directly_followed": True, "within_minutes": 30}]
+        assert preview["changes"]["description"].startswith(
+            "Users who sent session_start, then viewed a page containing '/pricing', then sent begin_checkout")
+        assert len(preview["changes"]["description"]) <= 150
+        assert any("in this order" in w for w in preview["warnings"])
+        ads_write.confirm_and_apply(config, plan_id=preview["plan_id"], dry_run=True)
+        ads_write.confirm_and_apply(config, plan_id=preview["plan_id"], dry_run=False)
+    sent = alpha.create_audience.call_args.kwargs["audience"]
+    include, exclude = sent.filter_clauses
+    assert include.clause_type.name == "INCLUDE" and exclude.clause_type.name == "EXCLUDE"
+    built = include.sequence_filter.sequence_steps
+    assert [s.scope.name for s in built] == ["AUDIENCE_FILTER_SCOPE_ACROSS_ALL_SESSIONS"] * 3
+    assert [s.immediately_follows for s in built] == [False, False, True]
+    assert built[2].constraint_duration.total_seconds() == 1800
+    assert built[1].filter_expression.and_group.filter_expressions[0].or_group.filter_expressions[
+        0].event_filter.event_name == "page_view"
+
+    entry = audiences.audience_entry(sent)
+    assert entry["sequence"] == preview["changes"]["sequence"]
+    assert entry["exclude_events"] == ["purchase"] and entry["exclude_permanently"] is True
+    assert "custom_conditions" not in entry
+
+
+def test_a_page_view_filter_on_another_parameter_stays_custom():
+    message = audiences.build_audience({"display_name": "x", "description": "d", "membership_duration_days": 30,
+                                        "include_pages": ["/pricing"]})
+    message.name = f"{PROPERTY}/audiences/9"
+    field = message.filter_clauses[0].simple_filter.filter_expression.and_group.filter_expressions[0].or_group.\
+        filter_expressions[0].event_filter.event_parameter_filter_expression.and_group.filter_expressions[0].\
+        or_group.filter_expressions[0].dimension_or_metric_filter
+    field.field_name = "page_title"
+    entry = audiences.audience_entry(message)
+    assert entry["custom_conditions"] is True and "include_pages" not in entry

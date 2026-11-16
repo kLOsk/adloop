@@ -1511,8 +1511,10 @@ def list_ga4_audiences(property_id: str = "") -> dict:
     allows personalized advertising; there they are remarketing lists
     (get_audience_lists) that draft_audience_attachment puts on a campaign.
     Returns each audience's resource name, display name, description,
-    membership duration and the events that include or exclude users
-    (audiences built with other conditions in GA4's editor carry
+    membership duration and what includes or excludes users: events,
+    pages (include_pages / exclude_pages: the URL contains the text) or
+    a sequence of steps (audiences built with other conditions in GA4's
+    editor carry
     custom_conditions and the raw conditions; "All Users" and "Purchasers",
     which GA4 creates itself, carry predefined), the audience slots used
     against the limit (100, or 400 on a 360 property), and
@@ -8493,14 +8495,19 @@ def draft_ga4_audience(
     description: str | None = None,
     audience: str = "",
     property_id: str = "",
+    include_pages: _StrList = [],  # noqa: B006
+    exclude_pages: _StrList = [],  # noqa: B006
+    sequence: _StrOrDictListOpt = None,
 ) -> dict:
     """Draft creating, renaming or archiving a GA4 audience — returns a PREVIEW.
 
-    An audience is the users who sent certain events. A linked Google Ads
+    An audience is the users who sent certain events, viewed certain
+    pages, or did a sequence of both in order. A linked Google Ads
     account receives it as a remarketing list within one to two days, to
     attach to campaigns with draft_audience_attachment: this is how to
-    build a list of site visitors, of buyers, or of visitors who did not
-    buy. GA4 fixes the events and the membership duration at creation;
+    build a list of site visitors, of buyers, of visitors who did not
+    buy, or of people who saw the pricing page without signing up. GA4
+    fixes the conditions and the membership duration at creation;
     afterwards only the name and description can change, and archiving is
     permanent (it needs a double confirmation). The draft refuses a taken
     name and a full property, and the preview warns when the property's
@@ -8514,10 +8521,23 @@ def draft_ga4_audience(
             name for update.
         include_events: Create only. Users who sent ANY of these events
             join, e.g. ["session_start"] for every visitor, ["purchase"]
-            for buyers, ["sign_up", "generate_lead"] for leads.
+            for buyers, ["sign_up", "generate_lead"] for leads. Together
+            with include_pages it is still "any of".
         exclude_events: Create only. Users who sent any of these are kept
             out, e.g. include ["session_start"] and exclude ["purchase"]
             for visitors who did not buy.
+        include_pages: Create only. Users who viewed a page whose full
+            URL contains ANY of these texts join, e.g. ["/pricing"]
+            (also matches /pricing/enterprise and /en/pricing). Not case
+            sensitive.
+        exclude_pages: Create only. Users who viewed such a page are kept
+            out, e.g. ["/thank-you"].
+        sequence: Create only, instead of include_events / include_pages.
+            2 to 10 steps the user must do in this order. Each is an event
+            name ("begin_checkout") or an object: {"event": "..."} or
+            {"page": "/pricing"}, optionally with "directly_followed": true
+            (no other event in between) and "within_minutes": 30 (after
+            the step before). Exclusions can be added as usual.
         membership_duration_days: Create only. Days a user stays after
             last meeting the conditions, 1 to 540 (default 30).
         exclude_permanently: Create only. True keeps users out for good
@@ -8543,6 +8563,9 @@ def draft_ga4_audience(
         membership_duration_days=membership_duration_days,
         exclude_permanently=exclude_permanently,
         audience=audience,
+        include_pages=include_pages,
+        exclude_pages=exclude_pages,
+        sequence=sequence,
     )
 
 
