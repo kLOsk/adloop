@@ -163,7 +163,7 @@ class TestOrchestrationInstructions:
         text = _build_orchestration_instructions()
         # GDPR consent gap is the #1 source of misdiagnosed "tracking issues".
         assert "GDPR" in text or "consent" in text.lower()
-        # Geo / language targeting is mandatory.
+        # Geo targeting is mandatory; language is explained (Search takes none).
         assert "geo" in text.lower()
         assert "language" in text.lower()
 

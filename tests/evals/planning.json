@@ -5,11 +5,11 @@
     {
       "id": 1,
       "prompt": "How much should I budget for Google Ads if I want to target 'CRM software' and 'customer management tool' keywords in the US market?",
-      "expected_output": "Should call estimate_budget with appropriate geo/language IDs (2840/1000), present forecast results, explain budget sufficiency (5x CPA rule).",
+      "expected_output": "Should call estimate_budget with appropriate geo/language IDs (2840/1000), present forecast results, explain budget sufficiency (AdLoop's 5x target CPA rule of thumb).",
       "expectations": [
         "Calls estimate_budget with relevant keywords and geo_target_id=2840 (US) and language_id=1000 (English)",
         "Presents the forecast results: estimated clicks, impressions, cost, avg CPC",
-        "Mentions the budget sufficiency rule (daily budget >= 5x target CPA)",
+        "Mentions AdLoop's budget rule of thumb (daily budget >= 5x target CPA) without presenting it as a Google requirement",
         "Suggests a budget that captures at least 70% of available impressions or advises on budget sizing"
       ]
     },

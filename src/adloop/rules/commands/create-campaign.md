@@ -13,14 +13,14 @@ Create a new Google Ads campaign for: $ARGUMENTS
 ## 2. Budget estimation
 
 - If user hasn't specified a budget, call `estimate_budget` with proposed keywords
-- Ask for target geography and language if not clear (common: 2276=Germany, 2840=USA, 2826=UK)
+- Ask for target geography if not clear (common: 2276=Germany, 2840=USA, 2826=UK). Search campaigns take no language targeting (Google retired it in late September 2026): confirm which language the ads and landing page are in instead
 - Present the forecast: estimated clicks, impressions, cost, avg CPC
 
 ## 3. Pre-write checks (CRITICAL)
 
 - Bidding strategy: recommend MAXIMIZE_CONVERSIONS or TARGET_CPA over MANUAL_CPC
 - Conversion tracking: run `attribution_check` — if zero conversions across the board, WARN that a new campaign won't help until tracking is fixed
-- Budget: must be <= max_daily_budget in config, ideally >= 5x target CPA
+- Budget: must be <= max_daily_budget in config, ideally >= 5x target CPA (AdLoop's rule of thumb, not a Google requirement; Google's own guideline is 2 to 3 times)
 - Keywords: if using BROAD match, campaign MUST use Smart Bidding — otherwise use PHRASE or EXACT
 
 ## 4. Draft campaign
