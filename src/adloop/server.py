@@ -1513,7 +1513,8 @@ def list_ga4_audiences(property_id: str = "") -> dict:
     Returns each audience's resource name, display name, description,
     membership duration and the events that include or exclude users
     (audiences built with other conditions in GA4's editor carry
-    custom_conditions and the raw conditions), the audience slots used
+    custom_conditions and the raw conditions; "All Users" and "Purchasers",
+    which GA4 creates itself, carry predefined), the audience slots used
     against the limit (100, or 400 on a 360 property), and
     google_ads_readiness: checks for the Google Ads link, personalized
     advertising on it, Google signals, consent and list size, each with a

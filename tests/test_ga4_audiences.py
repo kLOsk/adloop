@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from types import SimpleNamespace
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, create_autospec, patch
 
 import pytest
 from google.analytics.admin_v1alpha import types
@@ -41,13 +41,19 @@ def _audience(n, name, include=("session_start",), exclude=(), days=30, descript
 
 
 def _clients(existing=(), links=(), signals="GOOGLE_SIGNALS_ENABLED", level="GOOGLE_ANALYTICS_STANDARD"):
-    alpha, beta = MagicMock(), MagicMock()
+    # Autospec: a call Google's client would reject (a wrong argument name)
+    # fails here too.
+    from google.analytics.admin_v1alpha import AnalyticsAdminServiceClient
+
+    alpha, beta = create_autospec(AnalyticsAdminServiceClient, instance=True), MagicMock()
     alpha.list_audiences.return_value = list(existing)
     by_name = {a.name: a for a in existing}
     alpha.get_audience.side_effect = lambda name: by_name[name]
+    alpha.list_audiences.side_effect = None
     alpha.get_google_signals_settings.return_value = SimpleNamespace(state=SimpleNamespace(name=signals))
     alpha.create_audience.side_effect = lambda parent, audience: audience
     alpha.update_audience.side_effect = lambda audience, update_mask: audience
+    alpha.archive_audience.return_value = None
     beta.list_google_ads_links.return_value = list(links)
     beta.get_property.return_value = SimpleNamespace(service_level=SimpleNamespace(name=level))
     return alpha, beta
@@ -249,3 +255,22 @@ def test_the_tools_are_registered_under_the_ga4_toolset():
     tools = {t.name: t for t in asyncio.run(mcp.list_tools())}
     assert "ga4" in tools["list_ga4_audiences"].tags and "ga4" in tools["draft_ga4_audience"].tags
     assert tools["draft_ga4_audience"].annotations.destructiveHint
+
+
+def test_archive_sends_the_request_googles_client_accepts(config):
+    alpha, beta = _clients([_audience(1, "Visitors")])
+    with _with(alpha, beta):
+        preview = audiences.draft_ga4_audience(config, property_id=PROPERTY, action="archive", audience="Visitors")
+        ads_write.confirm_and_apply(config, plan_id=preview["plan_id"], dry_run=True)
+        applied = ads_write.confirm_and_apply(config, plan_id=preview["plan_id"], dry_run=False)
+    assert applied["status"] == "APPLIED"
+    alpha.archive_audience.assert_called_once_with(request={"name": f"{PROPERTY}/audiences/1"})
+
+
+def test_ga4s_own_audiences_are_marked_predefined_not_empty(config):
+    builtin = types.Audience(name=f"{PROPERTY}/audiences/5", display_name="All Users", description="All users",
+                             membership_duration_days=540)
+    alpha, beta = _clients([builtin], links=[_link()])
+    with _with(alpha, beta):
+        entry = audiences.list_ga4_audiences(config, property_id=PROPERTY)["audiences"][0]
+    assert entry["predefined"] is True and "include_events" not in entry

@@ -78,7 +78,11 @@ def audience_entry(audience) -> dict:
             # Clauses are AND'ed; this module only ever writes one include clause.
             custom = custom or bool(include)
             include += events
-    if custom:
+    if not audience.filter_clauses:
+        # "All Users" and "Purchasers", which GA4 creates itself: the API
+        # returns no conditions for them.
+        entry["predefined"] = True
+    elif custom or not include:
         # Built in GA4's own editor with conditions this module does not write.
         entry["custom_conditions"] = True
         try:
@@ -445,7 +449,8 @@ def _apply_archive(config: AdLoopConfig, changes: dict) -> dict:
     from adloop.ga4.client import get_admin_alpha_client
 
     _check_unchanged(config, changes)
-    get_admin_alpha_client(config).archive_audience(name=changes["audience"])
+    # archive_audience takes the request only, no flattened name argument.
+    get_admin_alpha_client(config).archive_audience(request={"name": changes["audience"]})
     return {"resource_names": [changes["audience"]], "display_name": changes["display_name"], "archived": True}
 
 
