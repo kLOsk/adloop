@@ -31,10 +31,22 @@ _VALID_DESCRIPTION_PINS = {"DESCRIPTION_1", "DESCRIPTION_2"}
 # spaces ("{ KeyWord : x }") it is not a tag and counts as plain text.
 _INSERTION_TAG_RE = re.compile(r"\{(keyword|location\([a-z]+\)):([^{}]*)\}", re.IGNORECASE)
 _BARE_INSERTION_TAG_RE = re.compile(r"\{(keyword|location\([a-z]+\))\}", re.IGNORECASE)
+# Countdowns render as text such as "5 days" or "12 hours"; Google's guidance
+# is to allow 8 characters for them. Anything not in this exact form is not a
+# countdown and counts as plain text.
+_COUNTDOWN_TAG_RE = re.compile(
+    r"\{(?:GLOBAL_)?COUNTDOWN\(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}(?:,\d+)?\)\}"
+)
+_COUNTDOWN_RENDERED_LENGTH = 8
 
 
 def _counted_length(text: str) -> int:
-    """Length Google checks against the cap: insertion tags count as their default text."""
+    """Length Google checks against the cap.
+
+    Insertion tags count as their default text, a countdown as the 8
+    characters Google says to leave room for.
+    """
+    text = _COUNTDOWN_TAG_RE.sub("x" * _COUNTDOWN_RENDERED_LENGTH, text)
     return len(_INSERTION_TAG_RE.sub(lambda m: m.group(2), text))
 
 
@@ -2589,6 +2601,20 @@ def update_campaign(
             return {"error": f"Campaign {campaign_id} was not found in this account"}
         if campaign["status"] == "REMOVED":
             return {"error": f"Campaign {campaign_id} is removed"}
+        if geo_exclude_ids and geo_target_ids is None:
+            # Google keeps one location criterion per campaign and place, so
+            # excluding a current target is rejected with IMMUTABLE_FIELD.
+            overlap = sorted(
+                set(geo_exclude_ids) & set(_existing_positive_geo_targets(config, customer_id, campaign_id))
+            )
+            if overlap:
+                return {
+                    "error": (
+                        f"geo_exclude_ids {overlap} are current geo targets of campaign "
+                        f"{campaign_id}. A location cannot be targeted and excluded at once: "
+                        "pass geo_target_ids without them in the same call."
+                    )
+                }
         replacements = []
         if geo_exclude_ids is not None:
             replacements.append(_geo_exclude_replacement(config, customer_id, campaign_id, geo_exclude_ids))
@@ -3684,6 +3710,26 @@ def _ad_schedule_replacement(
 
 def _window_key(window: dict) -> tuple:
     return tuple(window[key] for key in ("day_of_week", "start_hour", "start_minute", "end_hour", "end_minute"))
+
+
+def _existing_positive_geo_targets(
+    config: AdLoopConfig, customer_id: str, campaign_id: str
+) -> list[str]:
+    """Geo target constant IDs the campaign targets; a failed read raises."""
+    from adloop.ads.gaql import execute_query
+
+    rows = execute_query(config, customer_id, f"""
+        SELECT campaign_criterion.location.geo_target_constant
+        FROM campaign_criterion
+        WHERE campaign.id = {campaign_id}
+          AND campaign_criterion.type = 'LOCATION'
+          AND campaign_criterion.negative = FALSE
+          AND campaign_criterion.status != 'REMOVED'
+    """)
+    return [
+        (row.get("campaign_criterion.location.geo_target_constant") or "").rsplit("/", 1)[-1]
+        for row in rows
+    ]
 
 
 def _existing_negative_geo_exclusions(

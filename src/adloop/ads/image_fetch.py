@@ -77,9 +77,16 @@ def non_public_reason(
             if inner_reason is not None:
                 return f"maps to {addr.ipv4_mapped}, {inner_reason}"
             return None
-        embedded = [addr.sixtofour, *(addr.teredo or ())]
         if addr in _NAT64_PREFIX:
-            embedded.append(ipaddress.IPv4Address(int(addr) & 0xFFFFFFFF))
+            # A DNS64 resolver's translation of an IPv4 address (RFC 6052):
+            # the gateway connects to that address, so it alone decides.
+            # Python calls the whole prefix reserved, which says nothing here.
+            inner = ipaddress.IPv4Address(int(addr) & 0xFFFFFFFF)
+            inner_reason = non_public_reason(inner)
+            if inner_reason is not None:
+                return f"embeds non-public address {inner}"
+            return None
+        embedded = [addr.sixtofour, *(addr.teredo or ())]
         for inner in embedded:
             if inner is not None and non_public_reason(inner) is not None:
                 return f"embeds non-public address {inner}"

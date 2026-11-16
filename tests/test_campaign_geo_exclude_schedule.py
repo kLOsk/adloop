@@ -142,7 +142,7 @@ def _window_row(criterion_id, **window):
     }
 
 
-def _account(monkeypatch, *, windows=(), excludes=(), status="ENABLED", found=True):
+def _account(monkeypatch, *, windows=(), excludes=(), targets=(), status="ENABLED", found=True):
     """GAQL answers for the time zone, the campaign, its windows and exclusions."""
     def execute_query(_config, _cid, query):
         if "FROM customer" in query:
@@ -151,6 +151,8 @@ def _account(monkeypatch, *, windows=(), excludes=(), status="ENABLED", found=Tr
             return list(windows)
         if "campaign_criterion.negative = TRUE" in query:
             return [{"campaign_criterion.location.geo_target_constant": f"geoTargetConstants/{g}"} for g in excludes]
+        if "campaign_criterion.negative = FALSE" in query:
+            return [{"campaign_criterion.location.geo_target_constant": f"geoTargetConstants/{g}"} for g in targets]
         if "FROM campaign WHERE campaign.id" in query:
             if not found:
                 return []
@@ -300,6 +302,16 @@ class TestUpdateGeoExcludes:
     def test_overlap_with_new_targets_is_refused(self, config):
         result = _update(config, geo_target_ids=["2840"], geo_exclude_ids=["2840"])
         assert any("overlap geo_target_ids" in d for d in result["details"])
+
+    def test_excluding_a_current_target_is_refused(self, config, monkeypatch):
+        _account(monkeypatch, targets=["2276", "2040"])
+        result = _update(config, geo_exclude_ids=["2276", "333"])
+        assert "['2276'] are current geo targets" in result["error"]
+
+    def test_a_current_target_can_be_excluded_when_the_targets_are_replaced(self, config, monkeypatch):
+        _account(monkeypatch, targets=["2276", "2040"])
+        preview = _update(config, geo_target_ids=["2040"], geo_exclude_ids=["2276"])
+        assert preview["changes"]["geo_exclude_ids"] == ["2276"]
 
     def test_same_list_is_nothing_to_change(self, config, monkeypatch):
         _account(monkeypatch, excludes=["111"])

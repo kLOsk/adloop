@@ -1237,6 +1237,17 @@ class TestInsertionTagLength:
     def _desc():
         return [{"text": "Drain cleaning done right.", "pinned_field": None}] * 2
 
+    def test_countdown_counts_as_its_rendered_text(self):
+        assert write._counted_length("Event in {COUNTDOWN(2026-12-31 19:00:00,14)}") == 17
+        assert write._counted_length("{GLOBAL_COUNTDOWN(2026-12-31 19:00:00)} left") == 13
+        # Not the countdown form, so every character counts.
+        broken = "{COUNTDOWN(31.12.2026)}"
+        assert write._counted_length(broken) == len(broken)
+        errors = write._validate_rsa_assets(
+            self._hl("Sale ends in {COUNTDOWN(2026-12-31 19:00:00,14)}"), self._desc()
+        )
+        assert not any("exceeds" in e for e in errors)
+
     def test_keyword_insertion_counts_default_text_only(self):
         assert write._counted_length("{KeyWord:Clogged Drain Service}") == 21
         # A space after the colon is kept in the count: stricter, never looser.
