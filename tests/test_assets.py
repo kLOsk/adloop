@@ -114,8 +114,9 @@ class _Client:
 
 def _row(**fields):
     """A search row: asset.<path> attributes, e.g. callout_text=... ."""
-    callout = SimpleNamespace(callout_text=fields.get("callout_text", ""))
-    sitelink = SimpleNamespace(link_text=fields.get("link_text", ""),
+    dates = {"start_date": fields.get("start_date", ""), "end_date": fields.get("end_date", "")}
+    callout = SimpleNamespace(callout_text=fields.get("callout_text", ""), **dates)
+    sitelink = SimpleNamespace(link_text=fields.get("link_text", ""), **dates,
                                description1=fields.get("description1", ""),
                                description2=fields.get("description2", ""))
     snippet = SimpleNamespace(header=fields.get("header", ""), values=fields.get("values", []))
@@ -365,3 +366,109 @@ def test_an_update_keeps_the_header_google_already_holds(config):
             config, customer_id="1", asset_id="7", header="Arten", values=["A", "B", "C"])
     assert result["changes"]["header"] == "Sorten"
     assert "'Arten' is not one of" in changed["details"][0]
+
+
+# ---------------------------------------------------------------------------
+# Start and end dates on callouts and sitelinks (#137)
+# ---------------------------------------------------------------------------
+
+
+def test_callout_drafts_carry_their_dates_to_every_asset(config):
+    preview = assets.draft_callouts(config, customer_id="1", campaign_id="1001", callouts=["Xmas Sale", "Gift Wrap"],
+                                    start_date="2099-12-01", end_date="2099-12-26")
+    assert preview["changes"]["start_date"] == "2099-12-01" and preview["changes"]["end_date"] == "2099-12-26"
+    assert "warnings" not in preview
+
+    client = _Client()
+    assets._apply_create_callouts(client, "1", preview["changes"])
+    created = [op.asset_operation.create.callout_asset for op in client.ads.operations[:2]]
+    assert [(c.start_date, c.end_date) for c in created] == [("2099-12-01", "2099-12-26")] * 2
+
+    undated = assets.draft_callouts(config, customer_id="1", campaign_id="1001", callouts=["Free Shipping"])
+    assert "start_date" not in undated["changes"] and "end_date" not in undated["changes"]
+
+
+@pytest.mark.parametrize("dates,needle", [
+    ({"start_date": "01.12.2099"}, "start_date '01.12.2099' must be a date YYYY-MM-DD"),
+    ({"end_date": "2099-02-30"}, "end_date '2099-02-30' must be a date YYYY-MM-DD"),
+    ({"start_date": "2099-12-26", "end_date": "2099-12-01"}, "end_date 2099-12-01 is before start_date 2099-12-26"),
+])
+def test_callout_drafts_refuse_bad_dates(config, dates, needle):
+    result = assets.draft_callouts(config, customer_id="1", campaign_id="1001", callouts=["Xmas Sale"], **dates)
+    assert needle in result["details"][0]
+
+
+def test_an_end_date_in_the_past_is_warned_about(config):
+    preview = assets.draft_callouts(config, customer_id="1", campaign_id="1001", callouts=["Xmas Sale"],
+                                    end_date="2020-12-26")
+    assert "in the past" in preview["warnings"][0]
+
+
+def _callout_rows(**over):
+    return [{"asset.id": 7, "asset.type": "CALLOUT", "asset.callout_asset.callout_text": "Xmas Sale",
+             "asset.callout_asset.start_date": "2099-12-01", "asset.callout_asset.end_date": "2099-12-26", **over}]
+
+
+def test_callout_edit_sets_and_clears_dates_without_the_text(config):
+    with _gaql(_callout_rows()):
+        moved = assets.update_callout(config, customer_id="1", asset_id="7", end_date="2099-12-31")
+        cleared = assets.update_callout(config, customer_id="1", asset_id="7", clear_fields=["start_date"])
+        inverted = assets.update_callout(config, customer_id="1", asset_id="7", start_date="2099-12-27")
+        both = assets.update_callout(config, customer_id="1", asset_id="7", end_date="2099-12-31",
+                                     clear_fields=["end_date"])
+        unknown = assets.update_callout(config, customer_id="1", asset_id="7", clear_fields=["callout_text"])
+        same = assets.update_callout(config, customer_id="1", asset_id="7", end_date="2099-12-26")
+    assert moved["changes"] == {"asset_id": "7", "end_date": "2099-12-31", "previous": {"end_date": "2099-12-26"}}
+    assert cleared["changes"] == {"asset_id": "7", "start_date": "", "previous": {"start_date": "2099-12-01"}}
+    assert "end_date 2099-12-26 is before start_date 2099-12-27" in inverted["details"][0]
+    assert "both set and in clear_fields" in both["details"][0]
+    assert "clear_fields takes start_date and/or end_date" in unknown["details"][0]
+    assert "nothing to change" in same["error"]
+    assert "No changes specified" in assets.update_callout(config, customer_id="1", asset_id="7")["details"][0]
+
+
+def test_callout_apply_masks_a_cleared_date_and_pins_what_it_changes():
+    changes = {"asset_id": "7", "start_date": "", "end_date": "2099-12-31",
+               "previous": {"start_date": "2099-12-01", "end_date": "2099-12-26"}}
+    client = _Client(rows=[_row(callout_text="Xmas Sale", start_date="2099-12-01", end_date="2099-12-26")])
+    assets._apply_update_callout(client, "1", changes)
+    op = client.assets.operations[0]
+    assert list(op.update_mask.paths) == ["callout_asset.start_date", "callout_asset.end_date"]
+    assert (op.update.callout_asset.start_date, op.update.callout_asset.end_date) == ("", "2099-12-31")
+
+    edited_meanwhile = _Client(rows=[_row(start_date="2099-12-01", end_date="2099-12-20")])
+    with pytest.raises(RuntimeError, match="end_date"):
+        assets._apply_update_callout(edited_meanwhile, "1", changes)
+
+
+def test_sitelink_drafts_take_dates_per_link(config):
+    links = [{"link_text": "Xmas Deals", "final_url": "https://example.com/xmas",
+              "start_date": "2099-12-01", "end_date": "2099-12-26"},
+             {"link_text": "Pricing", "final_url": "https://example.com/pricing"}]
+    with patch("adloop.ads.write._validate_urls", return_value=({}, {})):
+        preview = write.draft_sitelinks(config, customer_id="1", campaign_id="1001", sitelinks=links)
+        bad = write.draft_sitelinks(config, customer_id="1", campaign_id="1001",
+                                    sitelinks=[{**links[0], "end_date": "2099-11-01"}])
+    drafted = preview["changes"]["sitelinks"]
+    assert (drafted[0]["start_date"], drafted[0]["end_date"]) == ("2099-12-01", "2099-12-26")
+    assert "start_date" not in drafted[1]
+    assert "Sitelink 1: end_date 2099-11-01 is before start_date 2099-12-01" in bad["details"][0]
+
+    client = _Client()
+    write._apply_create_sitelinks(client, "1", preview["changes"])
+    created = [op.asset_operation.create.sitelink_asset for op in client.ads.operations[:2]]
+    assert [(c.start_date, c.end_date) for c in created] == [("2099-12-01", "2099-12-26"), ("", "")]
+
+
+def test_sitelink_edit_sets_and_clears_dates(config):
+    rows = _sitelink_rows(**{"asset.sitelink_asset.end_date": "2099-12-26"})
+    with _gaql(rows):
+        preview = assets.update_sitelink(config, customer_id="1", asset_id="7", start_date="2099-12-01",
+                                         clear_fields=["end_date"])
+    assert preview["changes"] == {"asset_id": "7", "start_date": "2099-12-01", "end_date": "",
+                                  "previous": {"start_date": "", "end_date": "2099-12-26"}}
+    client = _Client(rows=[_row(end_date="2099-12-26")])
+    assets._apply_update_sitelink(client, "1", preview["changes"])
+    op = client.assets.operations[0]
+    assert list(op.update_mask.paths) == ["sitelink_asset.start_date", "sitelink_asset.end_date"]
+    assert (op.update.sitelink_asset.start_date, op.update.sitelink_asset.end_date) == ("2099-12-01", "")

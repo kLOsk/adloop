@@ -2831,9 +2831,16 @@ def draft_sitelinks(
         - final_url (str, required) — where the sitelink points
         - description1 (str, optional, max 35 chars) — first description line
         - description2 (str, optional, max 35 chars) — second description line
+        - start_date / end_date (str, optional, YYYY-MM-DD) — first and last day it shows
     campaign_id: the campaign to attach sitelinks to
     """
-    from adloop.ads.assets import _account_scope_warning, resolve_scope, scope_entity
+    from adloop.ads.assets import (
+        _account_scope_warning,
+        _past_end_date_warning,
+        _show_date_errors,
+        resolve_scope,
+        scope_entity,
+    )
     from adloop.safety.guards import SafetyViolation, check_blocked_operation
     from adloop.safety.preview import ChangePlan, store_plan
 
@@ -2878,11 +2885,18 @@ def draft_sitelinks(
                 f"Sitelink {i + 1}: description2 without description1 — Google may ignore it"
             )
 
+        dates = {
+            field: str(sl.get(field) or "").strip() for field in ("start_date", "end_date")
+        }
+        errors.extend(_show_date_errors(f"Sitelink {i + 1}: ", **dates))
+        warnings.extend(_past_end_date_warning(f"Sitelink {i + 1}: ", dates["end_date"]))
+
         validated.append({
             "link_text": link_text,
             "final_url": final_url,
             "description1": desc1,
             "description2": desc2,
+            **{field: value for field, value in dates.items() if value},
         })
 
     if errors:
@@ -6090,6 +6104,9 @@ def _apply_create_sitelinks(client: object, cid: str, changes: dict) -> dict:
             asset.sitelink_asset.description1 = payload["description1"]
         if payload.get("description2"):
             asset.sitelink_asset.description2 = payload["description2"]
+        for field in ("start_date", "end_date"):
+            if payload.get(field):
+                setattr(asset.sitelink_asset, field, payload[field])
 
     return _create_and_link(
         client, cid, changes["sitelinks"], client.enums.AssetFieldTypeEnum.SITELINK, populate, changes

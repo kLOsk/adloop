@@ -5010,6 +5010,8 @@ def draft_callouts(
     ad_group_id: str = "",
     scope: str = "",
     customer_id: str = "",
+    start_date: str = "",
+    end_date: str = "",
 ) -> dict:
     """Draft callout assets for an ad group, a campaign or the account — returns a PREVIEW.
 
@@ -5028,6 +5030,9 @@ def draft_callouts(
         scope: Empty (follows the id), "campaign", "ad_group" or "account".
         customer_id: Google Ads customer ID (digits, dashes optional). Defaults to
             the configured account.
+        start_date: First day the callouts show, YYYY-MM-DD. Empty: from now.
+        end_date: Last day the callouts show, YYYY-MM-DD, so seasonal callouts
+            switch off by themselves. Empty: no end.
     """
     from adloop.ads.assets import draft_callouts as _impl
 
@@ -5038,6 +5043,8 @@ def draft_callouts(
         ad_group_id=ad_group_id,
         scope=scope,
         callouts=callouts,
+        start_date=start_date,
+        end_date=end_date,
     )
 
 
@@ -5521,20 +5528,27 @@ def link_asset_to_customer(
 @_safe
 def update_callout(
     asset_id: str,
-    callout_text: str,
+    callout_text: str = "",
     customer_id: str = "",
+    start_date: str = "",
+    end_date: str = "",
+    clear_fields: _StrList = [],  # noqa: B006
 ) -> dict:
-    """Draft changing a callout asset's text in place — returns a PREVIEW.
+    """Draft changing a callout asset in place — returns a PREVIEW.
 
-    The asset keeps its ID and performance history, and the new text shows
-    everywhere it is linked. The preview pins the current text; if someone
-    edits the asset in Google Ads before the apply, nothing is sent.
+    Only what is passed changes. The asset keeps its ID and performance
+    history, and the change shows everywhere it is linked. The preview pins
+    the current values; if someone edits the asset in Google Ads before the
+    apply, nothing is sent.
 
     Args:
         asset_id: Numeric ID of the callout asset.
-        callout_text: The new text, at most 25 characters.
+        callout_text: The new text, at most 25 characters. Empty keeps it.
         customer_id: Google Ads customer ID (digits, dashes optional). Defaults to
             the configured account.
+        start_date: First day the callout shows, YYYY-MM-DD. Empty keeps it.
+        end_date: Last day the callout shows, YYYY-MM-DD. Empty keeps it.
+        clear_fields: "start_date" and/or "end_date" to remove that date.
     """
     from adloop.ads.assets import update_callout as _impl
 
@@ -5543,6 +5557,9 @@ def update_callout(
         customer_id=customer_id or current_config().ads.customer_id,
         asset_id=asset_id,
         callout_text=callout_text,
+        start_date=start_date,
+        end_date=end_date,
+        clear_fields=clear_fields,
     )
 
 
@@ -5555,6 +5572,9 @@ def update_sitelink(
     description1: str = "",
     description2: str = "",
     customer_id: str = "",
+    start_date: str = "",
+    end_date: str = "",
+    clear_fields: _StrList = [],  # noqa: B006
 ) -> dict:
     """Draft changing a sitelink asset in place — returns a PREVIEW.
 
@@ -5572,6 +5592,9 @@ def update_sitelink(
             Google needs both description lines or neither.
         customer_id: Google Ads customer ID (digits, dashes optional). Defaults to
             the configured account.
+        start_date: First day the sitelink shows, YYYY-MM-DD. Empty keeps it.
+        end_date: Last day the sitelink shows, YYYY-MM-DD. Empty keeps it.
+        clear_fields: "start_date" and/or "end_date" to remove that date.
     """
     from adloop.ads.assets import update_sitelink as _impl
 
@@ -5583,6 +5606,9 @@ def update_sitelink(
         final_url=final_url,
         description1=description1,
         description2=description2,
+        start_date=start_date,
+        end_date=end_date,
+        clear_fields=clear_fields,
     )
 
 
@@ -5808,7 +5834,9 @@ def draft_sitelinks(
             required, max 25 chars) — the clickable text shown; final_url (str,
             required) — destination URL for this sitelink; description1 (str,
             optional, max 35 chars) — first description line; description2
-            (str, optional, max 35 chars) — second description line.
+            (str, optional, max 35 chars) — second description line;
+            start_date / end_date (str, optional, YYYY-MM-DD) — first and last
+            day the sitelink shows, so seasonal links switch off by themselves.
         campaign_id: Numeric ID of the campaign to attach sitelinks to. Leave
             empty with scope="account".
         customer_id: Google Ads customer ID (digits, dashes optional). Defaults to
