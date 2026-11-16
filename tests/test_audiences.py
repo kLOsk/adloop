@@ -28,7 +28,7 @@ _LISTS = [
      "user_list.size_for_search": 4200, "user_list.size_for_display": 9000, "user_list.eligible_for_search": True,
      "user_list.eligible_for_display": True, "user_list.membership_life_span": 30, "user_list.account_user_list_status": "ENABLED"},
     {"user_list.id": 12, "user_list.name": "Newsletter", "user_list.type": "CRM_BASED", "user_list.membership_status": "OPEN",
-     "user_list.size_for_search": 300, "user_list.size_for_display": 800, "user_list.eligible_for_search": True,
+     "user_list.size_for_search": 60, "user_list.size_for_display": 800, "user_list.eligible_for_search": True,
      "user_list.eligible_for_display": True, "user_list.membership_life_span": 540, "user_list.account_user_list_status": "ENABLED"},
     {"user_list.id": 13, "user_list.name": "Old list", "user_list.type": "RULE_BASED", "user_list.membership_status": "CLOSED",
      "user_list.size_for_search": 2000, "user_list.size_for_display": 3000, "user_list.eligible_for_search": True,
@@ -81,7 +81,7 @@ def test_lists_skip_closed_accounts_and_flag_small_and_closed_lists():
     assert [u["user_list_id"] for u in result["user_lists"]] == ["11", "12", "13"]
     assert result["custom_segments"][0]["custom_audience_id"] == "21"
     assert result["combined_segments"][0]["name"] == "Buyers and runners"
-    assert any("Newsletter" in i and "1,000" in i for i in result["insights"])
+    assert any("Newsletter" in i and "100" in i for i in result["insights"])
     assert any("Old list" in i for i in result["insights"])
 
 
@@ -138,9 +138,9 @@ def test_compatibility_matrix_is_enforced_at_preview():
 
 def test_small_lists_cannot_target_search_but_can_observe():
     refused = _draft(campaign_id="5", user_list_ids=["12"], mode="targeting")
-    assert "300 Search users" in refused["details"][0]
+    assert "60 Search users" in refused["details"][0]
     observed = _draft(campaign_id="5", user_list_ids=["12"])
-    assert any("takes effect from 1,000" in w for w in observed["warnings"])
+    assert any("takes effect from 100" in w for w in observed["warnings"])
 
 
 def test_unknown_audiences_and_bad_ids_are_refused():

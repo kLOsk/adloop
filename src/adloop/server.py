@@ -1502,6 +1502,36 @@ def list_ga4_annotations(
     )
 
 
+@_tool(title="List Analytics audiences", annotations=_READONLY, tags={"ga4"})
+@_safe
+def list_ga4_audiences(property_id: str = "") -> dict:
+    """List a GA4 property's audiences and check whether they reach Google Ads.
+
+    GA4 shares its audiences with every linked Google Ads account that
+    allows personalized advertising; there they are remarketing lists
+    (get_audience_lists) that draft_audience_attachment puts on a campaign.
+    Returns each audience's resource name, display name, description,
+    membership duration and the events that include or exclude users
+    (audiences built with other conditions in GA4's editor carry
+    custom_conditions and the raw conditions), the audience slots used
+    against the limit (100, or 400 on a 360 property), and
+    google_ads_readiness: checks for the Google Ads link, personalized
+    advertising on it, Google signals, consent and list size, each with a
+    status (ok, warn or info). insights repeats the warnings. Reads the GA4
+    Admin API (audiences.list, googleAdsLinks.list, googleSignalsSettings).
+
+    Args:
+        property_id: GA4 property as "properties/123456789" or the bare
+            numeric ID. If empty, uses the default from config.
+    """
+    from adloop.ga4.audiences import list_ga4_audiences as _impl
+
+    return _impl(
+        current_config(),
+        property_id=property_id or current_config().ga4.property_id,
+    )
+
+
 @_tool(title="List Analytics custom definitions", annotations=_READONLY, tags={"ga4"})
 @_safe
 def list_ga4_custom_definitions(property_id: str = "") -> dict:
@@ -3467,7 +3497,7 @@ def get_audience_lists(customer_id: str = "") -> dict:
     Each user list comes with its type, membership status (OPEN or CLOSED),
     size for Search and Display, eligibility and membership duration;
     custom and combined segments with their id and description. Insights
-    flag lists below the 1,000 users Search needs and closed lists. Use the
+    flag lists below the 100 active users Search needs and closed lists. Use the
     ids with draft_audience_attachment; for Google's in-market and affinity
     segments use search_audience_segments.
 
@@ -8447,6 +8477,71 @@ def draft_ga4_annotation(
         end_date=end_date,
         description=description,
         color=color,
+    )
+
+
+@_tool(title="Draft an Analytics audience", annotations=_DESTRUCTIVE, tags={"ga4"})
+@_safe
+def draft_ga4_audience(
+    action: str = "create",
+    display_name: str = "",
+    include_events: _StrList = [],  # noqa: B006
+    exclude_events: _StrList = [],  # noqa: B006
+    membership_duration_days: int = 30,
+    exclude_permanently: bool = False,
+    description: str | None = None,
+    audience: str = "",
+    property_id: str = "",
+) -> dict:
+    """Draft creating, renaming or archiving a GA4 audience — returns a PREVIEW.
+
+    An audience is the users who sent certain events. A linked Google Ads
+    account receives it as a remarketing list within one to two days, to
+    attach to campaigns with draft_audience_attachment: this is how to
+    build a list of site visitors, of buyers, or of visitors who did not
+    buy. GA4 fixes the events and the membership duration at creation;
+    afterwards only the name and description can change, and archiving is
+    permanent (it needs a double confirmation). The draft refuses a taken
+    name and a full property, and the preview warns when the property's
+    audiences would not reach Google Ads (see list_ga4_audiences). Nothing
+    changes until confirm_and_apply applies the plan_id.
+
+    Args:
+        action: "create" (default), "update" (name and description only) or
+            "archive".
+        display_name: Name of the audience; required for create, the new
+            name for update.
+        include_events: Create only. Users who sent ANY of these events
+            join, e.g. ["session_start"] for every visitor, ["purchase"]
+            for buyers, ["sign_up", "generate_lead"] for leads.
+        exclude_events: Create only. Users who sent any of these are kept
+            out, e.g. include ["session_start"] and exclude ["purchase"]
+            for visitors who did not buy.
+        membership_duration_days: Create only. Days a user stays after
+            last meeting the conditions, 1 to 540 (default 30).
+        exclude_permanently: Create only. True keeps users out for good
+            once they sent an excluded event; False (default) only while
+            they keep meeting the exclusion within the membership window.
+        description: Optional for create (one is written from the events);
+            the new description for update.
+        audience: For update and archive: the audience's display name or
+            resource name from list_ga4_audiences.
+        property_id: GA4 property as "properties/123456789" or the bare
+            numeric ID. If empty, uses the default from config.
+    """
+    from adloop.ga4.audiences import draft_ga4_audience as _impl
+
+    return _impl(
+        current_config(),
+        property_id=property_id or current_config().ga4.property_id,
+        action=action,
+        display_name=display_name,
+        description=description,
+        include_events=include_events,
+        exclude_events=exclude_events,
+        membership_duration_days=membership_duration_days,
+        exclude_permanently=exclude_permanently,
+        audience=audience,
     )
 
 
