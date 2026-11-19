@@ -99,6 +99,23 @@ class MicrosoftAdsConfig:
 
 
 @dataclass
+class ChatGPTAdsConfig:
+    """ChatGPT Ads (OpenAI Ads Manager, Advertiser API).
+
+    Every Advertiser API key belongs to exactly one ad account, so the
+    account is implied by the key: ``api_key`` (or ``OPENAI_ADS_API_KEY`` in
+    the environment) is the default account. ``accounts`` maps further ad
+    account ids (``adacct_...``) to their own keys, for agencies running
+    several clients; a tool's ``ad_account_id`` picks the key. Keys come from
+    Ads Manager → Settings → API keys, not from platform.openai.com.
+    """
+
+    api_key: str = ""
+    ad_account_id: str = ""  # optional label for the default key's account
+    accounts: dict[str, str] = field(default_factory=dict)
+
+
+@dataclass
 class SafetyConfig:
     max_daily_budget: float = 50.0
     max_bid_increase_pct: int = 100
@@ -138,6 +155,7 @@ class AdLoopConfig:
     pagespeed: PageSpeedConfig = field(default_factory=PageSpeedConfig)
     reddit: RedditConfig = field(default_factory=RedditConfig)
     microsoft_ads: MicrosoftAdsConfig = field(default_factory=MicrosoftAdsConfig)
+    chatgpt_ads: ChatGPTAdsConfig = field(default_factory=ChatGPTAdsConfig)
     safety: SafetyConfig = field(default_factory=SafetyConfig)
     views: ViewsConfig = field(default_factory=ViewsConfig)
     # Absolute path the config was resolved from (even if it did not exist
@@ -211,6 +229,8 @@ def load_config(config_path: str | None = None) -> AdLoopConfig:
     pagespeed_raw = raw.get("pagespeed", {})
     reddit_raw = raw.get("reddit", {}) or {}
     microsoft_raw = raw.get("microsoft_ads", {}) or {}
+    chatgpt_raw = raw.get("chatgpt_ads", {}) or {}
+    chatgpt_accounts_raw = chatgpt_raw.get("accounts", {}) or {}
     safety_raw = raw.get("safety", {})
 
     return AdLoopConfig(
@@ -259,6 +279,19 @@ def load_config(config_path: str | None = None) -> AdLoopConfig:
             customer_id=_text(microsoft_raw, "customer_id"),
             ad_account_id=_text(microsoft_raw, "ad_account_id"),
             token_path=_text(microsoft_raw, "token_path", "~/.adloop/microsoft_token.json"),
+        ),
+        chatgpt_ads=ChatGPTAdsConfig(
+            api_key=_text(chatgpt_raw, "api_key"),
+            ad_account_id=_text(chatgpt_raw, "ad_account_id"),
+            accounts={
+                str(account).strip(): str(key).strip()
+                for account, key in (
+                    chatgpt_accounts_raw.items()
+                    if isinstance(chatgpt_accounts_raw, dict)
+                    else []
+                )
+                if str(account).strip() and key and str(key).strip()
+            },
         ),
         safety=SafetyConfig(
             max_daily_budget=safety_raw.get("max_daily_budget", 50.0),
