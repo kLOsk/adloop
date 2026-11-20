@@ -61,24 +61,56 @@ class TestListAccounts:
         assert any("People and access" in i for i in result["insights"])
 
 
+def _row(context, country, *, active=0, pending=0, disapproved=0,
+         expiring=0, issues=(), name=True):
+    """One aggregateProductStatuses row in the issueresolution/v1 shape.
+
+    Counts are strings, as the API serializes int64; zero counters are
+    omitted, as the API does.
+    """
+    stats = {
+        field: str(value)
+        for field, value in (
+            ("activeCount", active),
+            ("pendingCount", pending),
+            ("disapprovedCount", disapproved),
+            ("expiringCount", expiring),
+        )
+        if value
+    }
+    row = {"stats": stats, "itemLevelIssues": list(issues)}
+    if context:
+        row["reportingContext"] = context
+    if country:
+        row["country"] = country
+    if name:
+        row["name"] = (
+            "accounts/111/aggregateProductStatuses/"
+            f"{context or 'REPORTING_CONTEXT_ENUM_UNSPECIFIED'}~{country}"
+        )
+    return row
+
+
+def _issue(code, severity, products, **extra):
+    return {
+        "code": code,
+        "severity": severity,
+        "resolution": "MERCHANT_ACTION",
+        "productCount": str(products),
+        "documentationUri": f"https://support.google.com/merchants/{code}",
+        **extra,
+    }
+
+
 class TestFeedHealth:
     def _responses(self):
         return {
             "aggregateProductStatuses": {"aggregateProductStatuses": [
-                {
-                    "reportingContext": "SHOPPING_ADS",
-                    "countryCode": "DE",
-                    "statistics": {"approvedCount": "900", "pendingCount": "20",
-                                   "disapprovedCount": "80"},
-                    "issues": [
-                        {"issueType": "image_link_broken", "severity": "ERROR",
-                         "numProducts": "60",
-                         "documentationUri": "https://support.google.com/y"},
-                        {"issueType": "price_mismatch", "severity": "ERROR",
-                         "numProducts": "20",
-                         "documentationUri": "https://support.google.com/z"},
-                    ],
-                },
+                _row("SHOPPING_ADS", "DE", active=900, pending=20,
+                     disapproved=80, issues=[
+                         _issue("image_link_broken", "DISAPPROVED", 60),
+                         _issue("price_mismatch", "DISAPPROVED", 20),
+                     ]),
             ]},
             "issues": {"accountIssues": [
                 {"title": "Missing return policy", "severity": "CRITICAL",
@@ -138,8 +170,10 @@ class TestFeedHealth:
             ("accounts/111/aggregateProductStatuses", "issueresolution/v1"),
             ("accounts/111/issues", "accounts/v1"),
         ]
-        assert result["totals"] == {"approved": 900, "pending": 20,
-                                    "disapproved": 80}
+        assert result["totals"] == {"SHOPPING_ADS": {
+            "surface": "paid", "approved": 900, "pending": 20,
+            "disapproved": 80, "expiring": 0,
+        }}
         assert result["top_item_issues"][0]["issue"] == "image_link_broken"
         assert result["top_item_issues"][0]["affected_products"] == 60
         assert result["account_issues"][0]["severity"] == "CRITICAL"
@@ -151,9 +185,7 @@ class TestFeedHealth:
     def test_healthy_feed_says_so(self, config):
         _, patcher = _patch_get({
             "aggregateProductStatuses": {"aggregateProductStatuses": [
-                {"reportingContext": "SHOPPING_ADS",
-                 "statistics": {"approvedCount": "500", "pendingCount": "0",
-                                "disapprovedCount": "0"}},
+                _row("SHOPPING_ADS", "US", active=500),
             ]},
             "issues": {},
         })
@@ -161,16 +193,302 @@ class TestFeedHealth:
             result = read.get_merchant_feed_health(config, account_id="111")
 
         assert any("healthy" in i for i in result["insights"])
-
+        assert not any("no products at all" in i for i in result["insights"])
 
     def test_empty_account_is_not_called_healthy(self, config):
         _, patcher = _patch_get({"aggregateProductStatuses": {}, "issues": {}})
         with patcher:
             result = read.get_merchant_feed_health(config, account_id="111")
 
-        assert result["totals"] == {"approved": 0, "pending": 0, "disapproved": 0}
+        assert result["totals"] == {}
         assert not any("healthy" in i for i in result["insights"])
         assert "no products at all" in result["insights"][0]
+
+
+class TestAggregateStatusFields:
+    """Field names of AggregateProductStatus in issueresolution/v1 (#139).
+
+    Verified against the live Discovery document (issueresolution_v1,
+    rev 20261118): stats.{activeCount,pendingCount,disapprovedCount,
+    expiringCount}, country, itemLevelIssues[].{code,severity,resolution,
+    productCount,attribute,description,detail,documentationUri}. Reading
+    the older statistics/approvedCount/countryCode/issues/numProducts names
+    turned every count into 0 and reported a stocked account as empty.
+    """
+
+    def test_live_shaped_row_is_counted(self, config):
+        _, patcher = _patch_get({
+            "aggregateProductStatuses": {"aggregateProductStatuses": [
+                {
+                    "reportingContext": "DISPLAY_ADS",
+                    "country": "US",
+                    "stats": {"activeCount": "129", "disapprovedCount": "7"},
+                    "itemLevelIssues": [{
+                        "code": "identity_and_belief_policy_violation",
+                        "severity": "DISAPPROVED",
+                        "resolution": "MERCHANT_ACTION",
+                        "documentationUri": "https://support.google.com/merchants/answer/143465",
+                        "productCount": "7",
+                    }],
+                },
+            ]},
+            "issues": {},
+        })
+        with patcher:
+            result = read.get_merchant_feed_health(config, account_id="111")
+
+        assert result["by_reporting_context"] == [{
+            "reporting_context": "DISPLAY_ADS", "surface": "paid",
+            "country": "US", "approved": 129, "pending": 0,
+            "disapproved": 7, "expiring": 0,
+        }]
+        issue = result["top_item_issues"][0]
+        assert issue["issue"] == "identity_and_belief_policy_violation"
+        assert issue["affected_products"] == 7
+        assert issue["resolution"] == "MERCHANT_ACTION"
+        assert not any("no products at all" in i for i in result["insights"])
+        assert any("DISPLAY_ADS 7 of 136 (5.1%)" in i for i in result["insights"])
+
+    def test_expiring_is_reported_but_not_in_the_percentage(self, config):
+        _, patcher = _patch_get({
+            "aggregateProductStatuses": {"aggregateProductStatuses": [
+                _row("SHOPPING_ADS", "US", active=90, disapproved=10,
+                     expiring=40),
+            ]},
+            "issues": {},
+        })
+        with patcher:
+            result = read.get_merchant_feed_health(config, account_id="111")
+
+        assert result["totals"]["SHOPPING_ADS"]["expiring"] == 40
+        assert any("10 of 100 (10.0%)" in i for i in result["insights"])
+
+    def test_issue_metadata_is_kept(self, config):
+        _, patcher = _patch_get({
+            "aggregateProductStatuses": {"aggregateProductStatuses": [
+                _row("SHOPPING_ADS", "US", active=10, issues=[
+                    _issue("missing_gtin", "NOT_IMPACTED", 4,
+                           attribute="gtin", description="Missing GTIN",
+                           detail="Add a GTIN"),
+                ]),
+            ]},
+            "issues": {},
+        })
+        with patcher:
+            result = read.get_merchant_feed_health(config, account_id="111")
+
+        issue = result["top_item_issues"][0]
+        assert issue["attribute"] == "gtin"
+        assert issue["description"] == "Missing GTIN"
+        assert issue["severity"] == "NOT_IMPACTED"
+        assert issue["reporting_contexts"] == ["SHOPPING_ADS"]
+
+
+class TestAggregateStatusPagination:
+    """aggregateProductStatuses returns 25 rows per page by default, and
+    Google can repeat a row on a later page."""
+
+    def _paged(self, pages):
+        calls: list[dict] = []
+        pages = iter(pages)
+
+        def fake(config, path, params=None, *, api=client.API_ACCOUNTS):
+            if path.endswith("aggregateProductStatuses"):
+                calls.append(dict(params or {}))
+                return next(pages)
+            return {}
+
+        return calls, patch("adloop.merchant.client.merchant_get", side_effect=fake)
+
+    def test_follows_next_page_token(self, config):
+        calls, patcher = self._paged([
+            {"aggregateProductStatuses": [
+                _row("SHOPPING_ADS", "DE", active=10)],
+             "nextPageToken": "page-2"},
+            {"aggregateProductStatuses": [
+                _row("SHOPPING_ADS", "FR", active=5)]},
+        ])
+        with patcher:
+            result = read.get_merchant_feed_health(config, account_id="111")
+
+        assert calls == [
+            {"pageSize": 250},
+            {"pageSize": 250, "pageToken": "page-2"},
+        ]
+        assert [r["country"] for r in result["by_reporting_context"]] == ["DE", "FR"]
+        assert result["totals"]["SHOPPING_ADS"]["approved"] == 15
+
+    def test_rows_repeated_across_pages_are_counted_once(self, config):
+        repeated = _row("SHOPPING_ADS", "DE", active=10, disapproved=2,
+                        issues=[_issue("image_link_broken", "DISAPPROVED", 2)])
+        _, patcher = self._paged([
+            {"aggregateProductStatuses": [repeated],
+             "nextPageToken": "page-2"},
+            {"aggregateProductStatuses": [
+                repeated, _row("FREE_LISTINGS", "DE", active=12)]},
+        ])
+        with patcher:
+            result = read.get_merchant_feed_health(config, account_id="111")
+
+        assert len(result["by_reporting_context"]) == 2
+        assert result["totals"]["SHOPPING_ADS"]["approved"] == 10
+        assert result["totals"]["SHOPPING_ADS"]["disapproved"] == 2
+        assert result["top_item_issues"][0]["affected_products"] == 2
+
+    def test_rows_without_a_name_are_never_dropped(self, config):
+        _, patcher = self._paged([
+            {"aggregateProductStatuses": [
+                _row("SHOPPING_ADS", "DE", active=1, name=False),
+                _row("SHOPPING_ADS", "FR", active=1, name=False),
+            ]},
+        ])
+        with patcher:
+            result = read.get_merchant_feed_health(config, account_id="111")
+
+        assert result["totals"]["SHOPPING_ADS"]["approved"] == 2
+
+    def test_a_repeated_page_token_ends_the_loop(self, config):
+        page = {"aggregateProductStatuses": [_row("SHOPPING_ADS", "DE", active=1)],
+                "nextPageToken": "same"}
+        calls, patcher = self._paged([page, page, page])
+        with patcher:
+            read.get_merchant_feed_health(config, account_id="111")
+
+        assert len(calls) == 2
+
+
+class TestPaidVersusFreeSurfaces:
+    """A product is counted once per reporting context, so summing contexts
+    double-counts (#139), and a disapproval in free listings does not
+    starve Shopping or Performance Max."""
+
+    def _health(self, config, rows):
+        _, patcher = _patch_get({
+            "aggregateProductStatuses": {"aggregateProductStatuses": rows},
+            "issues": {},
+        })
+        with patcher:
+            return read.get_merchant_feed_health(config, account_id="111")
+
+    def test_contexts_are_never_summed(self, config):
+        result = self._health(config, [
+            _row("SHOPPING_ADS", "US", active=100),
+            _row("DISPLAY_ADS", "US", active=100),
+            _row("FREE_LISTINGS", "US", active=100),
+        ])
+
+        assert set(result["totals"]) == {"SHOPPING_ADS", "DISPLAY_ADS", "FREE_LISTINGS"}
+        assert all(t["approved"] == 100 for t in result["totals"].values())
+        assert "never add reporting contexts" in result["note"]
+
+    def test_free_listing_disapprovals_are_not_a_paid_alarm(self, config):
+        result = self._health(config, [
+            _row("SHOPPING_ADS", "US", active=100),
+            _row("DISPLAY_ADS", "US", active=100),
+            _row("FREE_LISTINGS", "US", active=75, disapproved=25),
+        ])
+        joined = " ".join(result["insights"])
+
+        assert "Paid surfaces (DISPLAY_ADS, SHOPPING_ADS) have no disapproved" in joined
+        assert "FREE_LISTINGS 25 of 100 (25.0%)" in joined
+        assert "organic exposure only" in joined
+        assert "starves" not in joined
+        assert not any("healthy" in i for i in result["insights"])
+
+    def test_paid_disapprovals_are_measured_within_their_context(self, config):
+        result = self._health(config, [
+            _row("SHOPPING_ADS", "US", active=95, disapproved=5),
+            _row("FREE_LISTINGS", "US", active=100),
+            _row("FREE_LOCAL_LISTINGS", "US", active=100),
+        ])
+        joined = " ".join(result["insights"])
+
+        assert "SHOPPING_ADS 5 of 100 (5.0%)" in joined
+        assert "starves Shopping and Performance Max" in joined
+        assert "Free listings:" not in joined
+
+    def test_surface_is_labelled_per_row_and_paid_rows_come_first(self, config):
+        result = self._health(config, [
+            _row("FREE_LISTINGS", "US", active=1),
+            _row("YOUTUBE_SHOPPING", "US", active=1),
+            _row("SHOPPING_ADS", "US", active=1),
+        ])
+
+        assert [(r["reporting_context"], r["surface"])
+                for r in result["by_reporting_context"]] == [
+            ("SHOPPING_ADS", "paid"),
+            ("FREE_LISTINGS", "free"),
+            ("YOUTUBE_SHOPPING", "other"),
+        ]
+
+    def test_missing_context_is_recovered_from_the_resource_name(self, config):
+        row = _row("FREE_LISTINGS", "US", active=3)
+        del row["reportingContext"]
+        result = self._health(config, [row])
+
+        assert result["by_reporting_context"][0]["reporting_context"] == "FREE_LISTINGS"
+        assert result["by_reporting_context"][0]["surface"] == "free"
+
+    def test_rows_without_any_context_stay_out_of_the_split(self, config):
+        result = self._health(config, [
+            _row("SHOPPING_ADS", "US", active=100),
+            _row("", "US", active=60, disapproved=40),
+            _row("", "CA", active=60, disapproved=40, name=False),
+        ])
+        joined = " ".join(result["insights"])
+
+        unspecified = result["totals"]["REPORTING_CONTEXT_ENUM_UNSPECIFIED"]
+        assert unspecified["surface"] == "unspecified"
+        assert unspecified["disapproved"] == 80
+        assert "2 row(s) came back without a reporting context" in joined
+        assert "Paid surfaces (SHOPPING_ADS) have no disapproved" in joined
+        assert "Free listings:" not in joined
+
+    def test_item_issues_merge_across_contexts_and_rank_paid_first(self, config):
+        result = self._health(config, [
+            _row("SHOPPING_ADS", "US", active=95, disapproved=5, issues=[
+                _issue("price_mismatch", "DISAPPROVED", 5),
+                _issue("missing_gtin", "NOT_IMPACTED", 50),
+            ]),
+            _row("FREE_LISTINGS", "US", active=60, disapproved=40, issues=[
+                _issue("price_mismatch", "DISAPPROVED", 8),
+                _issue("restricted_content", "DISAPPROVED", 30),
+            ]),
+            _row("FREE_LISTINGS", "CA", active=90, disapproved=10, issues=[
+                _issue("restricted_content", "DISAPPROVED", 10),
+            ]),
+        ])
+        issues = result["top_item_issues"]
+
+        assert [i["issue"] for i in issues] == [
+            "price_mismatch", "restricted_content", "missing_gtin",
+        ]
+        merged = issues[0]
+        assert merged["affected_products"] == 8
+        assert merged["reporting_contexts"] == ["FREE_LISTINGS", "SHOPPING_ADS"]
+        assert merged["hits_paid_surface"] is True
+        assert issues[1]["affected_products"] == 30
+        assert issues[1]["hits_paid_surface"] is False
+        # A warning on a paid context does not count as hitting it.
+        assert issues[2]["hits_paid_surface"] is False
+
+
+class TestSurfaceClassification:
+    @pytest.mark.parametrize("context,surface", [
+        ("SHOPPING_ADS", "paid"),
+        ("DISPLAY_ADS", "paid"),
+        ("VIDEO_ADS", "paid"),
+        ("DEMAND_GEN_ADS", "paid"),
+        ("LOCAL_INVENTORY_ADS", "paid"),
+        ("FREE_LISTINGS", "free"),
+        ("FREE_LOCAL_LISTINGS", "free"),
+        ("FREE_LISTINGS_UCP_CHECKOUT", "free"),
+        ("YOUTUBE_SHOPPING", "other"),
+        ("PRODUCT_REVIEWS", "other"),
+        ("REPORTING_CONTEXT_ENUM_UNSPECIFIED", "unspecified"),
+    ])
+    def test_surface(self, context, surface):
+        assert read._surface(context) == surface
 
 
 class TestDeveloperRegistration:
