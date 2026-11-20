@@ -1707,10 +1707,12 @@ def get_merchant_feed_health(account_id: str = "") -> dict:
     """Merchant Center feed health — disapproved products + account issues.
 
     Disapproved feed items silently starve Shopping and Performance Max
-    campaigns; this reports approved/pending/disapproved counts per
-    reporting context (Shopping ads, free listings, ...), the top product
-    issues by affected products (with documentation links), and
-    account-level issues — CRITICAL ones stop offers serving entirely.
+    campaigns; this reports approved/pending/disapproved/expiring counts
+    per reporting context and country, each context marked paid (Shopping,
+    display, video ads, ...) or free (free listings), the top item issues
+    by affected products (with documentation links), and account-level
+    issues — CRITICAL ones stop offers serving entirely. A product counts
+    once per reporting context, so contexts are never added together.
     Product-status data lags reality by ~30 minutes.
 
     Args:

@@ -216,7 +216,7 @@ The Google account also needs **Edit** permission on the container (and **Publis
 | Tool | What It Does |
 |------|-------------|
 | `list_merchant_accounts` | Discover accessible Merchant Center accounts |
-| `get_merchant_feed_health` | Feed health — approved/pending/disapproved counts per reporting context, top product issues with docs, account-level issues. Disapprovals silently starve Shopping/PMax. |
+| `get_merchant_feed_health` | Feed health — approved/pending/disapproved counts per reporting context, paid surfaces kept apart from free listings, top product issues with docs, account-level issues. Disapprovals silently starve Shopping/PMax. |
 | `get_merchant_product_issues` | The products behind the feed-health counts: which are disapproved, limited or pending, and each issue with its attribute and affected countries |
 
 > **Setup for Merchant Center tools** — Enable the **Merchant API** in your GCP project (the Content API for Shopping is deprecated). The Merchant API has no read-only scope; AdLoop uses it strictly read-only. Upgrading OAuth users re-authorize once.
