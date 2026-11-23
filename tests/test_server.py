@@ -445,6 +445,24 @@ class TestToolsets:
             server.mcp._transforms[:] = saved
 
     @pytest.mark.asyncio
+    async def test_cards_survive_a_toolset_selection(self, monkeypatch):
+        from adloop import server
+        from adloop.safety.approval import CARD_URI
+        from adloop.uploads import UPLOAD_CARD_URI
+        from adloop.views import VIEW_URI
+
+        monkeypatch.setenv("ADLOOP_TOOLSETS", "ads,ga4")
+        saved = list(server.mcp._transforms)
+        server._apply_toolsets_env()
+        try:
+            uris = {str(r.uri) for r in await server.mcp.list_resources()}
+            # Write tools point at the approval card; without it the app shows
+            # "Couldn't load this widget".
+            assert {CARD_URI, UPLOAD_CARD_URI, VIEW_URI} <= uris
+        finally:
+            server.mcp._transforms[:] = saved
+
+    @pytest.mark.asyncio
     async def test_ads_write_brings_the_reads_along(self, monkeypatch):
         from adloop import server
 
