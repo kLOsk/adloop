@@ -220,9 +220,12 @@ mcp = FastMCP(
 
 
 
+# "core": ADLOOP_TOOLSETS enables components by tag (only=True), and an
+# untagged resource would be switched off while tools still point at it.
 @mcp.resource(
     CARD_URI,
     name="approval_card",
+    tags={"core"},
     title="AdLoop approval card",
     description="Renders a change preview with Test run and Apply buttons.",
     mime_type=CARD_MIME_TYPE,
@@ -235,6 +238,7 @@ def approval_card() -> str:
 @mcp.resource(
     UPLOAD_CARD_URI,
     name="upload_card",
+    tags={"core"},
     title="AdLoop image upload",
     description="A drop zone that uploads images to AdLoop for use as ad assets.",
     mime_type=CARD_MIME_TYPE,
@@ -249,6 +253,7 @@ def upload_card() -> str:
 @mcp.resource(
     VIEW_URI,
     name="adloop_view",
+    tags={"core"},
     title="AdLoop view",
     description="Draws a read result as a dashboard (charts and tables).",
     mime_type=VIEW_MIME_TYPE,
