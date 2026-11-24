@@ -106,6 +106,130 @@ def list_merchant_accounts(config: AdLoopConfig) -> dict:
     return {"accounts": accounts, "total": len(accounts), "insights": insights}
 
 
+# ---------------------------------------------------------------------------
+# Feed health (issueresolution/v1 aggregateProductStatuses)
+# ---------------------------------------------------------------------------
+
+# Stats counters of an AggregateProductStatus row, as output key -> API
+# field. The API calls serving products "active"; the output keeps
+# "approved". An expiring product is still active, so "expiring" is
+# reported but never added into a total or a percentage.
+_STAT_FIELDS = (
+    ("approved", "activeCount"),
+    ("pending", "pendingCount"),
+    ("disapproved", "disapprovedCount"),
+    ("expiring", "expiringCount"),
+)
+_LISTED_FIELDS = ("approved", "pending", "disapproved")
+
+# Reporting contexts in which products are advertised for money. A
+# disapproval there costs Shopping / Performance Max reach; one in a free
+# context (FREE_LISTINGS, FREE_LOCAL_LISTINGS, ...) costs organic exposure
+# only. Everything else (YouTube, reviews, cloud retail) is "other".
+_PAID_CONTEXTS = frozenset({
+    "SHOPPING_ADS",
+    "DISPLAY_ADS",
+    "VIDEO_ADS",
+    "DEMAND_GEN_ADS",
+    "DEMAND_GEN_ADS_DISCOVER_SURFACE",
+    "DISCOVERY_ADS",
+    "LOCAL_INVENTORY_ADS",
+    "VEHICLE_INVENTORY_ADS",
+    "RENTAL_ADS",
+})
+_UNSPECIFIED_CONTEXT = "REPORTING_CONTEXT_ENUM_UNSPECIFIED"
+_SURFACE_ORDER = {"paid": 0, "free": 1, "other": 2, "unspecified": 3}
+_SEVERITY_ORDER = {"DISAPPROVED": 0, "DEMOTED": 1, "NOT_IMPACTED": 2}
+_SERVING_IMPACT = ("DISAPPROVED", "DEMOTED")
+
+# The API returns 25 rows per page by default and at most 250. An account
+# with a few target countries already spans several reporting contexts per
+# country, so the first page alone undercounts.
+_AGGREGATE_PAGE_SIZE = 250
+
+_FEED_HEALTH_NOTE = (
+    "A product is counted once per reporting context and target country, "
+    "so never add reporting contexts together: read the counts per "
+    "context. affected_products on an item issue is its largest single "
+    "context, a floor on the products it hits. Product-status data lags "
+    "feed changes by about 30 minutes."
+)
+
+
+def _surface(context: str) -> str:
+    """paid / free / other / unspecified for a reporting context."""
+    if context in _PAID_CONTEXTS:
+        return "paid"
+    if context.startswith("FREE_"):
+        return "free"
+    if context == _UNSPECIFIED_CONTEXT:
+        return "unspecified"
+    return "other"
+
+
+def _row_context(row: dict) -> str:
+    """Reporting context of an aggregate row.
+
+    Google leaves reportingContext out on some rows. The resource name of
+    such a row still ends in ``{context}~{country}``, so fall back to it;
+    a row that names no context either is unspecified.
+    """
+    context = row.get("reportingContext") or ""
+    if context:
+        return context
+    tail = (row.get("name") or "").rsplit("/", 1)[-1]
+    candidate = tail.split("~", 1)[0] if "~" in tail else ""
+    if candidate and candidate.replace("_", "").isalpha() and candidate.isupper():
+        return candidate
+    return _UNSPECIFIED_CONTEXT
+
+
+def _fetch_aggregate_statuses(config: AdLoopConfig, account_id: str) -> list[dict]:
+    """Every aggregateProductStatuses row, across all pages.
+
+    Google can return the same row on more than one page; a row is one
+    (reporting context, country) pair with a unique resource name, so rows
+    whose name was already seen are dropped instead of being counted twice.
+    """
+    from adloop.merchant.client import API_ISSUE_RESOLUTION, merchant_get
+
+    rows: list[dict] = []
+    seen_names: set[str] = set()
+    seen_tokens: set[str] = set()
+    page_token = ""
+    while True:
+        params: dict = {"pageSize": _AGGREGATE_PAGE_SIZE}
+        if page_token:
+            params["pageToken"] = page_token
+        # Product-status aggregation is served by the issueresolution
+        # sub-API, not accounts — the wrong prefix 404s.
+        payload = merchant_get(
+            config,
+            f"accounts/{account_id}/aggregateProductStatuses",
+            params,
+            api=API_ISSUE_RESOLUTION,
+        )
+        for row in payload.get("aggregateProductStatuses") or []:
+            name = row.get("name") or ""
+            if name:
+                if name in seen_names:
+                    continue
+                seen_names.add(name)
+            rows.append(row)
+        page_token = payload.get("nextPageToken") or ""
+        # A token handed out twice would loop forever.
+        if not page_token or page_token in seen_tokens:
+            break
+        seen_tokens.add(page_token)
+    return rows
+
+
+def _disapproval_share(context: str, counts: dict) -> str:
+    listed = sum(counts[key] for key in _LISTED_FIELDS)
+    pct = round(counts["disapproved"] / listed * 100, 1) if listed else 0.0
+    return f"{context} {counts['disapproved']:,} of {listed:,} ({pct}%)"
+
+
 def get_merchant_feed_health(
     config: AdLoopConfig,
     *,
@@ -113,12 +237,14 @@ def get_merchant_feed_health(
 ) -> dict:
     """Feed health for a Merchant Center account — disapprovals + issues.
 
-    Combines aggregateProductStatuses (per reporting-context counts of
-    approved/pending/disapproved products plus the product issues behind
-    them) with account-level issues that can suspend the whole account.
+    Combines aggregateProductStatuses (per reporting context and country:
+    approved/pending/disapproved/expiring products plus the item issues
+    behind them) with account-level issues that can suspend the whole
+    account. Paid reporting contexts (Shopping, display, video, ...) are
+    reported apart from free listings: only the former starve Shopping and
+    Performance Max campaigns.
     """
     from adloop.merchant.client import (
-        API_ISSUE_RESOLUTION,
         MerchantNotRegistered,
         merchant_get,
         register_gcp,
@@ -128,15 +254,9 @@ def get_merchant_feed_health(
     if error:
         return error
 
-    def _fetch() -> tuple[dict, dict]:
+    def _fetch() -> tuple[list[dict], dict]:
         return (
-            # Product-status aggregation is served by the issueresolution
-            # sub-API, not accounts — the wrong prefix 404s.
-            merchant_get(
-                config,
-                f"accounts/{account_id}/aggregateProductStatuses",
-                api=API_ISSUE_RESOLUTION,
-            ),
+            _fetch_aggregate_statuses(config, account_id),
             merchant_get(config, f"accounts/{account_id}/issues"),
         )
 
@@ -170,42 +290,103 @@ def get_merchant_feed_health(
         for issue in issues_payload.get("accountIssues", [])
     ]
 
-    contexts = []
-    top_item_issues: list[dict] = []
-    totals = {"approved": 0, "pending": 0, "disapproved": 0}
-    for status in statuses.get("aggregateProductStatuses", []):
-        stats = status.get("statistics", {}) or {}
+    contexts: list[dict] = []
+    totals: dict[str, dict] = {}
+    by_code: dict[str, dict] = {}
+    for status in statuses:
+        context = _row_context(status)
+        surface = _surface(context)
+        stats = status.get("stats") or {}
         entry = {
-            "reporting_context": status.get("reportingContext", ""),
-            "country": status.get("countryCode", ""),
-            "approved": int(stats.get("approvedCount", 0) or 0),
-            "pending": int(stats.get("pendingCount", 0) or 0),
-            "disapproved": int(stats.get("disapprovedCount", 0) or 0),
+            "reporting_context": context,
+            "surface": surface,
+            "country": status.get("country", ""),
         }
+        for key, field in _STAT_FIELDS:
+            entry[key] = int(stats.get(field, 0) or 0)
         contexts.append(entry)
-        totals["approved"] += entry["approved"]
-        totals["pending"] += entry["pending"]
-        totals["disapproved"] += entry["disapproved"]
-        for issue in status.get("issues", []):
-            top_item_issues.append({
-                "reporting_context": status.get("reportingContext", ""),
-                "issue": issue.get("issueType", "")
-                or issue.get("title", ""),
-                "severity": issue.get("severity", ""),
-                "affected_products": int(issue.get("numProducts", 0) or 0),
+
+        total = totals.setdefault(
+            context, {"surface": surface, **{key: 0 for key, _ in _STAT_FIELDS}}
+        )
+        for key, _ in _STAT_FIELDS:
+            total[key] += entry[key]
+
+        # The same issue code repeats for every context and country it
+        # touches; one entry per code, sized by its largest single row,
+        # because summing rows would count a product once per context.
+        for issue in status.get("itemLevelIssues") or []:
+            code = issue.get("code", "")
+            severity = issue.get("severity", "")
+            record = by_code.setdefault(code, {
+                "issue": code,
+                "description": issue.get("description", ""),
+                "severity": severity,
+                "resolution": issue.get("resolution", ""),
+                "attribute": issue.get("attribute", ""),
+                "affected_products": 0,
+                "hits_paid_surface": False,
+                "reporting_contexts": set(),
                 "documentation": issue.get("documentationUri", ""),
             })
-    top_item_issues.sort(key=lambda i: i["affected_products"], reverse=True)
+            record["affected_products"] = max(
+                record["affected_products"], int(issue.get("productCount", 0) or 0)
+            )
+            if _SEVERITY_ORDER.get(severity, 9) < _SEVERITY_ORDER.get(record["severity"], 9):
+                record["severity"] = severity
+            record["reporting_contexts"].add(context)
+            if surface == "paid" and severity in _SERVING_IMPACT:
+                record["hits_paid_surface"] = True
+
+    contexts.sort(key=lambda c: (
+        _SURFACE_ORDER[c["surface"]], c["reporting_context"], c["country"],
+    ))
+    totals = dict(sorted(
+        totals.items(), key=lambda kv: (_SURFACE_ORDER[kv[1]["surface"]], kv[0])
+    ))
+    top_item_issues = sorted(
+        by_code.values(),
+        key=lambda i: (
+            _SEVERITY_ORDER.get(i["severity"], 9),
+            not i["hits_paid_surface"],
+            -i["affected_products"],
+        ),
+    )
+    for issue in top_item_issues:
+        issue["reporting_contexts"] = sorted(issue["reporting_contexts"])
 
     insights = []
-    serving_total = sum(totals.values())
-    if serving_total and totals["disapproved"] > 0:
-        pct = round(totals["disapproved"] / serving_total * 100, 1)
+    paid = {c: t for c, t in totals.items() if t["surface"] == "paid"}
+    free = {c: t for c, t in totals.items() if t["surface"] == "free"}
+    paid_hit = [c for c, t in paid.items() if t["disapproved"]]
+    free_hit = [c for c, t in free.items() if t["disapproved"]]
+    if paid_hit:
         insights.append(
-            f"{totals['disapproved']:,} product(s) ({pct}%) are DISAPPROVED "
-            f"and not serving — this directly starves Shopping and "
-            f"Performance Max campaigns. Fix the top issues below before "
-            f"touching bids or budgets."
+            "Paid surfaces: "
+            + "; ".join(_disapproval_share(c, paid[c]) for c in paid_hit)
+            + " products DISAPPROVED and not serving — this directly starves "
+            "Shopping and Performance Max campaigns. Fix the top issues "
+            "below before touching bids or budgets."
+        )
+    elif paid:
+        insights.append(
+            "Paid surfaces (" + ", ".join(paid) + ") have no disapproved "
+            "products — disapprovals are not what holds Shopping or "
+            "Performance Max back."
+        )
+    if free_hit:
+        insights.append(
+            "Free listings: "
+            + "; ".join(_disapproval_share(c, free[c]) for c in free_hit)
+            + " products disapproved — this costs organic exposure only, "
+            "not Shopping or Performance Max reach."
+        )
+    unspecified = [c for c in contexts if c["surface"] == "unspecified"]
+    if unspecified:
+        insights.append(
+            f"{len(unspecified)} row(s) came back without a reporting "
+            "context; they are listed in by_reporting_context but left out "
+            "of the paid / free split."
         )
     critical = [
         i for i in account_issues if i["severity"] in ("CRITICAL", "ERROR")
@@ -216,7 +397,9 @@ def get_merchant_feed_health(
             f"severity — CRITICAL means offers stop serving entirely: "
             + "; ".join(i["title"] for i in critical[:3])
         )
-    if not serving_total:
+    any_products = any(c[key] for c in contexts for key in _LISTED_FIELDS)
+    any_disapproved = any(c["disapproved"] for c in contexts)
+    if not any_products:
         # Zero products is not a healthy feed: Shopping and Performance Max
         # have nothing to advertise.
         insights.append(
@@ -226,7 +409,7 @@ def get_merchant_feed_health(
             "products were added in the last ~30 minutes (status lags), or "
             "the products live in another Merchant Center account."
         )
-    elif not account_issues and not totals["disapproved"]:
+    elif not account_issues and not any_disapproved:
         insights.append("No disapprovals or account issues — feed is healthy.")
 
     return {
@@ -236,6 +419,7 @@ def get_merchant_feed_health(
         "account_issues": account_issues,
         "top_item_issues": top_item_issues[:15],
         "insights": insights,
+        "note": _FEED_HEALTH_NOTE,
     }
 
 
