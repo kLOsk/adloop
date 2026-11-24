@@ -2160,8 +2160,10 @@ def draft_campaign(
 
     geo_target_ids: list of geo target constant IDs (e.g. ["2276"] for Germany,
         ["2840"] for USA). REQUIRED — campaigns must target specific countries.
-    language_ids: list of language constant IDs (e.g. ["1001"] for German,
-        ["1000"] for English). REQUIRED — campaigns must target specific languages.
+    language_ids: optional list of language constant IDs (e.g. ["1001"] for
+        German, ["1000"] for English). Google retired manual language
+        targeting for Search campaigns in late September 2026, so this is no
+        longer required; when given it is still sent, with a warning.
     location_option / negative_location_option: campaign.geo_target_type_setting.
         Empty leaves Google's default (PRESENCE_OR_INTEREST for both).
     tracking_url_template / final_url_suffix / url_custom_parameters: campaign
@@ -2452,8 +2454,6 @@ def update_campaign(
 
     if geo_target_ids is not None and len(geo_target_ids) == 0:
         errors.append("geo_target_ids cannot be empty — provide at least one geo target")
-    if language_ids is not None and len(language_ids) == 0:
-        errors.append("language_ids cannot be empty — provide at least one language")
     if geo_exclude_ids is not None:
         geo_exclude_ids, exclude_errors = _normalize_geo_exclude_ids(geo_exclude_ids, geo_target_ids)
         errors.extend(exclude_errors)
@@ -2498,6 +2498,13 @@ def update_campaign(
     if errors:
         return {"error": "Validation failed", "details": errors}
 
+    if language_ids is not None:
+        warnings.append(
+            "On a Search campaign: " + _SEARCH_LANGUAGE_WARNING
+            if language_ids
+            else _LANGUAGE_CLEAR_WARNING
+        )
+
     if bs == "MANUAL_CPC":
         warnings.append(
             "MANUAL_CPC bidding requires constant monitoring. Consider using "
@@ -2509,7 +2516,9 @@ def update_campaign(
         currency_code = get_currency_code(config, customer_id)
         warnings.append(
             f"Daily budget {format_currency(daily_budget, currency_code)} is less than 5x target CPA "
-            f"{format_currency(target_cpa, currency_code)}. Google recommends at least 5x."
+            f"{format_currency(target_cpa, currency_code)}. 5x is AdLoop's rule of thumb, not a "
+            f"Google requirement; Google's low-traffic troubleshooting guide suggests a daily "
+            f"budget of 2 to 3 times the target CPA."
         )
 
     # Surface negative geo exclusions that will survive a positive-geo
@@ -4090,6 +4099,34 @@ _VALID_BIDDING_STRATEGIES = {
 
 _VALID_CHANNEL_TYPES = {"SEARCH", "DISPLAY", "SHOPPING", "VIDEO", "PERFORMANCE_MAX"}
 
+# Google retired manual language targeting for Search campaigns in late
+# September 2026 (https://developers.google.com/google-ads/api/docs/deprecations,
+# https://developers.google.com/google-ads/api/docs/targeting/criteria and
+# https://support.google.com/google-ads/answer/1722078). Search ads match on
+# the language of the ads and landing page plus the user's language
+# preferences; existing language criteria read back and can be removed. The
+# documentation says adding one fails, and tells API users to stop sending
+# them. AdLoop no longer asks for language_ids and passes them through
+# unchanged when they are given, so the dry run reports Google's own answer.
+_SEARCH_LANGUAGE_WARNING = (
+    "Google retired manual language targeting for Search campaigns in late "
+    "September 2026: Search ads now match on the language of the ads and "
+    "landing page plus the user's language preferences. Google's API "
+    "documentation tells developers to stop sending language criteria for "
+    "Search campaigns and says adding one fails with "
+    "OPERATION_NOT_PERMITTED_FOR_CONTEXT. language_ids is passed through as "
+    "given, so the dry run shows Google's answer; leave it out unless there "
+    "is a reason to send it."
+)
+_LANGUAGE_CLEAR_WARNING = (
+    "language_ids=[] removes all campaign-level language criteria. On a "
+    "Search campaign Google no longer uses them (retired late September "
+    "2026). On campaigns that still take language targeting (Display, Video, "
+    "App, Demand Gen with campaign-level languages, and the YouTube, Display, "
+    "Discover and Gmail channels of Performance Max) removing them can widen "
+    "who sees the ads."
+)
+
 # campaign.geo_target_type_setting. Google's default for a new campaign is
 # PRESENCE_OR_INTEREST, which also reaches people elsewhere who show interest
 # in the targeted locations.
@@ -4379,11 +4416,8 @@ def _validate_campaign(
             "geo_target_ids is required — campaigns must target at least one "
             "country/region (e.g. ['2276'] for Germany, ['2840'] for USA)"
         )
-    if not language_ids:
-        errors.append(
-            "language_ids is required — campaigns must target at least one "
-            "language (e.g. ['1001'] for German, ['1000'] for English)"
-        )
+    if language_ids:
+        warnings.append(_SEARCH_LANGUAGE_WARNING)
 
     bs = bidding_strategy.upper()
     if bs not in _VALID_BIDDING_STRATEGIES:
@@ -4474,8 +4508,10 @@ def _validate_campaign(
         currency_code = get_currency_code(config, customer_id)
         warnings.append(
             f"Daily budget {format_currency(daily_budget, currency_code)} is less than 5x target CPA "
-            f"{format_currency(target_cpa, currency_code)}. Google recommends at least 5x target CPA "
-            f"({format_currency(5 * target_cpa, currency_code)}/day) for sufficient learning data."
+            f"{format_currency(target_cpa, currency_code)} "
+            f"({format_currency(5 * target_cpa, currency_code)}/day). 5x is AdLoop's rule of thumb, "
+            f"not a Google requirement; Google's low-traffic troubleshooting guide suggests a daily "
+            f"budget of 2 to 3 times the target CPA."
         )
 
     if bs == "MANUAL_CPC":

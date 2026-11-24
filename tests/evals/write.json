@@ -5,10 +5,10 @@
     {
       "id": 1,
       "prompt": "Create a new search campaign for my swimming school in Berlin. Target Germany, German language, daily budget 30 euros, maximize conversions.",
-      "expected_output": "Should check existing campaigns, create draft_campaign with correct geo/language IDs, emphasize PAUSED status, use two-step write pattern, present full preview, wait for approval.",
+      "expected_output": "Should check existing campaigns, create draft_campaign with the correct geo IDs and no language IDs (Google retired language targeting for Search campaigns), emphasize PAUSED status, use two-step write pattern, present full preview, wait for approval.",
       "expectations": [
         "Calls get_campaign_performance or list_accounts to check existing structure first",
-        "Uses geo_target_ids containing 2276 (Germany) and language_ids containing 1001 (German)",
+        "Uses geo_target_ids containing 2276 (Germany), leaves language_ids out, and plans the ads and landing page in German",
         "Sets bidding_strategy to MAXIMIZE_CONVERSIONS",
         "Presents a preview/plan before applying and waits for user approval",
         "Mentions that the campaign will be created as PAUSED",
