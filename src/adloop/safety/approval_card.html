@@ -63,7 +63,7 @@
   dt.wide { margin-top: 4px; }
   dd.wide { min-width: 0; }
   .hint { color: var(--fg-2); font-size: 12px; margin-left: 6px; white-space: normal; }
-  .was { color: var(--fg-2); text-decoration: line-through; text-decoration-color: var(--border); }
+  .was { color: var(--fg-2); }
   .arrow { color: var(--fg-2); margin: 0 6px; }
   .unset { grid-column: 1 / -1; color: var(--fg-2); font-size: 12px; white-space: normal; }
   dl.nested { background: transparent; padding: 0 0 0 10px; border-left: 2px solid var(--border); border-radius: 0; }
@@ -75,8 +75,14 @@
   .item + .item { border-top: 1px solid var(--border); }
   .item b { font-weight: 500; }
   .item div { color: var(--fg-2); font-size: 12px; }
+  .ad { background: var(--bg); border: 1px solid var(--border); border-radius: 8px; padding: 10px 12px; white-space: normal; }
+  .ad .ad-url { font-size: 12px; color: var(--fg-2); overflow-wrap: anywhere; }
+  .ad .ad-url b { font-weight: 600; color: var(--fg); margin-right: 6px; }
+  .ad .ad-head { color: var(--accent); font-size: 15px; font-weight: 500; margin: 2px 0; }
+  .ad .ad-text { font-size: 13px; }
+  dd > button.link:first-child, dd > pre.hidden + button.link { margin-top: 0; font-size: 13px; }
   pre { margin: 0; font: 12px/1.4 var(--mono); white-space: pre-wrap; overflow-wrap: anywhere; }
-  button.link { border: 0; padding: 0; margin-top: 4px; background: none; color: var(--accent); font-size: 12px; font-weight: 400; }
+  button.link { border: 0; padding: 0; margin-top: 4px; text-align: left; background: none; color: var(--accent); font-size: 12px; font-weight: 400; }
   button.link.more { justify-self: start; margin-top: 0; }
   .note { margin-top: 10px; padding: 8px 10px; border-radius: 8px; font-size: 13px; overflow-wrap: anywhere; }
   .note.warn { color: var(--warn); background: var(--warn-bg); }
@@ -126,8 +132,8 @@
       testForced: "Live changes are switched off, so only test runs are possible.",
       applied: "Applied.", discarded: "Discarded. Nothing was changed.",
       failed: "Not applied:", more: "more fields not shown",
-      showFields: "Show {n} more fields", showAll: "Show all {n}", showDetails: "Show details",
-      unset: "Not set:", andMore: "and {n} more",
+      showFields: "Show {n} more fields", showField: "Show 1 more field", showAll: "Show all {n}", showDetails: "Show details",
+      unset: "Not set:", andMore: "and {n} more", sponsored: "Sponsored",
       msgApplied: "Applied on the AdLoop approval card: {op} (plan {id}).",
       msgAnnotate: " Suggested GA4 annotation for {date}: \u201c{title}\u201d (draft_ga4_annotation, needs approval).",
       msgDiscarded: "Discarded on the AdLoop approval card: {op} (plan {id}). Nothing was changed.",
@@ -145,8 +151,8 @@
       testForced: "Echte Änderungen sind ausgeschaltet, daher sind nur Testläufe möglich.",
       applied: "Angewendet.", discarded: "Verworfen. Nichts wurde geändert.",
       failed: "Nicht angewendet:", more: "weitere Felder nicht angezeigt",
-      showFields: "{n} weitere Felder anzeigen", showAll: "Alle {n} anzeigen", showDetails: "Details anzeigen",
-      unset: "Nicht gesetzt:", andMore: "und {n} weitere",
+      showFields: "{n} weitere Felder anzeigen", showField: "1 weiteres Feld anzeigen", showAll: "Alle {n} anzeigen", showDetails: "Details anzeigen",
+      unset: "Nicht gesetzt:", andMore: "und {n} weitere", sponsored: "Gesponsert",
       msgApplied: "Auf der AdLoop-Freigabekarte angewendet: {op} (Plan {id}).",
       msgAnnotate: " Vorgeschlagene GA4-Anmerkung für den {date}: \u201e{title}\u201c (draft_ga4_annotation, braucht Freigabe).",
       msgDiscarded: "Auf der AdLoop-Freigabekarte verworfen: {op} (Plan {id}). Nichts wurde geändert.",
@@ -312,6 +318,12 @@
       const nested = el("dl", "nested");
       viewRows(nested, row.rows || [], Infinity);
       dd.append(nested);
+    } else if (row.kind === "ad") {
+      const ad = el("div", "ad");
+      const url = el("div", "ad-url");
+      url.append(el("b", "", t("sponsored")), document.createTextNode(row.url || ""));
+      ad.append(url, el("div", "ad-head", row.headline || ""), el("div", "ad-text", row.text || ""));
+      dd.append(ad);
     } else if (row.kind === "code") {
       const pre = el("pre", "", row.text);
       dd.append(pre);
@@ -319,7 +331,12 @@
         pre.classList.add("hidden");
         const link = el("button", "link", t("showDetails"));
         link.type = "button";
-        link.addEventListener("click", () => { pre.classList.remove("hidden"); link.remove(); reportSize(); });
+        link.addEventListener("click", () => {
+          pre.classList.remove("hidden");
+          link.remove();
+          dd.dispatchEvent(new Event("unfold"));
+          reportSize();
+        });
         dd.append(link);
       }
     } else {
@@ -330,7 +347,7 @@
   }
 
   // Tables, blocks, groups and code take the full width under their label.
-  const WIDE = new Set(["table", "stack", "group", "code"]);
+  const WIDE = new Set(["table", "stack", "group", "code", "ad"]);
   // A hint follows a one-line value; under anything taller it goes to the label.
   const INLINE = new Set(["text", "change"]);
 
@@ -339,22 +356,25 @@
     for (const row of rows) {
       if (!row || typeof row !== "object") continue;
       if (row.kind === "unset") {
-        const line = el("div", "unset", t("unset") + " " + (row.labels || []).join(", "));
-        dl.append(line);
-        fields.push([line]);
+        // One line, always shown: it is what says that nothing else was left out.
+        dl.append(el("div", "unset", t("unset") + " " + (row.labels || []).join(", ")));
         continue;
       }
       const dt = el("dt", "", row.label || "");
       if (row.hint && !INLINE.has(row.kind)) dt.append(el("span", "hint", row.hint));
       const dd = viewValue(row);
-      if (WIDE.has(row.kind)) { dt.classList.add("wide"); dd.classList.add("wide"); }
+      const widen = () => { dt.classList.add("wide"); dd.classList.add("wide"); };
+      // Folded details sit next to their label until they are opened.
+      if (row.kind === "code" && row.folded) dd.addEventListener("unfold", widen);
+      else if (WIDE.has(row.kind)) widen();
       dl.append(dt, dd);
       fields.push([dt, dd]);
     }
     if (fields.length > limit) {
       const hidden = fields.slice(limit).flat();
       for (const node of hidden) node.classList.add("hidden");
-      const link = el("button", "link more", t("showFields").replace("{n}", fields.length - limit));
+      const extra = fields.length - limit;
+      const link = el("button", "link more", t(extra === 1 ? "showField" : "showFields").replace("{n}", extra));
       link.type = "button";
       link.addEventListener("click", () => {
         for (const node of hidden) node.classList.remove("hidden");
@@ -383,7 +403,8 @@
   function render() {
     const p = plan.preview;
     $("platform").textContent = PLATFORMS[platformOf(p)];
-    $("title").textContent = humanize(p.operation);
+    const view = plan.view;
+    $("title").textContent = (view && typeof view.title === "string" && view.title) || humanize(p.operation);
     // Names resolved at draft time (pause, enable, remove) sit in changes;
     // the IDs stay visible next to them, and the card falls back to IDs.
     const ch = p.changes || {};
@@ -401,7 +422,6 @@
 
     const dl = $("changes");
     dl.replaceChildren();
-    const view = plan.view;
     if (view && Array.isArray(view.rows)) {
       if (!viewRows(dl, view.rows, MAX_ROWS)) dl.classList.add("hidden");
       showCard(p);
@@ -428,6 +448,9 @@
   function showCard(p) {
     const warnings = $("warnings");
     warnings.replaceChildren();
+    // What applying does, from the server's view, in the card's language.
+    const effect = plan.view && plan.view.effect;
+    if (effect && (effect[lang] || effect.en)) note(warnings, "info", effect[lang] || effect.en);
     const list = [].concat(p.warnings || [], (p.changes && p.changes.warnings) || []);
     for (const w of list) note(warnings, "warn", typeof w === "string" ? w : JSON.stringify(w));
 

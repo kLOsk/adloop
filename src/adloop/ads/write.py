@@ -681,6 +681,63 @@ _RSA_TEXT_UPDATE_WARNING = (
 )
 
 
+def _describe_rsa(
+    config: AdLoopConfig, customer_id: str, ad_id: str, changing: set[str]
+) -> tuple[dict, str | None]:
+    """What an RSA update preview says about the ad as it is now: ``({facts}, error)``.
+
+    One query reads the ad group and campaign the ad sits in and the ad's
+    text, URL and paths: ``current_<field>`` for each field in ``changing``,
+    so the preview can show before and after, and ``_unchanged`` for the
+    rest. A failed lookup returns nothing and no error: the preview then
+    shows the new values alone. A lookup that finds no such ad is an error.
+    """
+    from adloop.ads.gaql import execute_query
+
+    try:
+        rows = execute_query(
+            config, customer_id,
+            "SELECT ad_group.name, campaign.name, ad_group_ad.ad.final_urls, "
+            "ad_group_ad.ad.responsive_search_ad.headlines, "
+            "ad_group_ad.ad.responsive_search_ad.descriptions, "
+            "ad_group_ad.ad.responsive_search_ad.path1, "
+            "ad_group_ad.ad.responsive_search_ad.path2 "
+            f"FROM ad_group_ad WHERE ad_group_ad.ad.id = {int(ad_id)} LIMIT 1",
+        )
+    except Exception:
+        return {}, None
+    if not rows:
+        return {}, (
+            f"No ad with ID {ad_id} in account "
+            f"{_format_customer(customer_id) or 'the default account'}. Check the ID "
+            "with get_ad_performance."
+        )
+    row = rows[0]
+    facts: dict = {}
+    for key, field_name in (("ad_group_name", "ad_group.name"), ("campaign_name", "campaign.name")):
+        if row.get(field_name):
+            facts[key] = str(row[field_name])
+    urls = row.get("ad_group_ad.ad.final_urls") or []
+    current = {
+        "final_url": urls[0] if isinstance(urls, list) and urls else "",
+        "path1": row.get("ad_group_ad.ad.responsive_search_ad.path1") or "",
+        "path2": row.get("ad_group_ad.ad.responsive_search_ad.path2") or "",
+        "headlines": row.get("ad_group_ad.ad.responsive_search_ad.headlines") or [],
+        "descriptions": row.get("ad_group_ad.ad.responsive_search_ad.descriptions") or [],
+    }
+    # Fields the update leaves alone go under one key: an approval card
+    # needs them to show the whole ad, but they are not part of the change.
+    unchanged = {}
+    for key in ("final_url", "path1", "path2", "headlines", "descriptions"):
+        if key in changing:
+            facts[f"current_{key}"] = current[key]
+        elif current[key]:
+            unchanged[key] = current[key]
+    if unchanged:
+        facts["_unchanged"] = unchanged
+    return facts, None
+
+
 def update_responsive_search_ad(
     config: AdLoopConfig,
     *,
@@ -828,6 +885,15 @@ def update_responsive_search_ad(
         changes["headlines"] = norm_headlines
     if has_descriptions_change:
         changes["descriptions"] = norm_descriptions
+
+    # The ad as it is now, so the preview shows before and after and names
+    # where the ad sits. The applier reads only the keys set above.
+    facts, lookup_error = _describe_rsa(config, customer_id, str(ad_id), set(changes))
+    if lookup_error:
+        return {"error": lookup_error}
+    # Where the ad sits comes first, the rest of the ad last.
+    names = {k: facts.pop(k) for k in ("campaign_name", "ad_group_name") if k in facts}
+    changes = {"ad_id": changes.pop("ad_id"), **names, **changes, **facts}
 
     plan = ChangePlan(
         operation="update_responsive_search_ad",

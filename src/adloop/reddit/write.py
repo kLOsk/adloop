@@ -1666,6 +1666,7 @@ def _draft_ad_from_post(
                 "existing_post_id": post_id,
                 "ad": ad_payload,
                 "display": {
+                    "ad_name": ad_payload["name"],
                     "existing_post": True,
                     "post_id": post_id,
                     "post_url": post.get("post_url"),
@@ -2004,8 +2005,11 @@ def draft_reddit_ad(
                 "post": post_payload,
                 "ad": ad_payload,
                 "display": {
+                    "ad_name": ad_payload["name"],
                     "headline": headline,
+                    "body": post_payload.get("body") or None,
                     "post_type": post_type,
+                    "allow_comments": bool(allow_comments),
                     "click_url": click_url,
                     "image_url": image_url or None,
                     "video_url": video_url or None,

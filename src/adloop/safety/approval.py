@@ -215,19 +215,30 @@ def with_card(result: Any) -> Any:
     )
 
 
+# Google's names for location and language IDs. They are the same for every
+# account, so one process keeps what it has read for all of them.
+_CONSTANT_NAMES: dict[tuple[str, str], str] = {}
+_CONSTANT_QUERIES = {
+    "geo": ("geo_target_constant", "canonical_name"),
+    "language": ("language_constant", "name"),
+}
+
+
 class _AccountLookup:
     """Names and the currency a Google Ads preview leaves out, for the card.
 
-    Read from the account on first use, in one query at most, and only when
-    the card would otherwise show a bare ID or an amount without a currency.
-    Whatever cannot be read stays unknown: the card then shows the ID or the
-    plain number, which is what it showed before.
+    Read from the account on first use and only when the card would
+    otherwise show a bare ID or an amount without a currency: one query for
+    campaigns, ad groups and the currency, one each for location and
+    language names not read before. Whatever cannot be read stays unknown:
+    the card then shows the ID or the plain number.
     """
 
     def __init__(self, plan: ChangePlan) -> None:
         self._plan = plan
         self._names: dict[tuple[str, str], str] | None = None
         self._currency: str | None = None
+        self._constants_loaded: set[str] = set()
 
     def _google(self) -> bool:
         return (self._plan.platform or "google") == "google" and bool(self._plan.customer_id)
@@ -263,7 +274,35 @@ class _AccountLookup:
             if row.get("customer.currency_code"):
                 self._currency = str(row["customer.currency_code"])
 
+    def _load_constants(self, kind: str) -> None:
+        from adloop.safety.card_view import lookup_ids
+
+        resource, field = _CONSTANT_QUERIES[kind]
+        missing = [i for i in lookup_ids(self._plan.changes)[kind] if (kind, i) not in _CONSTANT_NAMES][:50]
+        if not missing or not self._google():
+            return
+        from adloop.ads.gaql import execute_query
+        from adloop.runtime import current_config
+
+        query = (
+            f"SELECT {resource}.id, {resource}.{field} FROM {resource} "
+            f"WHERE {resource}.id IN ({', '.join(missing)})"
+        )
+        for row in execute_query(current_config(), self._plan.customer_id, query):
+            entity_id, name = row.get(f"{resource}.id"), row.get(f"{resource}.{field}")
+            if entity_id and name:
+                # "Munich,Bavaria,Germany" reads better with spaces.
+                _CONSTANT_NAMES[(kind, str(entity_id))] = ", ".join(p.strip() for p in str(name).split(","))
+
     def name(self, kind: str, entity_id: str) -> str:
+        if kind in _CONSTANT_QUERIES:
+            if kind not in self._constants_loaded:
+                self._constants_loaded.add(kind)
+                try:
+                    self._load_constants(kind)
+                except Exception:
+                    pass
+            return _CONSTANT_NAMES.get((kind, entity_id), "") if self._google() else ""
         if self._names is None:
             try:
                 self._load()
@@ -293,7 +332,8 @@ def _card_view(plan: ChangePlan) -> dict | None:
     try:
         from adloop.safety.card_view import card_view
 
-        view = card_view(plan.changes, _AccountLookup(plan))
+        view = card_view(plan.changes, _AccountLookup(plan),
+                         operation=plan.operation, entity_type=plan.entity_type)
         json.dumps(view)
         return view
     except Exception:

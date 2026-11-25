@@ -779,6 +779,11 @@ class TestCreationDrafts:
         assert "click_url" not in changes["ad"]  # free-form ads open the post
         assert any("open the Reddit post" in w for w in preview["warnings"])
         assert changes["ad"]["configured_status"] == "PAUSED"
+        # What a person approves is in the readable part too, not only in the request body.
+        display = changes["display"]
+        assert display["ad_name"] == "Ship faster"
+        assert display["body"] == "Try it: https://example.com/x"
+        assert display["allow_comments"] is True
 
     def test_existing_text_post_is_promoted_without_creating_a_post(self):
         from adloop.ads import write as ads_write
@@ -794,6 +799,7 @@ class TestCreationDrafts:
         assert preview["changes"]["existing_post_id"] == "t3_x"
         ad = preview["changes"]["ad"]
         assert ad["post_id"] == "t3_x" and ad["profile_id"] == "p1" and ad["name"] == "Old post"
+        assert preview["changes"]["display"]["ad_name"] == "Old post"
         assert "click_url" not in ad
         assert any("were ignored" in w for w in preview["warnings"])
         assert any("Comments are enabled" in w for w in preview["warnings"])

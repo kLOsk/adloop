@@ -60,7 +60,7 @@ def test_a_new_ad_group_reads_as_a_campaign_a_name_and_a_keyword_table():
         {"label": "Campaign", "kind": "text", "text": "Search - Tools", "hint": "ID 5550001"},
         {"label": "Ad group name", "kind": "text", "text": "Analytics tools"},
         {"label": "Keywords", "kind": "table", "columns": ["Text", "Match type"],
-         "rows": [["analytics tool", "PHRASE"], ["web analytics tool", "PHRASE"]]},
+         "rows": [["analytics tool", "Phrase"], ["web analytics tool", "Phrase"]]},
         {"kind": "unset", "labels": ["CPC bid"]},
     ]
 
@@ -75,7 +75,11 @@ def test_without_a_lookup_the_id_stays_an_id():
 @pytest.mark.parametrize("key, expected", [
     ("cpc_bid_micros", "CPC bid"),
     ("final_url", "Final URL"),
-    ("geo_target_ids", "Geo target IDs"),
+    ("conversion_action_ids", "Conversion action IDs"),
+    ("geo_target_ids", "Locations"),
+    ("path1", "Path 1"),
+    ("description2", "Description 2"),
+    ("ga4_property", "GA4 property"),
     ("firingTriggerId", "Firing trigger ID"),
     ("target_roas", "Target ROAS"),
     # Keys that are data keep their spelling.
@@ -108,11 +112,15 @@ def test_id_lists_get_the_names_the_lookup_knows():
 
 
 def test_lookup_ids_are_the_numeric_ids_shown_without_a_name():
+    none = {"campaign": [], "ad_group": [], "geo": [], "language": []}
     assert lookup_ids({"campaign_id": "1001", "ad_group_id": "", "campaign_ids": ["7", "7", "x y"]}) == {
-        "campaign": ["1001", "7"], "ad_group": []}
-    assert lookup_ids({"campaign_id": "1001", "campaign_name": "Brand"}) == {"campaign": [], "ad_group": []}
+        **none, "campaign": ["1001", "7"]}
+    assert lookup_ids({"campaign_id": "1001", "campaign_name": "Brand"}) == none
     # A Reddit ID or anything else that is not a number never reaches a query.
-    assert lookup_ids({"campaign_id": "c1 OR 1=1", "ad_group_id": "t5_abc"}) == {"campaign": [], "ad_group": []}
+    assert lookup_ids({"campaign_id": "c1 OR 1=1", "ad_group_id": "t5_abc", "geo_target_ids": ["2276) OR (1"]}) == none
+    # Locations and languages, also the ones a change replaces.
+    assert lookup_ids({"geo_target_ids": ["2276"], "current_geo_exclude_ids": ["1004234"], "language_ids": [1001]}) == {
+        **none, "geo": ["2276", "1004234"], "language": ["1001"]}
 
 
 # -- before -> after --------------------------------------------------------
@@ -144,11 +152,11 @@ def test_a_before_and_an_after_object_pair_up_field_by_field():
 
 def test_status_changes_and_other_irregular_pairs():
     assert rows({"target_status": "PAUSED", "current_status": "ENABLED"}) == [
-        {"label": "Status", "kind": "change", "from": "ENABLED", "to": "PAUSED"}]
+        {"label": "Status", "kind": "change", "from": "Enabled", "to": "Paused"}]
     assert rows({"audience_mode_before": "not set", "set_audience_mode": "observation"}) == [
         {"label": "Audience mode", "kind": "change", "from": "not set", "to": "observation"}]
     assert rows({"enable_ai_max": True, "ai_max_before": False}) == [
-        {"label": "AI max", "kind": "change", "from": "No", "to": "Yes"}]
+        {"label": "AI Max", "kind": "change", "from": "No", "to": "Yes"}]
 
 
 def test_an_unchanged_value_is_not_dressed_up_as_a_change():
@@ -161,7 +169,7 @@ def test_a_change_keeps_its_own_currency_and_explains_itself():
                "patch": {"goal_value": 40000000}, "daily_equivalent": 40.0}
     view = rows(changes, Account(currency="EUR"))
     assert view[0] == {"label": "Budget", "kind": "change", "from": "20.00 USD", "to": "40.00 USD",
-                       "hint": "Goal type: DAILY_SPEND"}
+                       "hint": "Goal type: Daily spend"}
     # The amount next to the display is in the display's currency, not the account's.
     assert view[1] == {"label": "Daily equivalent", "kind": "text", "text": "40.00 USD"}
     # The request body is still there, folded.
@@ -176,12 +184,31 @@ def test_list_changes_show_what_was_added_and_removed():
     ]}]
 
 
-def test_list_changes_without_a_diff_show_before_and_after():
-    view = rows({"values": ["A", "B", "D"], "previous": {"values": ["A", "B", "C"]}})
+def test_lists_that_share_items_show_only_the_difference():
+    view = rows({"values": ["A", "B", "D", "E"], "previous": {"values": ["A", "B", "C"]}})
     assert view == [{"label": "Values", "kind": "group", "rows": [
-        {"label": "Before", "kind": "list", "items": ["A", "B", "C"]},
-        {"label": "After", "kind": "list", "items": ["A", "B", "D"]},
+        {"label": "Added", "kind": "list", "items": ["D", "E"]},
+        {"label": "Removed", "kind": "text", "text": "C"},
+        {"label": "Unchanged", "kind": "text", "text": "2"},
     ]}]
+    # Headlines written as {"text": ...} against the plain texts the ad has now.
+    view = rows({"headlines": [{"text": "Kept", "pinned_field": None}, {"text": "New", "pinned_field": None}],
+                 "current_headlines": ["Kept", "Old"]})
+    assert [(r["label"], r["text"]) for r in view[0]["rows"]] == [("Added", "New"), ("Removed", "Old"),
+                                                                  ("Unchanged", "1")]
+
+
+def test_lists_with_nothing_in_common_or_with_pins_show_before_and_after():
+    view = rows({"values": ["D", "E"], "previous": {"values": ["A", "B"]}})
+    assert view == [{"label": "Values", "kind": "group", "rows": [
+        {"label": "Before", "kind": "list", "items": ["A", "B"]},
+        {"label": "After", "kind": "list", "items": ["D", "E"]},
+    ]}]
+    # A pin on a kept headline is a change a difference would hide.
+    view = rows({"headlines": [{"text": "Kept", "pinned_field": "HEADLINE_1"}, {"text": "New", "pinned_field": None}],
+                 "current_headlines": ["Kept", "Old"]})
+    assert [r["label"] for r in view[0]["rows"]] == ["Before", "After"]
+    assert view[0]["rows"][1]["rows"] == [["Kept", "Headline 1"], ["New", ""]]
 
 
 def test_a_value_set_for_the_first_time_or_cleared():
@@ -191,7 +218,7 @@ def test_a_value_set_for_the_first_time_or_cleared():
     ]}) == [{"label": "Ad schedule", "kind": "list", "hint": "was not set",
              "items": ["Monday 08:00–17:30", "Tuesday 08:00–17:00"]}]
     assert rows({"current_geo_exclude_ids": ["1", "2"], "geo_exclude_ids": []}) == [
-        {"label": "Geo exclude IDs", "kind": "group", "rows": [
+        {"label": "Excluded locations", "kind": "group", "rows": [
             {"label": "Before", "kind": "list", "items": ["1", "2"]},
             {"label": "After", "kind": "text", "text": "–"},
         ]}]
@@ -254,22 +281,22 @@ def test_one_column_is_a_list_and_a_single_item_is_text():
     headlines = [{"text": "Free Quote", "pinned_field": None}, {"text": "Call Today", "pinned_field": None}]
     assert rows({"headlines": headlines}) == [
         {"label": "Headlines", "kind": "list", "items": ["Free Quote", "Call Today"]}]
-    assert rows({"geo_target_ids": ["2276"]}) == [{"label": "Geo target IDs", "kind": "text", "text": "2276"}]
+    assert rows({"geo_target_ids": ["2276"]}) == [{"label": "Locations", "kind": "text", "text": "2276"}]
 
 
 def test_pins_add_a_column():
     headlines = [{"text": "Acme", "pinned_field": "HEADLINE_1"}, {"text": "Call Today", "pinned_field": None}]
     assert rows({"headlines": headlines}) == [
         {"label": "Headlines", "kind": "table", "columns": ["Text", "Pinned field"],
-         "rows": [["Acme", "HEADLINE_1"], ["Call Today", ""]]}]
+         "rows": [["Acme", "Headline 1"], ["Call Today", ""]]}]
 
 
 def test_wide_items_become_blocks_headed_by_their_name():
     changes = {"sitelinks": [{"final_url": "https://example.com/p", "link_text": "Pricing",
                               "description1": "Plans", "description2": "From 9 EUR"}]}
     assert rows(changes) == [{"label": "Sitelinks", "kind": "stack", "items": [
-        {"title": "Pricing", "lines": ["Final URL: https://example.com/p", "Description1: Plans",
-                                       "Description2: From 9 EUR"]}]}]
+        {"title": "Pricing", "lines": ["Final URL: https://example.com/p", "Description 1: Plans",
+                                       "Description 2: From 9 EUR"]}]}]
 
 
 def test_table_amounts_use_the_currency_of_the_plan():
@@ -310,7 +337,7 @@ def test_bookkeeping_is_left_out():
 def test_empty_fields_are_named_once_not_dropped():
     assert rows({"name": "x", "target_cpa": None, "keywords": [], "path1": "", "consent": {}}) == [
         {"label": "Name", "kind": "text", "text": "x"},
-        {"kind": "unset", "labels": ["Target CPA", "Keywords", "Path1", "Consent"]}]
+        {"kind": "unset", "labels": ["Target CPA", "Keywords", "Path 1", "Consent"]}]
 
 
 def test_a_display_is_shown_in_place_of_the_payload_it_describes():
@@ -348,9 +375,13 @@ def _leaves(value):
         "event_name": {"from": "generate_lead", "to": "lead"}}}}]}}},
 ])
 def test_every_text_a_plan_carries_is_on_the_card(changes):
-    shown = json.dumps(card_view(changes), ensure_ascii=False)
+    # Fixed values are respelled (EXACT -> Exact), so compare without case and underscores.
+    def plain(text):
+        return text.lower().replace("_", " ")
+
+    shown = plain(json.dumps(card_view(changes), ensure_ascii=False))
     for text in _leaves(changes):
-        assert json.dumps(text, ensure_ascii=False)[1:-1] in shown, text
+        assert plain(json.dumps(text, ensure_ascii=False)[1:-1]) in shown, text
 
 
 def test_odd_input_does_not_break_the_view():
@@ -370,6 +401,141 @@ def test_a_lookup_that_fails_costs_only_the_name():
     assert rows({"campaign_id": "5", "daily_budget": 20}, Broken()) == [
         {"label": "Campaign ID", "kind": "text", "text": "5"},
         {"label": "Daily budget", "kind": "text", "text": "20.00"}]
+
+
+# -- the title, the plain values and what applying does ----------------------
+
+
+@pytest.mark.parametrize("operation, entity_type, changes, title", [
+    ("pause_entity", "campaign", {}, "Pause campaign"),
+    ("remove_entity", "keyword", {}, "Remove keyword"),
+    ("remove_entity", "shared_criterion", {}, "Remove keyword from list"),
+    ("remove_entity", "campaign_asset", {}, "Remove asset from campaign"),
+    ("create_responsive_search_ad", "ad", {}, "Create responsive search ad"),
+    ("update_ai_max_settings", "campaign", {}, "Update AI Max settings"),
+    ("reddit_set_status", "ad_group", {"target_status": "PAUSED"}, "Pause ad group"),
+    ("microsoft_set_status", "keyword", {"target_status": "Active"}, "Enable keyword"),
+    ("gtm_publish_workspace", "gtm_workspace", {}, "Publish workspace"),
+    ("", "campaign", {}, None),
+])
+def test_the_title_names_the_action_and_the_thing(operation, entity_type, changes, title):
+    assert card_view(changes, operation=operation, entity_type=entity_type).get("title") == title
+
+
+def test_fixed_values_are_spelled_out_and_free_text_is_left_alone():
+    view = by_label({"bidding_strategy": "MAXIMIZE_CONVERSIONS", "match_type": "PHRASE", "channel_type": "SEARCH",
+                     "counting_method": "ONCE_PER_EVENT", "campaign_name": "BRAND_DE", "country_code": "DE",
+                     "keywords": ["CRM", "ERP_SOFTWARE"], "tag_type": "gaawe"})
+    assert view["Bidding strategy"]["text"] == "Maximize conversions"
+    assert view["Match type"]["text"] == "Phrase"
+    assert view["Channel type"]["text"] == "Search"
+    assert view["Counting method"]["text"] == "Once per event"
+    # A name, a country code, a keyword or a lower-case code is not one of the platform's values.
+    assert view["Campaign name"]["text"] == "BRAND_DE"
+    assert view["Country code"]["text"] == "DE"
+    assert view["Keywords"]["items"] == ["CRM", "ERP_SOFTWARE"]
+    assert view["Tag type"]["text"] == "gaawe"
+
+
+def test_acronyms_survive_and_misleading_api_names_get_googles():
+    view = by_label({"bidding_strategy": "MANUAL_CPC", "current_bidding_strategy": "TARGET_SPEND"})
+    assert view["Bidding strategy"] == {"label": "Bidding strategy", "kind": "change",
+                                        "from": "Maximize clicks", "to": "Manual CPC"}
+    assert by_label({"bidding_strategy": "TARGET_ROAS"})["Bidding strategy"]["text"] == "Target ROAS"
+
+
+def test_locations_and_languages_are_named():
+    names = {("geo", "2276"): "Germany", ("geo", "1004234"): "Munich, Bavaria, Germany", ("language", "1001"): "German"}
+    view = by_label({"geo_target_ids": ["2276", "1004234", "99"], "language_ids": ["1001"],
+                     "current_geo_exclude_ids": [], "geo_exclude_ids": ["1004234"]}, Account(names=names))
+    assert view["Locations"]["items"] == ["Germany (ID 2276)", "Munich, Bavaria, Germany (ID 1004234)", "99"]
+    assert view["Languages"]["text"] == "German (ID 1001)"
+    assert view["Excluded locations"] == {"label": "Excluded locations", "kind": "change", "from": "",
+                                          "to": "Munich, Bavaria, Germany (ID 1004234)"}
+
+
+@pytest.mark.parametrize("operation, changes, start", [
+    ("create_campaign", {}, "The campaign is created paused."),
+    ("create_ad_group", {}, "The ad group is created enabled, but it serves nothing"),
+    ("create_responsive_search_ad", {}, "The ad is created paused."),
+    ("add_keywords", {}, "The keywords are added enabled."),
+    ("remove_entity", {}, "This removes it for good"),
+    ("pause_entity", {"current_status": "ENABLED", "target_status": "PAUSED"}, "It stops serving"),
+    ("update_responsive_search_ad", {"final_url": "https://example.com"}, "The ad keeps its ID, its history"),
+])
+def test_the_card_says_what_applying_does(operation, changes, start):
+    effect = card_view(changes, operation=operation)["effect"]
+    assert effect["en"].startswith(start)
+    assert effect["de"] and effect["de"] != effect["en"]
+
+
+@pytest.mark.parametrize("operation, changes", [
+    # New ad text has its own warning on the preview.
+    ("update_responsive_search_ad", {"headlines": [{"text": "New", "pinned_field": None}]}),
+    # Nothing changes, and the preview says so.
+    ("pause_entity", {"current_status": "PAUSED", "target_status": "PAUSED"}),
+    # No fixed behaviour to state.
+    ("update_campaign", {"daily_budget": 30}),
+    ("reddit_create_ad", {}),
+])
+def test_no_effect_line_where_there_is_nothing_certain_to_say(operation, changes):
+    assert "effect" not in card_view(changes, operation=operation)
+
+
+def test_removing_does_not_repeat_the_title_as_a_row():
+    view = card_view({"action": "REMOVE", "entity_name": "old kw", "current_status": "ENABLED"},
+                     operation="remove_entity", entity_type="keyword")
+    assert view["rows"] == [{"label": "Current status", "kind": "text", "text": "Enabled"}]
+
+
+# -- the search ad example ---------------------------------------------------
+
+
+def _ad(changes):
+    first = card_view(changes)["rows"][0]
+    return first if first["kind"] == "ad" else None
+
+
+def test_a_new_search_ad_is_shown_as_an_ad():
+    changes = {"ad_group_id": "5", "final_url": "https://www.example.com/pricing?x=1", "path1": "Plans", "path2": "",
+               "headlines": [{"text": "Acme CRM", "pinned_field": None}, {"text": "Free Trial", "pinned_field": None},
+                             {"text": "From 9 EUR", "pinned_field": None}, {"text": "No Card", "pinned_field": None}],
+               "descriptions": [{"text": "Set up in minutes.", "pinned_field": None},
+                                {"text": "Cancel any time.", "pinned_field": None},
+                                {"text": "Third.", "pinned_field": None}]}
+    assert _ad(changes) == {
+        "label": "Example", "kind": "ad", "url": "example.com/Plans",
+        "headline": "Acme CRM | Free Trial | From 9 EUR", "text": "Set up in minutes. Cancel any time.",
+        "hint": "one of the combinations Google can show"}
+    # The plain rows still list every headline.
+    assert len(by_label(changes)["Headlines"]["items"]) == 4
+
+
+def test_the_example_puts_pinned_texts_where_they_are_pinned():
+    changes = {"final_url": "https://example.com", "descriptions": ["One.", "Two."],
+               "headlines": ["Free Trial", {"text": "Acme", "pinned_field": "HEADLINE_1"},
+                             {"text": "Since 1999", "pinned_field": "HEADLINE_3"}, "No Card"]}
+    assert _ad(changes)["headline"] == "Acme | Free Trial | Since 1999"
+    # Microsoft's previews write the pin into the text.
+    changes = {"final_url": "https://example.com", "descriptions": ["One."],
+               "headlines": ["Same Day", "Acme Plumbing [pinned Headline1]"]}
+    assert _ad(changes)["headline"] == "Acme Plumbing | Same Day"
+
+
+def test_an_edit_shows_the_whole_ad_as_it_will_be():
+    changes = {"ad_id": "9", "headlines": [{"text": "New", "pinned_field": None}, {"text": "Kept", "pinned_field": None}],
+               "current_headlines": ["Old", "Kept"], "path1": "", "current_path1": "Old-Path",
+               "_unchanged": {"descriptions": ["Still here."], "final_url": "https://example.com/x", "path2": "Shop"}}
+    ad = _ad(changes)
+    assert (ad["headline"], ad["text"], ad["url"]) == ("New | Kept", "Still here.", "example.com/Shop")
+    # What stays the same is not listed as if it were part of the change.
+    assert "Descriptions" not in by_label(changes) and "Unchanged" not in by_label(changes)
+
+
+def test_no_example_without_the_parts_of_an_ad():
+    assert _ad({"headlines": ["Only a headline"], "final_url": "https://example.com"}) is None
+    assert _ad({"keywords": ["a"], "campaign_name": "x"}) is None
+    assert _ad({"headlines": ["A"], "descriptions": ["B"]}) is None
 
 
 # -- how the view reaches the card ------------------------------------------
@@ -419,6 +585,36 @@ def test_an_ad_group_query_also_names_its_campaign(config):
         ("Campaign", "Brand", "ID 9"), ("Ad group", "Shoes", "ID 5")]
 
 
+def test_location_and_language_names_are_read_once_per_process(config):
+    approval._CONSTANT_NAMES.clear()
+    sent = []
+
+    def fake(_config, _customer_id, query):
+        sent.append(query)
+        if "FROM geo_target_constant" in query:
+            return [{"geo_target_constant.id": 2276, "geo_target_constant.canonical_name": "Germany"},
+                    {"geo_target_constant.id": 1004234, "geo_target_constant.canonical_name": "Munich,Bavaria,Germany"}]
+        if "FROM language_constant" in query:
+            return [{"language_constant.id": 1001, "language_constant.name": "German"}]
+        return []
+
+    plan = ChangePlan(operation="create_campaign", customer_id="1234567890", changes={
+        "campaign_name": "Launch", "geo_target_ids": ["2276", "1004234"], "language_ids": ["1001"]})
+    try:
+        with patch("adloop.ads.gaql.execute_query", side_effect=fake):
+            first = approval._card_view(plan)
+            second = approval._card_view(plan)
+    finally:
+        approval._CONSTANT_NAMES.clear()
+
+    rows_by_label = {r["label"]: r for r in first["rows"]}
+    assert rows_by_label["Locations"]["items"] == ["Germany (ID 2276)", "Munich, Bavaria, Germany (ID 1004234)"]
+    assert rows_by_label["Languages"]["text"] == "German (ID 1001)"
+    assert second == first
+    assert len(sent) == 2 and "geo_target_constant.id IN (2276, 1004234)" in sent[0]
+    assert first["title"] == "Create campaign" and first["effect"]["en"].startswith("The campaign is created paused")
+
+
 def test_a_plan_that_needs_nothing_asks_nothing(config):
     with patch("adloop.ads.gaql.execute_query", side_effect=AssertionError("no query expected")):
         view = approval._card_view(_plan(campaign_id="7", campaign_name="Brand", keywords=["a"]))
@@ -452,7 +648,9 @@ async def test_card_apps_get_the_view_next_to_the_code_and_the_model_does_not(co
             "pause_entity", {"entity_type": "campaign", "entity_id": "123", "customer_id": "1234567890"},
             raise_on_error=False)
     meta = result.meta[META_KEY]
-    assert meta["code"] and meta["view"]["rows"] == [{"label": "Target status", "kind": "text", "text": "PAUSED"}]
+    assert meta["code"] and meta["view"]["rows"] == [{"label": "Target status", "kind": "text", "text": "Paused"}]
+    assert meta["view"]["title"] == "Pause campaign"
+    assert meta["view"]["effect"]["de"].startswith("Die Auslieferung stoppt")
     assert "view" not in result.structured_content
     assert '"rows"' not in result.content[0].text
 
@@ -479,9 +677,10 @@ async def test_a_plan_the_view_cannot_describe_still_gets_its_card(config, monke
 
 def test_the_card_draws_every_kind_of_row_and_keeps_the_old_listing():
     html = card_html()
-    for kind in ("change", "list", "table", "stack", "group", "code", "unset"):
+    for kind in ("change", "list", "table", "stack", "group", "code", "unset", "ad"):
         assert f'row.kind === "{kind}"' in html, kind
     assert "view: meta.view" in html
+    assert "view.title" in html and "effect[lang]" in html
     # An older server sends no view: the raw fields are still listed.
     assert "forEach(([k, v]) => row(dl, k, v))" in html
     # The card only ever writes text, never markup, from a plan.
