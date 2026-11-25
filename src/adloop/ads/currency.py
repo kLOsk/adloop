@@ -51,6 +51,15 @@ def get_currency_code(config: AdLoopConfig, customer_id: str) -> str:
     lifetime of the server process. Falls back to ``"EUR"`` on any error;
     the fallback is not cached, so a passing failure does not stick.
     """
+    return account_currency(config, customer_id) or "EUR"
+
+
+def account_currency(config: AdLoopConfig, customer_id: str) -> str:
+    """The account's currency code, or "" when it cannot be read.
+
+    For places that must not guess: an approval card showing the wrong
+    currency next to a budget is worse than one showing none.
+    """
     from adloop.ads.client import normalize_customer_id
     from adloop.runtime import current_tenant
 
@@ -68,7 +77,7 @@ def get_currency_code(config: AdLoopConfig, customer_id: str) -> str:
     except Exception:
         code = None
     if not code:
-        return "EUR"
+        return ""
 
     _cache[key] = code
     return code

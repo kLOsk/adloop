@@ -205,17 +205,99 @@ def with_card(result: Any) -> Any:
     from mcp.types import TextContent
 
     preview = {**result, "approval": "card", "instructions": _instructions(plan.plan_id)}
+    meta = {"plan_id": plan.plan_id, "code": approval_code(plan), "tool": APPROVE_TOOL}
+    if (view := _card_view(plan)) is not None:
+        meta["view"] = view
     return ToolResult(
         content=[TextContent(type="text", text=json.dumps(preview, default=str))],
         structured_content=preview,
-        meta={
-            META_KEY: {
-                "plan_id": plan.plan_id,
-                "code": approval_code(plan),
-                "tool": APPROVE_TOOL,
-            }
-        },
+        meta={META_KEY: meta},
     )
+
+
+class _AccountLookup:
+    """Names and the currency a Google Ads preview leaves out, for the card.
+
+    Read from the account on first use, in one query at most, and only when
+    the card would otherwise show a bare ID or an amount without a currency.
+    Whatever cannot be read stays unknown: the card then shows the ID or the
+    plain number, which is what it showed before.
+    """
+
+    def __init__(self, plan: ChangePlan) -> None:
+        self._plan = plan
+        self._names: dict[tuple[str, str], str] | None = None
+        self._currency: str | None = None
+
+    def _google(self) -> bool:
+        return (self._plan.platform or "google") == "google" and bool(self._plan.customer_id)
+
+    def _load(self) -> None:
+        from adloop.safety.card_view import lookup_ids
+
+        self._names = {}
+        if not self._google():
+            return
+        ids = lookup_ids(self._plan.changes)
+        groups, campaigns = ids["ad_group"][:20], ids["campaign"][:20]
+        if groups:
+            query = (
+                "SELECT customer.currency_code, campaign.id, campaign.name, ad_group.id, ad_group.name "
+                f"FROM ad_group WHERE ad_group.id IN ({', '.join(groups)}) LIMIT 50"
+            )
+        elif campaigns:
+            query = (
+                "SELECT customer.currency_code, campaign.id, campaign.name "
+                f"FROM campaign WHERE campaign.id IN ({', '.join(campaigns)}) LIMIT 50"
+            )
+        else:
+            return
+        from adloop.ads.gaql import execute_query
+        from adloop.runtime import current_config
+
+        for row in execute_query(current_config(), self._plan.customer_id, query):
+            for kind in ("campaign", "ad_group"):
+                entity_id, name = row.get(f"{kind}.id"), row.get(f"{kind}.name")
+                if entity_id and name:
+                    self._names[(kind, str(entity_id))] = str(name)
+            if row.get("customer.currency_code"):
+                self._currency = str(row["customer.currency_code"])
+
+    def name(self, kind: str, entity_id: str) -> str:
+        if self._names is None:
+            try:
+                self._load()
+            except Exception:
+                self._names = self._names or {}
+        return self._names.get((kind, entity_id), "")
+
+    def currency(self) -> str:
+        if self._names is None:
+            self.name("", "")  # the name query, when one is due, also reads the currency
+        if self._currency is None:
+            self._currency = ""
+            if self._google():
+                from adloop.ads.currency import account_currency
+                from adloop.runtime import current_config
+
+                self._currency = account_currency(current_config(), self._plan.customer_id)
+        return self._currency
+
+
+def _card_view(plan: ChangePlan) -> dict | None:
+    """The card's readable rows, or None so the card lists the raw fields.
+
+    The view is a convenience on top of the preview: a plan it cannot
+    describe must still reach the card and stay approvable.
+    """
+    try:
+        from adloop.safety.card_view import card_view
+
+        view = card_view(plan.changes, _AccountLookup(plan))
+        json.dumps(view)
+        return view
+    except Exception:
+        return None
 
 
 @lru_cache(maxsize=1)
