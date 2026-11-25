@@ -457,14 +457,51 @@ def test_locations_and_languages_are_named():
 @pytest.mark.parametrize("operation, changes, start", [
     ("create_campaign", {}, "The campaign is created paused."),
     ("create_ad_group", {}, "The ad group is created enabled, but it serves nothing"),
-    ("create_responsive_search_ad", {}, "The ad is created paused."),
+    ("create_responsive_search_ad", {}, "The ad is created paused, and Google reviews it."),
     ("add_keywords", {}, "The keywords are added enabled."),
     ("remove_entity", {}, "This removes it for good"),
     ("pause_entity", {"current_status": "ENABLED", "target_status": "PAUSED"}, "It stops serving"),
     ("update_responsive_search_ad", {"final_url": "https://example.com"}, "The ad keeps its ID, its history"),
+    ("microsoft_create_rsa", {}, "The ad is created paused."),
+    ("microsoft_add_sitelinks", {}, "The extensions are created and linked. Microsoft reviews them"),
+    ("microsoft_add_to_negative_list", {"attached_campaigns": 2}, "Once applied, every campaign that uses this list"),
+    ("reddit_archive_entity", {"target_status": "ARCHIVED"}, "This archives it for good"),
+    ("create_conversion_action", {}, "The conversion action is created enabled."),
+    ("remove_conversion_action", {}, "Once removed, it records no new conversions."),
+    ("update_conversion_action", {"primary_for_goal": True}, "Once applied, it counts in the Conversions column"),
+    ("update_conversion_action", {"primary_for_goal": False, "default_value": 5.0},
+     "Once applied, it is still recorded under All conversions"),
+    ("update_conversion_action", {"counting_type": "ONE_PER_CLICK"}, "The change applies to conversions recorded"),
+    ("update_campaign", {"bidding_strategy": "MAXIMIZE_CONVERSIONS", "daily_budget": 30},
+     "Changing the bid strategy puts the campaign into Google's learning phase"),
+    ("update_campaign", {"daily_budget": 30, "current_daily_budget": 20}, "The new budget applies right away."),
 ])
 def test_the_card_says_what_applying_does(operation, changes, start):
     effect = card_view(changes, operation=operation)["effect"]
+    assert effect["en"].startswith(start)
+    assert effect["de"] and effect["de"] != effect["en"]
+
+
+@pytest.mark.parametrize("operation, entity_type, changes, start", [
+    ("reddit_set_status", "campaign", {"current_status": "ACTIVE", "target_status": "PAUSED"}, "It stops serving"),
+    ("reddit_set_status", "ad_group", {"current_status": "PAUSED", "target_status": "ACTIVE"}, "It can serve"),
+    # A Reddit ad waits for Reddit's review, which "it can serve" would hide.
+    ("reddit_set_status", "ad", {"current_status": "PAUSED", "target_status": "ACTIVE"},
+     "Once applied, the ad serves when Reddit has approved it"),
+    ("microsoft_set_status", "keyword", {"current_status": "Active", "target_status": "Paused"}, "It stops serving"),
+    ("microsoft_set_status", "ad", {"current_status": "Paused", "target_status": "Active"}, "It can serve"),
+    ("enable_entity", "campaign", {"current_status": "PAUSED"}, "It can serve"),
+    ("add_negative_keywords", "negative_keyword", {}, "Once applied, ads in this campaign no longer show"),
+    ("microsoft_add_negative_keywords", "ad_group", {}, "Once applied, ads in this ad group no longer show"),
+    # Only what can be paused is told that pausing is the reversible choice.
+    ("remove_entity", "keyword", {}, "This removes it for good and cannot be undone. Pausing is"),
+    ("remove_entity", "negative_keyword", {}, "This removes it. To get it back you would have to add it again."),
+    ("remove_entity", "campaign_criterion", {}, "This removes it. To get it back"),
+    ("remove_entity", "campaign_asset", {}, "This removes the link only. The asset itself stays"),
+    ("microsoft_remove_entity", "negative_list_item", {}, "This removes it. To get it back"),
+])
+def test_what_applying_does_depends_on_the_thing_it_is_applied_to(operation, entity_type, changes, start):
+    effect = card_view(changes, operation=operation, entity_type=entity_type)["effect"]
     assert effect["en"].startswith(start)
     assert effect["de"] and effect["de"] != effect["en"]
 
@@ -474,12 +511,58 @@ def test_the_card_says_what_applying_does(operation, changes, start):
     ("update_responsive_search_ad", {"headlines": [{"text": "New", "pinned_field": None}]}),
     # Nothing changes, and the preview says so.
     ("pause_entity", {"current_status": "PAUSED", "target_status": "PAUSED"}),
+    ("reddit_set_status", {"current_status": "PAUSED", "target_status": "PAUSED"}),
+    ("microsoft_set_status", {"current_status": "Active", "target_status": "Active"}),
     # No fixed behaviour to state.
-    ("update_campaign", {"daily_budget": 30}),
+    ("update_campaign", {"geo_target_ids": ["2276"]}),
+    ("update_campaign", {"target_cpa": 40}),
+    ("update_conversion_action", {"name": "Leads"}),
+    # These previews carry their own note on what applying does.
+    ("update_conversion_action", {"current_category": "DEFAULT", "category": "PHONE_CALL_LEAD"}),
+    ("reddit_create_campaign", {}),
+    ("reddit_create_ad_group", {}),
     ("reddit_create_ad", {}),
+    ("reddit_create_custom_audience", {}),
+    ("microsoft_create_campaign", {}),
+    ("microsoft_create_ad_group", {}),
+    ("microsoft_add_keywords", {}),
+    # A list that no campaign uses blocks nothing yet.
+    ("microsoft_add_to_negative_list", {"attached_campaigns": 0}),
 ])
 def test_no_effect_line_where_there_is_nothing_certain_to_say(operation, changes):
     assert "effect" not in card_view(changes, operation=operation)
+
+
+def test_a_demographic_exclusion_says_who_stops_seeing_the_ads():
+    excluded = card_view({"ad_group_id": "5", "campaign_id": "", "age_ranges": ["AGE_RANGE_18_24"], "negative": True},
+                         operation="add_demographic_criteria", entity_type="ad_group_criterion")
+    assert excluded["effect"]["en"] == "Once applied, ads in this ad group no longer show to people in these groups."
+    on_campaign = card_view({"ad_group_id": "", "campaign_id": "7", "genders": ["MALE"], "negative": True},
+                            operation="add_demographic_criteria", entity_type="campaign_criterion")
+    assert "ads in this campaign" in on_campaign["effect"]["en"]
+    # Narrowing to the groups has its own warning on the preview.
+    narrowed = card_view({"ad_group_id": "5", "age_ranges": ["AGE_RANGE_18_24"], "negative": False},
+                         operation="add_demographic_criteria", entity_type="ad_group_criterion")
+    assert "effect" not in narrowed
+
+
+@pytest.mark.parametrize("entity_type", ["campaign", "ad_group", "ad", "keyword", "extension_association"])
+def test_a_microsoft_removal_that_warns_by_itself_gets_no_second_line(entity_type):
+    assert "effect" not in card_view({}, operation="microsoft_remove_entity", entity_type=entity_type)
+
+
+def test_demographic_groups_are_named_the_way_google_ads_shows_them():
+    view = by_label({
+        "age_ranges": ["AGE_RANGE_18_24", "AGE_RANGE_65_UP", "AGE_RANGE_UNDETERMINED"],
+        "genders": ["FEMALE", "UNDETERMINED"],
+        "parental_statuses": ["NOT_A_PARENT"],
+        "income_ranges": ["INCOME_RANGE_90_UP", "INCOME_RANGE_50_60", "INCOME_RANGE_0_50"],
+    })
+    assert view["Age ranges"]["items"] == ["18 to 24", "65 and older", "Unknown age"]
+    assert view["Genders"]["items"] == ["Female", "Unknown"]
+    assert view["Parental statuses"]["text"] == "Not a parent"
+    # Income is a percentile counted from the top: 50_60 is the 41 to 50% band.
+    assert view["Income ranges"]["items"] == ["Top 10%", "41 to 50%", "Lower 50%"]
 
 
 def test_removing_does_not_repeat_the_title_as_a_row():

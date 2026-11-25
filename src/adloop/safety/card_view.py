@@ -84,12 +84,23 @@ _LABELS = {
 _ENUM_KEYS = frozenset({
     "status", "type", "category", "scope", "level", "objective", "occasion", "unit", "strategy", "kind",
     "channel", "network", "day_of_week", "call_to_action", "bid_type", "price_qualifier", "discount_modifier",
+    "age_ranges", "genders", "parental_statuses", "income_ranges",
 })
 _ENUM_SUFFIXES = ("_status", "_type", "_types", "_option", "_strategy", "_mode", "_method", "_priority",
                   "_field", "_model", "_level", "_category", "_on_create")
 _ENUM_VALUE = re.compile(r"^[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)*$")
-# Google's name for a value, where its API name would mislead.
-_ENUM_NAMES = {"TARGET_SPEND": "Maximize clicks"}
+# Google's name for a value, where its API name would mislead or is not words.
+_ENUM_NAMES = {
+    "TARGET_SPEND": "Maximize clicks",
+    "UNDETERMINED": "Unknown",
+    "AGE_RANGE_18_24": "18 to 24", "AGE_RANGE_25_34": "25 to 34", "AGE_RANGE_35_44": "35 to 44",
+    "AGE_RANGE_45_54": "45 to 54", "AGE_RANGE_55_64": "55 to 64", "AGE_RANGE_65_UP": "65 and older",
+    "AGE_RANGE_UNDETERMINED": "Unknown age",
+    # Household income is a percentile of the country, counted from the top.
+    "INCOME_RANGE_90_UP": "Top 10%", "INCOME_RANGE_80_90": "11 to 20%", "INCOME_RANGE_70_80": "21 to 30%",
+    "INCOME_RANGE_60_70": "31 to 40%", "INCOME_RANGE_50_60": "41 to 50%", "INCOME_RANGE_0_50": "Lower 50%",
+    "INCOME_RANGE_UNDETERMINED": "Unknown income",
+}
 # A row the title of the card already says.
 _SAID_BY_TITLE = {"remove_entity": frozenset({"action"})}
 # What a removal names when the entity type is API vocabulary.
@@ -114,6 +125,49 @@ _ASSETS_REVIEWED = (
     "The assets are created and linked. Google reviews them before they show with your ads.",
     "Die Assets werden angelegt und verknüpft. Google prüft sie, bevor sie mit deinen Anzeigen erscheinen.",
 )
+_EXTENSIONS_REVIEWED = (
+    "The extensions are created and linked. Microsoft reviews them before they show with your ads.",
+    "Die Erweiterungen werden angelegt und verknüpft. Microsoft prüft sie, bevor sie mit deinen Anzeigen "
+    "erscheinen.",
+)
+_KEYWORDS_ENABLED = (
+    "The keywords are added enabled. In an ad group that is serving, they can trigger ads right away.",
+    "Die Keywords werden aktiv hinzugefügt. In einer laufenden Anzeigengruppe können sie sofort Anzeigen auslösen.",
+)
+_LIST_BLOCKS = (
+    "Once applied, every campaign that uses this list stops showing for searches that match these keywords.",
+    "Nach dem Anwenden erscheinen alle Kampagnen mit dieser Liste nicht mehr bei Suchanfragen, die zu diesen "
+    "Keywords passen.",
+)
+_PAUSED = (
+    "It stops serving as soon as this is applied. You can enable it again at any time.",
+    "Die Auslieferung stoppt, sobald das angewendet ist. Du kannst es jederzeit wieder aktivieren.",
+)
+_ENABLED = (
+    "It can serve as soon as this is applied, provided everything above it is enabled too.",
+    "Es kann ausgeliefert werden, sobald das angewendet ist, sofern alles Übergeordnete ebenfalls aktiv ist.",
+)
+_REMOVED_FOR_GOOD = (
+    "This removes it for good and cannot be undone. Pausing is the reversible choice.",
+    "Das entfernt es endgültig und lässt sich nicht rückgängig machen. Pausieren ist die umkehrbare Wahl.",
+)
+# Targeting, negatives and list entries cannot be paused: removing is the only way, adding again the way back.
+_REMOVED = (
+    "This removes it. To get it back you would have to add it again.",
+    "Das entfernt es. Um es zurückzubekommen, müsstest du es neu hinzufügen.",
+)
+_UNLINKED = (
+    "This removes the link only. The asset itself stays in the account and can be linked again.",
+    "Das entfernt nur die Verknüpfung. Das Asset selbst bleibt im Konto und kann wieder verknüpft werden.",
+)
+_ARCHIVED = (
+    "This archives it for good: Reddit cannot restore an archived campaign, ad group or ad. "
+    "Pausing is the reversible choice.",
+    "Das archiviert es endgültig: Reddit kann archivierte Kampagnen, Anzeigengruppen und Anzeigen nicht "
+    "wiederherstellen. Pausieren ist die umkehrbare Wahl.",
+)
+_PAUSABLE = frozenset({"campaign", "ad_group", "ad", "keyword", "asset_group"})
+_LINKS = frozenset({"campaign_asset", "ad_group_asset", "customer_asset"})
 _EFFECTS: dict[str, tuple[str, str]] = {
     "create_campaign": _CREATED_PAUSED,
     "create_shopping_campaign": _CREATED_PAUSED,
@@ -122,42 +176,74 @@ _EFFECTS: dict[str, tuple[str, str]] = {
         "Die Anzeigengruppe wird aktiv angelegt, spielt aber nichts aus, bis eine ihrer Anzeigen aktiviert ist.",
     ),
     "create_responsive_search_ad": (
-        "The ad is created paused. Once you enable it, Google reviews it before it serves.",
-        "Die Anzeige wird pausiert angelegt. Sobald du sie aktivierst, prüft Google sie, bevor sie ausgespielt wird.",
+        "The ad is created paused, and Google reviews it. It serves once you enable it and it is approved.",
+        "Die Anzeige wird pausiert angelegt und von Google geprüft. Sie wird ausgespielt, sobald du sie aktivierst "
+        "und sie freigegeben ist.",
     ),
-    "add_keywords": (
-        "The keywords are added enabled. In an ad group that is serving, they can trigger ads right away.",
-        "Die Keywords werden aktiv hinzugefügt. In einer laufenden Anzeigengruppe können sie sofort Anzeigen auslösen.",
+    "microsoft_create_rsa": (
+        "The ad is created paused. It serves once you enable it and Microsoft has approved it.",
+        "Die Anzeige wird pausiert angelegt. Sie wird ausgespielt, sobald du sie aktivierst und Microsoft sie "
+        "freigegeben hat.",
     ),
-    "add_negative_keywords": (
-        "Once applied, ads in this campaign no longer show for searches that match these keywords.",
-        "Nach dem Anwenden erscheinen Anzeigen dieser Kampagne nicht mehr bei Suchanfragen, die zu diesen "
-        "Keywords passen.",
-    ),
-    "add_to_negative_keyword_list": (
-        "Once applied, every campaign that uses this list stops showing for searches that match these keywords.",
-        "Nach dem Anwenden erscheinen alle Kampagnen mit dieser Liste nicht mehr bei Suchanfragen, die zu diesen "
-        "Keywords passen.",
-    ),
-    "pause_entity": (
-        "It stops serving as soon as this is applied. You can enable it again at any time.",
-        "Die Auslieferung stoppt, sobald das angewendet ist. Du kannst es jederzeit wieder aktivieren.",
-    ),
-    "enable_entity": (
-        "It can serve as soon as this is applied, provided everything above it is enabled too.",
-        "Es kann ausgeliefert werden, sobald das angewendet ist, sofern alles Übergeordnete ebenfalls aktiv ist.",
-    ),
-    "remove_entity": (
-        "This removes it for good and cannot be undone. Pausing is the reversible choice.",
-        "Das entfernt es endgültig und lässt sich nicht rückgängig machen. Pausieren ist die umkehrbare Wahl.",
-    ),
+    "add_keywords": _KEYWORDS_ENABLED,
+    "add_to_negative_keyword_list": _LIST_BLOCKS,
     "create_sitelinks": _ASSETS_REVIEWED,
     "create_callouts": _ASSETS_REVIEWED,
     "create_structured_snippets": _ASSETS_REVIEWED,
+    "microsoft_add_sitelinks": _EXTENSIONS_REVIEWED,
+    "microsoft_add_callouts": _EXTENSIONS_REVIEWED,
+    "microsoft_add_structured_snippet": _EXTENSIONS_REVIEWED,
+    "microsoft_add_call_extension": _EXTENSIONS_REVIEWED,
+    "microsoft_add_image_extension": _EXTENSIONS_REVIEWED,
+    "reddit_archive_entity": _ARCHIVED,
+    "create_conversion_action": (
+        "The conversion action is created enabled. It only counts conversions that happen from now on.",
+        "Die Conversion-Aktion wird aktiv angelegt. Sie zählt nur Conversions, die ab jetzt passieren.",
+    ),
+    "remove_conversion_action": (
+        "Once removed, it records no new conversions. Campaigns that bid on it lose that signal.",
+        "Nach dem Entfernen zeichnet sie keine neuen Conversions mehr auf. Kampagnen, die darauf bieten, "
+        "verlieren dieses Signal.",
+    ),
 }
 _RSA_KEEPS_HISTORY = (
     "The ad keeps its ID, its history and its learning.",
     "Die Anzeige behält ihre ID, ihren Verlauf und ihre Lernphase.",
+)
+_REDDIT_AD_ENABLED = (
+    "Once applied, the ad serves when Reddit has approved it and its ad group and campaign are active.",
+    "Nach dem Anwenden wird die Anzeige ausgespielt, sobald Reddit sie freigegeben hat und Anzeigengruppe und "
+    "Kampagne aktiv sind.",
+)
+_NOW_PRIMARY = (
+    "Once applied, it counts in the Conversions column and Smart Bidding optimizes toward it, in campaigns "
+    "that use its goal.",
+    "Nach dem Anwenden zählt sie in der Spalte „Conversions“, und Smart Bidding optimiert darauf, in Kampagnen, "
+    "die ihr Zielvorhaben nutzen.",
+)
+_NOW_SECONDARY = (
+    "Once applied, it is still recorded under All conversions, but it leaves the Conversions column and "
+    "bidding no longer uses it, unless a custom goal includes it.",
+    "Nach dem Anwenden wird sie weiter unter „Alle Conversions“ erfasst, verlässt aber die Spalte „Conversions“ "
+    "und wird nicht mehr fürs Bieten genutzt, außer ein benutzerdefiniertes Zielvorhaben enthält sie.",
+)
+_FUTURE_CONVERSIONS = (
+    "The change applies to conversions recorded from now on. Earlier conversions stay as they are.",
+    "Die Änderung gilt für Conversions, die ab jetzt erfasst werden. Frühere Conversions bleiben, wie sie sind.",
+)
+# Settings of a conversion action that Google applies to future conversions only.
+_CONVERSION_SETTINGS = ("default_value", "always_use_default_value", "counting_type",
+                        "click_through_window_days", "view_through_window_days")
+_NEW_BID_STRATEGY = (
+    # The preview does not carry the current strategy, so this states the rule, not that it changes.
+    "Changing the bid strategy puts the campaign into Google's learning phase, usually for up to a week. "
+    "Ads keep serving meanwhile.",
+    "Ein Wechsel der Gebotsstrategie versetzt die Kampagne in Googles Lernphase, meist bis zu einer Woche. "
+    "Die Anzeigen laufen währenddessen weiter.",
+)
+_NEW_BUDGET = (
+    "The new budget applies right away. On a single day Google can spend up to twice the daily budget.",
+    "Das neue Budget gilt sofort. An einem einzelnen Tag kann Google bis zum Doppelten des Tagesbudgets ausgeben.",
 )
 
 
@@ -213,7 +299,7 @@ def card_view(
     view: dict[str, Any] = {"rows": rows}
     if title := _title(operation, entity_type, changes):
         view["title"] = title
-    if effect := _effect(operation, changes):
+    if effect := _effect(operation, entity_type or "", changes):
         view["effect"] = {"en": effect[0], "de": effect[1]}
     return view
 
@@ -235,14 +321,73 @@ def _title(operation: str, entity_type: str, changes: dict) -> str:
     return text[:1].upper() + text[1:]
 
 
-def _effect(operation: str, changes: dict) -> tuple[str, str] | None:
+def _blocks_searches(entity_type: str) -> tuple[str, str]:
+    where = ("ad group", "dieser Anzeigengruppe") if entity_type == "ad_group" else ("campaign", "dieser Kampagne")
+    return (
+        f"Once applied, ads in this {where[0]} no longer show for searches that match these keywords.",
+        f"Nach dem Anwenden erscheinen Anzeigen {where[1]} nicht mehr bei Suchanfragen, die zu diesen "
+        "Keywords passen.",
+    )
+
+
+def _excludes_people(changes: dict) -> tuple[str, str] | None:
+    if changes.get("negative") is not True:
+        return None  # narrowing to these groups has its own warning
+    where = ("campaign", "dieser Kampagne") if _has_value(changes.get("campaign_id")) else (
+        "ad group", "dieser Anzeigengruppe")
+    return (
+        f"Once applied, ads in this {where[0]} no longer show to people in these groups.",
+        f"Nach dem Anwenden erscheinen Anzeigen {where[1]} nicht mehr für Personen in diesen Gruppen.",
+    )
+
+
+def _status_effect(platform: str, entity_type: str, changes: dict) -> tuple[str, str] | None:
+    current = str(changes.get("current_status") or "").upper()
+    target = str(changes.get("target_status") or "").upper()
+    if not target or current == target:
+        return None  # nothing changes, and the preview says so
+    if target == "PAUSED":
+        return _PAUSED
+    if target in ("ENABLED", "ACTIVE"):
+        return _REDDIT_AD_ENABLED if (platform, entity_type) == ("reddit", "ad") else _ENABLED
+    return None
+
+
+def _effect(operation: str, entity_type: str, changes: dict) -> tuple[str, str] | None:
+    """What applying does, where that is certain and the preview does not say it already."""
+    platform = (m.group(0).rstrip("_") if (m := _PLATFORM_PREFIX.match(operation or "")) else "")
+    action = _PLATFORM_PREFIX.sub("", operation or "")
     if operation == "update_responsive_search_ad":
         # New text has its own warning on the preview; a URL or path edit is the free one.
         return None if ("headlines" in changes or "descriptions" in changes) else _RSA_KEEPS_HISTORY
     if operation in ("pause_entity", "enable_entity"):
-        current, target = changes.get("current_status"), changes.get("target_status")
-        if current and current == target:
-            return None  # nothing changes, and the preview says so
+        target = {"pause_entity": "PAUSED", "enable_entity": "ENABLED"}[operation]
+        return _status_effect("", entity_type, {"target_status": target, **changes})
+    if action == "set_status" and platform in ("reddit", "microsoft"):
+        return _status_effect(platform, entity_type, changes)
+    if operation == "remove_entity":
+        if entity_type in _LINKS:
+            return _UNLINKED
+        return _REMOVED_FOR_GOOD if entity_type in _PAUSABLE or not entity_type else _REMOVED
+    if operation == "microsoft_remove_entity":
+        # Deleting a campaign, ad group, ad or keyword and unlinking an extension carry their own warning.
+        return _REMOVED if entity_type in ("negative_keyword", "negative_list_item") else None
+    if operation in ("add_negative_keywords", "microsoft_add_negative_keywords"):
+        return _blocks_searches(entity_type)
+    if operation == "add_demographic_criteria":
+        return _excludes_people(changes)
+    if operation == "microsoft_add_to_negative_list":
+        return _LIST_BLOCKS if changes.get("attached_campaigns") else None
+    if operation == "update_conversion_action":
+        if isinstance(changes.get("primary_for_goal"), bool):
+            return _NOW_PRIMARY if changes["primary_for_goal"] else _NOW_SECONDARY
+        if "category" in changes:
+            return None  # moving it to another goal has its own warning
+        return _FUTURE_CONVERSIONS if any(key in changes for key in _CONVERSION_SETTINGS) else None
+    if operation == "update_campaign":
+        if _has_value(changes.get("bidding_strategy")):
+            return _NEW_BID_STRATEGY
+        return _NEW_BUDGET if _is_number(changes.get("daily_budget")) else None
     return _EFFECTS.get(operation)
 
 
