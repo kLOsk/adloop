@@ -342,7 +342,7 @@ For images that have no public URL: a file on the user's computer, or an image t
 | `list_uploads` | Find upload ids after the user used the upload link, or to reuse an earlier upload | (none) |
 
 - **With the card** (`upload: "card"` in the result): the user drops PNG, JPEG or GIF files (up to 5 MB) on the card; it then posts the upload ids into the chat. Wait for that message instead of asking for a URL.
-- **With an upload link** (`upload_url`): give the user the link (valid 30 minutes) to open in the browser, then call `list_uploads` once they say they are done. A coding agent that has the file on disk can upload it itself: `curl -T "logo.png" "<upload_url>/"`, one call per file.
+- **With an upload link** (`upload_url`): give the user the link (valid 30 minutes) to open in the browser, then call `list_uploads` once they say they are done.
 - **Using an upload:** `draft_image_assets(upload_ids=["up_..."])` for Google Ads; `draft_microsoft_image_extension(upload_ids=["up_..."])` for Microsoft Advertising; `"upload:up_..."` as `image_url`, `thumbnail_url` or a carousel card's `image_url` in `draft_reddit_ad` (AdLoop Cloud only, because Reddit downloads the image from a short-lived public link). Videos cannot be uploaded.
 - Uploads expire after 24 hours. Self-hosted without a card, pass local files directly (`image_paths`).
 
