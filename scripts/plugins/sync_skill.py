@@ -88,21 +88,33 @@ CLOUD_NOTE = (
 # heading line. Each runs until the next heading of the same or a higher level.
 CLOUD_DROPPED_SECTIONS = [
     "### Google Tag Manager Write Tools",
-    # Hidden on Cloud until the data processing agreement covers the CSVs'
-    # personal data; remove this entry when the runtime switch goes on.
-    "### Offline Conversion Uploads",
 ]
 
 # Anything matching these after the drop names a tool Cloud doesn't offer.
 CLOUD_UNAVAILABLE_MARKERS = [
     r"gtm\.write_enabled",
     r"\bdraft_\w*gtm\w*",
-    r"\bupload_conversion_csv\b",
-    r"\bdraft_upload_\w+",
 ]
 
 # (old, new) pairs. Every ``old`` must occur in the source at least once.
 CLOUD_REPLACEMENTS: list[tuple[str, str]] = [
+    # Offline conversion uploads on Cloud: the CSV always arrives through the
+    # upload card or link; a path on the user's machine is refused there.
+    (
+        "The CSV is not on the machine running AdLoop (always on AdLoop Cloud). Shows the upload "
+        "card, or returns an upload link",
+        "Always the first step: shows the upload card, or returns an upload link",
+    ),
+    (
+        "exactly one of `csv_path` (local file) or `upload_id`; `default_region` for numbers "
+        "without a country code; `consent`",
+        "`upload_id` from `upload_conversion_csv`; `default_region` for numbers without a "
+        "country code; `consent`",
+    ),
+    (
+        "exactly one of `csv_path` or `upload_id`; `default_region`; `consent`",
+        "`upload_id` from `upload_conversion_csv`; `default_region`; `consent`",
+    ),
     (
         "These rules teach you how to use them intelligently.",
         "These rules teach you how to use them intelligently.\n\n" + CLOUD_NOTE,
