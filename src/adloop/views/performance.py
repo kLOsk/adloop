@@ -186,8 +186,13 @@ def _alerts(rows: list[dict], result: dict) -> dict:
         idle = [i for i in result.get("zero_conversion_spenders") or [] if isinstance(i, dict)]
     else:
         idle = [{"name": r["name"], "cost": r["cost"]} for r in rows if r["cost"] > 0 and not r["conversions"]]
-    limited = [i for i in result.get("budget_limited_converters") or [] if isinstance(i, dict)]
-    if not limited:
+    flagged = [i for i in result.get("budget_limited_converters") or [] if isinstance(i, dict)]
+    # Google calls the budget-lost share incompatible with Maximize conversions
+    # and Maximize conversion value run without a target, so those campaigns
+    # are not presented as held back by budget.
+    # A campaign whose target could not be read is left out as well.
+    limited = [i for i in flagged if not i.get("budget_share_reliability")]
+    if not flagged:
         limited = [
             {"name": r["name"], "search_budget_lost_impression_share_pct": round(r["lost_to_budget"] * 100)}
             for r in rows

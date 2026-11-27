@@ -309,17 +309,20 @@ class TestDraftUpdateConversionAction:
         plan = _stored_plan(result)
         assert plan.changes["phone_call_duration_seconds"] == 90
 
-    def test_include_in_conversions_metric_is_mutable_on_update(self, config):
-        """Unlike create (where it's IMMUTABLE), the update path accepts
-        include_in_conversions_metric and passes it through."""
+    @pytest.mark.parametrize("value", [True, False])
+    def test_include_in_conversions_metric_is_refused(self, config, value):
+        """Google answers IMMUTABLE_FIELD at apply; validate_only misses it."""
         result = conversion_actions.draft_update_conversion_action(
             config,
             customer_id="1",
             conversion_action_id="6797442210",
-            include_in_conversions_metric=False,
+            name="Also a real change",
+            include_in_conversions_metric=value,
         )
-        plan = _stored_plan(result)
-        assert plan.changes["include_in_conversions_metric"] is False
+        assert result["error"] == "Validation failed"
+        details = " ".join(result["details"])
+        assert "IMMUTABLE_FIELD" in details
+        assert "primary_for_goal" in details and "category" in details
 
     def test_fallback_flag_warns_on_update(self, config):
         """Fix #2 also applies on update: positive default_value with the
@@ -507,25 +510,20 @@ class TestApplyUpdateConversionAction:
         mask_paths = list(op.update_mask.paths)
         assert mask_paths == ["phone_call_duration_seconds"]
 
-    def test_update_include_in_conversions_metric_fieldmask(self):
-        ca_svc = _FakeConversionActionService(
-            [_FakeResult("customers/1/conversionActions/6797442210")]
-        )
+    def test_a_stored_plan_with_include_in_conversions_metric_sends_nothing(self):
+        ca_svc = _FakeConversionActionService([])
         client = _FakeClient({"ConversionActionService": ca_svc})
 
-        conversion_actions._apply_update_conversion_action(
-            client,
-            "1",
-            {
-                "conversion_action_id": "6797442210",
-                "include_in_conversions_metric": False,
-            },
-        )
-
-        op = ca_svc.operations[0]
-        ca = op.update
-        assert ca.include_in_conversions_metric is False
-        assert list(op.update_mask.paths) == ["include_in_conversions_metric"]
+        with pytest.raises(ValueError, match="cannot be changed"):
+            conversion_actions._apply_update_conversion_action(
+                client,
+                "1",
+                {
+                    "conversion_action_id": "6797442210",
+                    "include_in_conversions_metric": False,
+                },
+            )
+        assert ca_svc.operations == []
 
 
 class TestApplyRemoveConversionAction:
@@ -5026,3 +5024,165 @@ class TestPrehashedEcIdentifiers:
         assert identifiers[0].hashed_email == _EMAIL_HASH
         assert identifiers[1].hashed_phone_number == _PHONE_HASH
 
+
+# ---------------------------------------------------------------------------
+# draft_update_conversion_action: category
+# ---------------------------------------------------------------------------
+
+
+class _CategoryClient:
+    """Real enums and types. GoogleAdsService answers the apply's re-read with
+    ``category`` (None: the action is gone); ConversionActionService records
+    each mutate as (validate_only, operations)."""
+
+    def __init__(self, category: str | None = "DEFAULT"):
+        base = GoogleAdsClient(credentials=None, developer_token="t", use_proto_plus=True,
+                               version=GOOGLE_ADS_API_VERSION)
+        self.enums, self.get_type = base.enums, base.get_type
+        self.rows = []
+        if category is not None:
+            row = base.get_type("GoogleAdsRow")
+            row.conversion_action.category = getattr(self.enums.ConversionActionCategoryEnum, category)
+            self.rows.append(row)
+        self.queries: list[str] = []
+        self.sent: list[tuple[bool, list]] = []
+
+    def get_service(self, name, *_args, **_kwargs):
+        if name == "GoogleAdsService":
+            return SimpleNamespace(search=self._search)
+        return SimpleNamespace(
+            conversion_action_path=lambda cid, ca_id: f"customers/{cid}/conversionActions/{ca_id}",
+            mutate_conversion_actions=self._mutate,
+        )
+
+    def _search(self, customer_id=None, query=None):
+        self.queries.append(query)
+        return iter(self.rows)
+
+    def _mutate(self, request=None, customer_id=None, operations=None):
+        if request is not None:  # sent through ValidateOnlyClient
+            self.sent.append((request.validate_only, list(request.operations)))
+        else:
+            self.sent.append((False, list(operations)))
+        return SimpleNamespace(
+            results=[SimpleNamespace(resource_name="customers/1/conversionActions/6797442210")],
+            partial_failure_error=None,
+        )
+
+
+class TestUpdateCategory:
+    @pytest.fixture
+    def current(self, monkeypatch):
+        row = {
+            "conversion_action.name": "Calls",
+            "conversion_action.category": "DEFAULT",
+            "conversion_action.status": "ENABLED",
+        }
+        monkeypatch.setattr("adloop.ads.gaql.execute_query", lambda *_a, **_k: [row])
+        return row
+
+    def _draft(self, config, category="phone_call_lead", conversion_action_id="6797442210"):
+        return conversion_actions.draft_update_conversion_action(
+            config, customer_id="1", conversion_action_id=conversion_action_id, category=category
+        )
+
+    def test_preview_shows_the_current_category_and_warns(self, config, current):
+        preview = self._draft(config)
+        assert preview["changes"]["current_category"] == "DEFAULT"
+        assert preview["changes"]["category"] == "PHONE_CALL_LEAD"
+        assert "'Calls' from the DEFAULT goal to the PHONE_CALL_LEAD goal" in preview["warnings"][0]
+
+    @pytest.fixture
+    def live(self, tmp_path):
+        """require_dry_run off, so dry_run=False really applies."""
+        return AdLoopConfig(
+            ads=AdsConfig(customer_id="123-456-7890"),
+            safety=SafetyConfig(require_dry_run=False, log_file=str(tmp_path / "audit.log")),
+        )
+
+    def _ads(self, monkeypatch, category="DEFAULT"):
+        """The account at apply time: the action's category is ``category`` there."""
+        client = _CategoryClient(category)
+        monkeypatch.setattr("adloop.ads.client.get_ads_client", lambda _cfg: client)
+        monkeypatch.setattr(
+            write, "_validate_with_google",
+            lambda cfg, plan: write._execute_plan(cfg, plan, validate_only=True),
+        )
+        return client
+
+    @pytest.mark.parametrize("dry_run", [True, False])
+    def test_an_unchanged_category_is_sent_and_only_the_category(self, live, current, monkeypatch, dry_run):
+        client = self._ads(monkeypatch)
+
+        result = write.confirm_and_apply(live, plan_id=self._draft(live)["plan_id"], dry_run=dry_run)
+
+        assert result["status"] == ("DRY_RUN_SUCCESS" if dry_run else "APPLIED"), result
+        [query] = client.queries
+        assert "SELECT conversion_action.category" in query
+        assert "conversion_action.id = 6797442210" in query
+        [(validate_only, [operation])] = client.sent
+        assert validate_only is dry_run
+        assert operation.update.category == client.enums.ConversionActionCategoryEnum.PHONE_CALL_LEAD
+        assert list(operation.update_mask.paths) == ["category"]
+
+    @pytest.mark.parametrize("dry_run", [True, False])
+    def test_a_category_changed_since_the_preview_sends_nothing(self, live, current, monkeypatch, dry_run):
+        plan_id = self._draft(live)["plan_id"]  # the preview showed DEFAULT
+        client = self._ads(monkeypatch, category="PURCHASE")  # moved in Google Ads meanwhile
+
+        result = write.confirm_and_apply(live, plan_id=plan_id, dry_run=dry_run)
+
+        assert client.sent == []
+        if dry_run:
+            assert result["status"] == "DRY_RUN_FAILED", result
+        assert "was changed in Google Ads after this preview" in result["error"]
+        assert "its category is now PURCHASE, the preview showed DEFAULT" in result["error"]
+        assert "nothing was sent" in result["error"]
+
+    def test_an_action_gone_since_the_preview_sends_nothing(self, live, current, monkeypatch):
+        plan_id = self._draft(live)["plan_id"]
+        client = self._ads(monkeypatch, category=None)
+
+        result = write.confirm_and_apply(live, plan_id=plan_id, dry_run=True)
+
+        assert result["status"] == "DRY_RUN_FAILED"
+        assert "Conversion action 6797442210 no longer exists; nothing was sent" in result["error"]
+        assert client.sent == []
+
+    def test_a_plan_without_a_category_skips_the_re_read(self):
+        client = _CategoryClient(category="PURCHASE")  # would refuse if it were read
+
+        conversion_actions._apply_update_conversion_action(
+            client, "1", {"conversion_action_id": "6797442210", "name": "Calls from ads"}
+        )
+
+        assert client.queries == []
+        [(_, [operation])] = client.sent
+        assert list(operation.update_mask.paths) == ["name"]
+
+    def test_invalid_category_is_refused_before_any_read(self, config):
+        # no_live_gaql from conftest fails this test if the draft queries anything.
+        result = self._draft(config, category="NOT_A_CATEGORY")
+        assert any("category 'NOT_A_CATEGORY' invalid" in d for d in result["details"])
+
+    def test_non_numeric_id_is_refused_before_any_read(self, config):
+        result = self._draft(config, conversion_action_id="1 OR 1=1")
+        assert any("must be numeric" in d for d in result["details"])
+
+    def test_the_same_category_is_nothing_to_change(self, config, current):
+        assert "already in category" in self._draft(config, category="DEFAULT")["error"]
+
+    def test_unknown_and_removed_actions_are_refused(self, config, current, monkeypatch):
+        current["conversion_action.status"] = "REMOVED"
+        assert "is removed" in self._draft(config)["error"]
+        monkeypatch.setattr("adloop.ads.gaql.execute_query", lambda *_a, **_k: [])
+        assert "was not found" in self._draft(config)["error"]
+
+    @pytest.mark.asyncio
+    async def test_the_mcp_tool_takes_category(self):
+        from adloop.server import mcp
+
+        tools = {tool.name: tool for tool in await mcp.list_tools()}
+        properties = tools["draft_update_conversion_action"].parameters["properties"]
+        assert properties["category"].get("description")
+        assert "IMMUTABLE_FIELD" in properties["include_in_conversions_metric"]["description"]

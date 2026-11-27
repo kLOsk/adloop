@@ -667,3 +667,29 @@ def test_apply_never_reads_local_paths_in_server_mode(tmp_path):
             },
         )
     assert google_ads_service.operations is None
+
+
+class TestNat64Addresses:
+    """DNS64 resolvers answer with 64:ff9b::/96 translations of IPv4 addresses."""
+
+    @pytest.mark.parametrize("address", ["64:ff9b::808:808", "64:ff9b::5db8:d822"])
+    def test_translation_of_a_public_address_is_public(self, address):
+        import ipaddress
+
+        assert image_fetch.non_public_reason(ipaddress.ip_address(address)) is None
+
+    @pytest.mark.parametrize(
+        "address, inner",
+        [("64:ff9b::7f00:1", "127.0.0.1"), ("64:ff9b::a00:1", "10.0.0.1"), ("64:ff9b::a9fe:a9fe", "169.254.169.254")],
+    )
+    def test_translation_of_a_private_address_is_refused(self, address, inner):
+        import ipaddress
+
+        assert image_fetch.non_public_reason(ipaddress.ip_address(address)) == f"embeds non-public address {inner}"
+
+    def test_url_check_accepts_a_public_site_behind_dns64(self, monkeypatch):
+        monkeypatch.setattr(
+            socket, "getaddrinfo",
+            lambda *_a, **_k: [(socket.AF_INET6, 0, 0, "", ("64:ff9b::808:808", 0, 0, 0))],
+        )
+        assert write._ssrf_error("https://example.com/") is None

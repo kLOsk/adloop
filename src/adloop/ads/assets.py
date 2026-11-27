@@ -136,6 +136,48 @@ def _account_scope_warning(kind: str) -> str:
     )
 
 
+_SHOW_DATES = ("start_date", "end_date")
+
+
+def _show_date_errors(label: str, start_date: str, end_date: str) -> list[str]:
+    """Errors for the first and last day an asset shows (YYYY-MM-DD, either may be empty)."""
+    errors = [
+        f"{label}{field} '{value}' must be a date YYYY-MM-DD"
+        for field, value in (("start_date", start_date), ("end_date", end_date))
+        if value and not _iso_date(value)
+    ]
+    if not errors and start_date and end_date and end_date < start_date:
+        errors.append(f"{label}end_date {end_date} is before start_date {start_date}")
+    return errors
+
+
+def _past_end_date_warning(label: str, end_date: str) -> list[str]:
+    from datetime import UTC, datetime
+
+    if end_date and _iso_date(end_date) and end_date < datetime.now(UTC).date().isoformat():
+        return [f"{label}end_date {end_date} is in the past, so it would never show."]
+    return []
+
+
+def _show_date_edit(
+    new: dict, clear_fields: list[str] | None, current: dict
+) -> tuple[dict, list[str]]:
+    """``(changed, errors)`` for start_date / end_date on an in-place edit.
+
+    A date passed is set, one named in ``clear_fields`` is removed, the rest
+    stay. The check for end before start runs on the dates the asset ends up with.
+    """
+    clear = [_clean(field) for field in clear_fields or []]
+    errors = [f"clear_fields takes start_date and/or end_date, got '{f}'" for f in clear if f not in _SHOW_DATES]
+    errors += [f"{f} is both set and in clear_fields" for f in _SHOW_DATES if new[f] and f in clear]
+    if errors:
+        return {}, errors
+    changed = {f: new[f] for f in _SHOW_DATES if new[f] and new[f] != current[f]}
+    changed.update({f: "" for f in _SHOW_DATES if f in clear and current[f]})
+    after = {f: changed.get(f, current[f]) for f in _SHOW_DATES}
+    return changed, _show_date_errors("", after["start_date"], after["end_date"])
+
+
 def _validate_callout_texts(callouts: list[str]) -> tuple[list[str], list[str]]:
     errors: list[str] = []
     validated: list[str] = []
@@ -218,8 +260,14 @@ def draft_callouts(
     ad_group_id: str = "",
     scope: str = "",
     callouts: list[str] | None = None,
+    start_date: str = "",
+    end_date: str = "",
 ) -> dict:
-    """Draft callout assets linked to an ad group, a campaign or the account."""
+    """Draft callout assets linked to an ad group, a campaign or the account.
+
+    ``start_date`` / ``end_date`` (YYYY-MM-DD) are the first and last day every
+    callout of this draft shows.
+    """
     from adloop.safety.preview import ChangePlan, store_plan
 
     if blocked := _blocked("create_callouts", config):
@@ -227,6 +275,8 @@ def draft_callouts(
     scope, campaign_id, ad_group_id, errors = resolve_scope(scope, campaign_id, ad_group_id)
     validated, text_errors = _validate_callout_texts(callouts or [])
     errors.extend(text_errors)
+    dates = {"start_date": _clean(start_date), "end_date": _clean(end_date)}
+    errors.extend(_show_date_errors("", **dates))
     if errors:
         return {"error": "Validation failed", "details": errors}
 
@@ -237,12 +287,15 @@ def draft_callouts(
         entity_id=entity_id,
         customer_id=customer_id,
         changes={"scope": scope, "campaign_id": campaign_id, "ad_group_id": ad_group_id,
-                 "callouts": validated},
+                 "callouts": validated, **{k: v for k, v in dates.items() if v}},
     )
     store_plan(plan)
     preview = plan.to_preview()
+    warnings = _past_end_date_warning("", dates["end_date"])
     if scope == "account":
-        preview["warnings"] = [_account_scope_warning("callouts")]
+        warnings.insert(0, _account_scope_warning("callouts"))
+    if warnings:
+        preview["warnings"] = warnings
     return preview
 
 
@@ -435,12 +488,18 @@ def link_asset_to_customer(
 # ---------------------------------------------------------------------------
 
 # What each edit reads and pins: plan key -> GAQL field.
-_CALLOUT_FIELDS = {"callout_text": "asset.callout_asset.callout_text"}
+_CALLOUT_FIELDS = {
+    "callout_text": "asset.callout_asset.callout_text",
+    "start_date": "asset.callout_asset.start_date",
+    "end_date": "asset.callout_asset.end_date",
+}
 _SITELINK_FIELDS = {
     "link_text": "asset.sitelink_asset.link_text",
     "description1": "asset.sitelink_asset.description1",
     "description2": "asset.sitelink_asset.description2",
     "final_url": "asset.final_urls",
+    "start_date": "asset.sitelink_asset.start_date",
+    "end_date": "asset.sitelink_asset.end_date",
 }
 _SNIPPET_FIELDS = {
     "header": "asset.structured_snippet_asset.header",
@@ -510,25 +569,39 @@ def update_callout(
     customer_id: str = "",
     asset_id: str = "",
     callout_text: str = "",
+    start_date: str = "",
+    end_date: str = "",
+    clear_fields: list[str] | None = None,
 ) -> dict:
-    """Draft an in-place edit of a callout asset's text."""
+    """Draft an in-place edit of a callout asset; what is not passed stays as it is."""
     if blocked := _blocked("update_callout", config):
         return blocked
     asset_id = _clean(asset_id)
     errors: list[str] = [] if _is_numeric_id(asset_id) else [f"asset_id must be numeric, got '{asset_id}'"]
-    validated, text_errors = _validate_callout_texts([callout_text or ""])
-    errors.extend(text_errors)
+    text = _clean(callout_text)
+    dates = {"start_date": _clean(start_date), "end_date": _clean(end_date)}
+    if text:
+        validated, text_errors = _validate_callout_texts([text])
+        errors.extend(text_errors)
+    elif not any(dates.values()) and not clear_fields:
+        errors.append("No changes specified: pass callout_text, start_date, end_date and/or clear_fields")
     if errors:
         return {"error": "Validation failed", "details": errors}
-    text = validated[0]
 
     current, error = _asset_for_edit(config, customer_id, asset_id, _CALLOUT_FIELDS, "CALLOUT")
     if error:
         return error
-    if current["callout_text"] == text:
-        return {"error": f"Callout {asset_id} already reads '{text}'; nothing to change"}
-    return _edit_plan("update_callout", customer_id, asset_id, {"callout_text": text},
-                      {"callout_text": current["callout_text"]})
+    changed, date_errors = _show_date_edit(dates, clear_fields, current)
+    if date_errors:
+        return {"error": "Validation failed", "details": date_errors}
+    if text and text != current["callout_text"]:
+        changed = {"callout_text": text, **changed}
+    if not changed:
+        return {"error": f"Callout {asset_id} already has these values; nothing to change"}
+    preview = _edit_plan("update_callout", customer_id, asset_id, changed,
+                         {key: current[key] for key in changed})
+    preview["warnings"] += _past_end_date_warning("", changed.get("end_date", ""))
+    return preview
 
 
 def update_sitelink(
@@ -540,8 +613,14 @@ def update_sitelink(
     final_url: str = "",
     description1: str = "",
     description2: str = "",
+    start_date: str = "",
+    end_date: str = "",
+    clear_fields: list[str] | None = None,
 ) -> dict:
-    """Draft an in-place edit of a sitelink asset; empty fields stay as they are."""
+    """Draft an in-place edit of a sitelink asset; empty fields stay as they are.
+
+    ``clear_fields`` removes ``start_date`` and/or ``end_date``.
+    """
     from adloop.ads.write import _validate_urls
 
     if blocked := _blocked("update_sitelink", config):
@@ -555,8 +634,12 @@ def update_sitelink(
     for key in ("description1", "description2"):
         if len(new[key]) > 35:
             errors.append(f"{key} is {len(new[key])} chars (max 35)")
-    if not any(new.values()):
-        errors.append("No changes specified: pass link_text, final_url, description1 and/or description2")
+    dates = {"start_date": _clean(start_date), "end_date": _clean(end_date)}
+    if not any(new.values()) and not any(dates.values()) and not clear_fields:
+        errors.append(
+            "No changes specified: pass link_text, final_url, description1, description2, "
+            "start_date, end_date and/or clear_fields"
+        )
     if errors:
         return {"error": "Validation failed", "details": errors}
 
@@ -564,7 +647,10 @@ def update_sitelink(
     if error:
         return error
     previous = {key: current[key] for key in _SITELINK_FIELDS}
-    changed = {k: v for k, v in new.items() if v and v != previous[k]}
+    date_changes, date_errors = _show_date_edit(dates, clear_fields, previous)
+    if date_errors:
+        return {"error": "Validation failed", "details": date_errors}
+    changed = {**{k: v for k, v in new.items() if v and v != previous[k]}, **date_changes}
     if not changed:
         return {"error": f"Sitelink {asset_id} already has these values; nothing to change"}
     after = {**previous, **changed}
@@ -578,8 +664,10 @@ def update_sitelink(
         if url_errors.get(changed["final_url"]):
             return {"error": "URL validation failed: sitelinks must point to working URLs",
                     "details": [f"'{changed['final_url']}' is not reachable: {url_errors[changed['final_url']]}"]}
-    return _edit_plan("update_sitelink", customer_id, asset_id, changed,
-                      {k: previous[k] for k in changed})
+    preview = _edit_plan("update_sitelink", customer_id, asset_id, changed,
+                         {k: previous[k] for k in changed})
+    preview["warnings"] += _past_end_date_warning("", changed.get("end_date", ""))
+    return preview
 
 
 def update_structured_snippet(
@@ -679,6 +767,9 @@ def _create_and_link(client, cid: str, assets: list[dict], field_type, populate,
 def _apply_create_callouts(client, cid: str, changes: dict) -> dict:
     def populate(asset, payload):
         asset.callout_asset.callout_text = payload["callout_text"]
+        for field in _SHOW_DATES:
+            if changes.get(field):
+                setattr(asset.callout_asset, field, changes[field])
 
     return _create_and_link(client, cid, [{"callout_text": t} for t in changes["callouts"]],
                             client.enums.AssetFieldTypeEnum.CALLOUT, populate, changes)
@@ -765,8 +856,13 @@ def _apply_update_callout(client, cid: str, changes: dict) -> dict:
     _check_unchanged(client, cid, changes, _CALLOUT_FIELDS)
 
     def set_fields(asset):
-        asset.callout_asset.callout_text = changes["callout_text"]
-        return ["callout_asset.callout_text"]
+        paths = []
+        for key in _CALLOUT_FIELDS:
+            if key in changes:
+                if changes[key]:  # a masked field left unset is cleared
+                    setattr(asset.callout_asset, key, changes[key])
+                paths.append(f"callout_asset.{key}")
+        return paths
 
     return _apply_asset_update(client, cid, changes["asset_id"], set_fields)
 
@@ -783,6 +879,11 @@ def _apply_update_sitelink(client, cid: str, changes: dict) -> dict:
         if changes.get("final_url"):
             asset.final_urls.append(changes["final_url"])
             paths.append("final_urls")
+        for key in _SHOW_DATES:
+            if key in changes:
+                if changes[key]:  # a masked field left unset is cleared
+                    setattr(asset.sitelink_asset, key, changes[key])
+                paths.append(f"sitelink_asset.{key}")
         return paths
 
     return _apply_asset_update(client, cid, changes["asset_id"], set_fields)
@@ -1132,6 +1233,14 @@ def update_call_asset(
     return preview
 
 
+def _first_schedule_warning(campaign_name: str) -> str:
+    return (
+        f"Campaign '{campaign_name}' has no ad schedule, so it serves at all hours. "
+        "With these windows it serves only inside them: every other hour, and every "
+        "day without a window, stops serving."
+    )
+
+
 def _campaign_schedule(config: AdLoopConfig, customer_id: str, campaign_id: str) -> tuple[dict | None, list[dict]]:
     """The campaign (name, status, account time zone) and its current windows."""
     from adloop.ads.gaql import execute_query
@@ -1193,11 +1302,7 @@ def add_ad_schedule(
     warnings = [_time_zone_note(campaign["time_zone"])]
     first = not existing
     if first:
-        warnings.append(
-            f"Campaign '{campaign['name']}' has no ad schedule, so it serves at all hours. "
-            "With these windows it serves only inside them: every other hour, and every "
-            "day without a window, stops serving."
-        )
+        warnings.append(_first_schedule_warning(campaign["name"]))
     if campaign["status"] != "ENABLED":
         warnings.append(f"The campaign is {campaign['status']}; the schedule applies once it is enabled.")
     plan = ChangePlan(

@@ -3,9 +3,9 @@
 The fetched bytes are uploaded into the user's Google Ads account, where
 they become visible. A fetch that could be steered at an internal address
 (cloud metadata, a database admin page, a loopback service) would therefore
-be a way to exfiltrate whatever lives there. So, unlike the up/down
-reachability check for landing pages, this fetcher closes the DNS-rebinding
-gap:
+be a way to exfiltrate whatever lives there. So this fetcher closes the
+DNS-rebinding gap (the reachability check for landing pages reuses its
+pinned connections):
 
 * the hostname is resolved exactly once per request, and every resolved
   address must be public;
@@ -77,9 +77,16 @@ def non_public_reason(
             if inner_reason is not None:
                 return f"maps to {addr.ipv4_mapped}, {inner_reason}"
             return None
-        embedded = [addr.sixtofour, *(addr.teredo or ())]
         if addr in _NAT64_PREFIX:
-            embedded.append(ipaddress.IPv4Address(int(addr) & 0xFFFFFFFF))
+            # A DNS64 resolver's translation of an IPv4 address (RFC 6052):
+            # the gateway connects to that address, so it alone decides.
+            # Python calls the whole prefix reserved, which says nothing here.
+            inner = ipaddress.IPv4Address(int(addr) & 0xFFFFFFFF)
+            inner_reason = non_public_reason(inner)
+            if inner_reason is not None:
+                return f"embeds non-public address {inner}"
+            return None
+        embedded = [addr.sixtofour, *(addr.teredo or ())]
         for inner in embedded:
             if inner is not None and non_public_reason(inner) is not None:
                 return f"embeds non-public address {inner}"

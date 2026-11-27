@@ -163,7 +163,7 @@ class TestOrchestrationInstructions:
         text = _build_orchestration_instructions()
         # GDPR consent gap is the #1 source of misdiagnosed "tracking issues".
         assert "GDPR" in text or "consent" in text.lower()
-        # Geo / language targeting is mandatory.
+        # Geo targeting is mandatory; language is explained (Search takes none).
         assert "geo" in text.lower()
         assert "language" in text.lower()
 
@@ -441,6 +441,24 @@ class TestToolsets:
             assert "run_ga4_report" not in tools
             writes = [n for n, t in tools.items() if not t.annotations.readOnlyHint and n != "confirm_and_apply"]
             assert writes == []
+        finally:
+            server.mcp._transforms[:] = saved
+
+    @pytest.mark.asyncio
+    async def test_cards_survive_a_toolset_selection(self, monkeypatch):
+        from adloop import server
+        from adloop.safety.approval import CARD_URI
+        from adloop.uploads import UPLOAD_CARD_URI
+        from adloop.views import VIEW_URI
+
+        monkeypatch.setenv("ADLOOP_TOOLSETS", "ads,ga4")
+        saved = list(server.mcp._transforms)
+        server._apply_toolsets_env()
+        try:
+            uris = {str(r.uri) for r in await server.mcp.list_resources()}
+            # Write tools point at the approval card; without it the app shows
+            # "Couldn't load this widget".
+            assert {CARD_URI, UPLOAD_CARD_URI, VIEW_URI} <= uris
         finally:
             server.mcp._transforms[:] = saved
 

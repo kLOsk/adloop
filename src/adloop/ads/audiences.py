@@ -51,8 +51,9 @@ _KIND_LABELS = {
     "custom_audience": "custom segments",
     "combined_audience": "combined segments",
 }
-# Search shows ads to a remarketing list once it has this many active users.
-_SEARCH_MIN_SIZE = 1000
+# Google serves a remarketing list from 100 active users in the last 30 days,
+# on Search as on Display and YouTube.
+_SEARCH_MIN_SIZE = 100
 _MAX_PER_DRAFT = 50
 
 

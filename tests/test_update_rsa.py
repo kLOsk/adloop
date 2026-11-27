@@ -1237,6 +1237,17 @@ class TestInsertionTagLength:
     def _desc():
         return [{"text": "Drain cleaning done right.", "pinned_field": None}] * 2
 
+    def test_countdown_counts_as_its_rendered_text(self):
+        assert write._counted_length("Event in {COUNTDOWN(2026-12-31 19:00:00,14)}") == 17
+        assert write._counted_length("{GLOBAL_COUNTDOWN(2026-12-31 19:00:00)} left") == 13
+        # Not the countdown form, so every character counts.
+        broken = "{COUNTDOWN(31.12.2026)}"
+        assert write._counted_length(broken) == len(broken)
+        errors = write._validate_rsa_assets(
+            self._hl("Sale ends in {COUNTDOWN(2026-12-31 19:00:00,14)}"), self._desc()
+        )
+        assert not any("exceeds" in e for e in errors)
+
     def test_keyword_insertion_counts_default_text_only(self):
         assert write._counted_length("{KeyWord:Clogged Drain Service}") == 21
         # A space after the colon is kept in the count: stricter, never looser.
@@ -1280,3 +1291,69 @@ class TestInsertionTagLength:
             ],
         )
         assert "error" not in result, result
+
+
+# ---------------------------------------------------------------------------
+# The preview shows the ad as it is now (before -> after, and where it sits)
+# ---------------------------------------------------------------------------
+
+
+_LIVE_AD = {
+    "ad_group.name": "Shoes",
+    "campaign.name": "Brand - DE",
+    "ad_group_ad.ad.final_urls": ["https://example.com/old"],
+    "ad_group_ad.ad.responsive_search_ad.headlines": ["Old One", "Kept", "Third"],
+    "ad_group_ad.ad.responsive_search_ad.descriptions": ["First description.", "Second description."],
+    "ad_group_ad.ad.responsive_search_ad.path1": "Shop",
+    "ad_group_ad.ad.responsive_search_ad.path2": "",
+}
+
+
+class TestCurrentAd:
+    def _draft(self, config, monkeypatch, rows, **kwargs):
+        sent = []
+
+        def fake(_config, customer_id, query):
+            sent.append((customer_id, query))
+            if isinstance(rows, Exception):
+                raise rows
+            return rows
+
+        monkeypatch.setattr("adloop.ads.gaql.execute_query", fake)
+        return write.update_responsive_search_ad(config, customer_id="1234567890", ad_id="999", **kwargs), sent
+
+    def test_changed_fields_carry_their_current_value(self, config, monkeypatch):
+        preview, sent = self._draft(
+            config, monkeypatch, [_LIVE_AD], headlines=["New One", "Kept", "Third"], path1="Sale")
+        changes = preview["changes"]
+
+        assert len(sent) == 1 and "WHERE ad_group_ad.ad.id = 999" in sent[0][1]
+        assert list(changes)[:3] == ["ad_id", "campaign_name", "ad_group_name"]
+        assert (changes["campaign_name"], changes["ad_group_name"]) == ("Brand - DE", "Shoes")
+        assert changes["current_headlines"] == ["Old One", "Kept", "Third"]
+        assert changes["current_path1"] == "Shop"
+        # What the update leaves alone is kept apart from the change.
+        assert "current_descriptions" not in changes and "current_final_url" not in changes
+        assert changes["_unchanged"] == {
+            "final_url": "https://example.com/old",
+            "descriptions": ["First description.", "Second description."],
+        }
+
+    def test_the_applier_sends_only_what_was_asked_for(self, config, monkeypatch):
+        preview, _ = self._draft(config, monkeypatch, [_LIVE_AD], path1="Sale")
+        plan = preview_store.get_plan(preview["plan_id"])
+        ad_service = _FakeAdService()
+
+        write._apply_update_rsa(_FakeClient(ad_service), "1234567890", plan.changes)
+
+        operation = ad_service.captured_operations[0]
+        assert list(operation.update_mask.paths) == ["responsive_search_ad.path1"]
+
+    def test_an_unknown_ad_is_refused_before_a_preview_exists(self, config, monkeypatch):
+        result, _ = self._draft(config, monkeypatch, [], path1="Sale")
+        assert "No ad with ID 999" in result["error"]
+        assert "plan_id" not in result
+
+    def test_a_failed_lookup_leaves_the_preview_as_it_was(self, config, monkeypatch):
+        preview, _ = self._draft(config, monkeypatch, RuntimeError("API down"), path1="Sale")
+        assert preview["changes"] == {"ad_id": "999", "path1": "Sale"}

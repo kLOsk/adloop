@@ -91,7 +91,9 @@ _STANDARD_PIXEL_EVENTS = (
     "custom",
 )
 
-_account_meta_cache: dict[str, dict] = {}
+# Keyed by (tenant, ad account): a hosted server runs many tenants in one
+# process, and one tenant must not be served what another's login read.
+_account_meta_cache: dict[tuple[str, str], dict] = {}
 
 
 # ---------------------------------------------------------------------------
@@ -116,7 +118,10 @@ def resolve_account(config: AdLoopConfig, ad_account_id: str = "") -> str:
 
 def account_meta(config: AdLoopConfig, ad_account_id: str) -> dict:
     """Currency + time zone of an ad account, cached per process."""
-    cached = _account_meta_cache.get(ad_account_id)
+    from adloop.runtime import current_tenant
+
+    key = (current_tenant(), ad_account_id)
+    cached = _account_meta_cache.get(key)
     if cached is not None:
         return cached
     data = data_of(reddit_get(config, f"ad_accounts/{ad_account_id}"))
@@ -127,7 +132,7 @@ def account_meta(config: AdLoopConfig, ad_account_id: str) -> dict:
         "business_id": str(data.get("business_id") or ""),
         "admin_approval": str(data.get("admin_approval") or ""),
     }
-    _account_meta_cache[ad_account_id] = meta
+    _account_meta_cache[key] = meta
     return meta
 
 

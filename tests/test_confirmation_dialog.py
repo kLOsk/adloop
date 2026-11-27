@@ -122,6 +122,32 @@ async def test_irreversible_changes_need_both_ticks(fake_apply):
     assert "cannot be undone" in asked[0]
 
 
+@pytest.mark.parametrize("spelling", ["off", "OFF", "f", "n", "no", "0", "false", " false ", 0, 0.0])
+async def test_every_spelling_of_a_real_apply_gets_the_dialog(fake_apply, spelling):
+    """dry_run="off" reached the real apply without the dialog: the tool
+    reads it as False, the dialog check only knew "false", "0" and "no"."""
+    result, asked = await _call(_plan(), answer=ElicitResult(action="decline"), dry_run=spelling)
+
+    assert asked
+    assert result["status"] == "NOT_CONFIRMED"
+    assert fake_apply == []
+
+
+@pytest.mark.parametrize("spelling", ["off", "f", "n", 0])
+def test_a_real_apply_is_recognised_however_it_is_spelled(spelling):
+    assert server._wants_real_apply({"plan_id": "x", "dry_run": spelling}) is True
+
+
+@pytest.mark.parametrize("arguments", [{"plan_id": "x"}, {"dry_run": True}, {"dry_run": "true"}, {"dry_run": "on"}, {"dry_run": 1}])
+def test_a_dry_run_is_not_a_real_apply(arguments):
+    assert server._wants_real_apply(arguments) is False
+
+
+def test_an_unreadable_dry_run_counts_as_a_real_apply():
+    assert server._wants_real_apply({"dry_run": "maybe"}) is True
+    assert server._wants_real_apply({"dry_run": None}) is True
+
+
 async def test_apps_without_dialogs_keep_the_chat_flow(fake_apply):
     status, _ = await _apply(_plan())
     assert status == "APPLIED"

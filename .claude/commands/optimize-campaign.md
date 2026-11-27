@@ -43,12 +43,12 @@ Follow this checklist in order — earlier items have higher impact.
 
 ## 6. Budget
 
-- Is daily budget >= 5x target CPA?
+- Is daily budget >= 5x target CPA? (AdLoop's rule of thumb, not a Google requirement; Google's low-traffic guide suggests 2 to 3 times)
 - If not: either increase budget or focus on reducing CPA first
 - Use `estimate_budget` if considering budget changes
 
 ## Rules
 
 - One change at a time — show preview, wait for approval
-- Never edit during Learning Phase
+- Google's "Learning" status (up to 7 days) follows a new or reactivated bid strategy, a change in what the strategy covers, or a significant conversion-goal change. Budget, target, creative and targeting changes never trigger it. Avoid several target changes within one conversion cycle
 - Priority order: tracking > negatives > QS > ad copy > bidding > budget

@@ -11,7 +11,7 @@ from fastmcp import FastMCP
 from fastmcp.server.middleware import Middleware
 from fastmcp.utilities.docstring_parsing import parse_docstring
 from mcp.types import Icon, ToolAnnotations
-from pydantic import BeforeValidator
+from pydantic import BeforeValidator, TypeAdapter
 
 from adloop import diagnostics
 from adloop.runtime import current_config
@@ -183,8 +183,10 @@ def _build_orchestration_instructions() -> str:
         "`attribution_check` — they factor this in.\n"
         "- `cost_micros / 1,000,000` = actual currency. Read tools "
         "auto-compute `metrics.cost`; only `run_gaql` returns raw micros.\n"
-        "- New campaigns MUST have `geo_target_ids` and `language_ids` set. "
-        "Untargeted campaigns waste budget."
+        "- New campaigns MUST have `geo_target_ids` set. Untargeted campaigns "
+        "waste budget. Search campaigns take no language targeting any more "
+        "(Google retired it in late September 2026): write the ads and landing "
+        "page in the language you want to reach."
     )
 
 
@@ -220,9 +222,12 @@ mcp = FastMCP(
 
 
 
+# "core": ADLOOP_TOOLSETS enables components by tag (only=True), and an
+# untagged resource would be switched off while tools still point at it.
 @mcp.resource(
     CARD_URI,
     name="approval_card",
+    tags={"core"},
     title="AdLoop approval card",
     description="Renders a change preview with Test run and Apply buttons.",
     mime_type=CARD_MIME_TYPE,
@@ -235,6 +240,7 @@ def approval_card() -> str:
 @mcp.resource(
     UPLOAD_CARD_URI,
     name="upload_card",
+    tags={"core"},
     title="AdLoop image upload",
     description="A drop zone that uploads images to AdLoop for use as ad assets.",
     mime_type=CARD_MIME_TYPE,
@@ -249,6 +255,7 @@ def upload_card() -> str:
 @mcp.resource(
     VIEW_URI,
     name="adloop_view",
+    tags={"core"},
     title="AdLoop view",
     description="Draws a read result as a dashboard (charts and tables).",
     mime_type=VIEW_MIME_TYPE,
@@ -308,11 +315,27 @@ class _AppOnlyToolsForCardClients(Middleware):
 mcp.add_middleware(_AppOnlyToolsForCardClients())
 
 
+_DRY_RUN_FLAG = TypeAdapter(bool)
+
+
 def _wants_real_apply(arguments: dict | None) -> bool:
-    value = (arguments or {}).get("dry_run", True)
+    """Whether a confirm_and_apply call asks for a real apply.
+
+    Only a clear dry run skips the dialog. The tool reads ``dry_run`` with
+    pydantic's lax booleans, which take more spellings of "no" than any
+    list kept here ("off", "f", "n", ...), so the value is read the same
+    way, and anything that is not a plain yes counts as a real apply.
+    """
+    args = arguments or {}
+    if "dry_run" not in args:
+        return False  # the tool's default is a dry run
+    value = args["dry_run"]
     if isinstance(value, str):
-        return value.strip().lower() in {"false", "0", "no"}
-    return value is False or value == 0
+        value = value.strip()
+    try:
+        return _DRY_RUN_FLAG.validate_python(value) is not True
+    except ValueError:
+        return True
 
 
 class _ConfirmationDialog(Middleware):
@@ -1486,6 +1509,39 @@ def list_ga4_annotations(
     )
 
 
+@_tool(title="List Analytics audiences", annotations=_READONLY, tags={"ga4"})
+@_safe
+def list_ga4_audiences(property_id: str = "") -> dict:
+    """List a GA4 property's audiences and check whether they reach Google Ads.
+
+    GA4 shares its audiences with every linked Google Ads account that
+    allows personalized advertising; there they are remarketing lists
+    (get_audience_lists) that draft_audience_attachment puts on a campaign.
+    Returns each audience's resource name, display name, description,
+    membership duration and what includes or excludes users: events,
+    pages (include_pages / exclude_pages: the URL contains the text) or
+    a sequence of steps (audiences built with other conditions in GA4's
+    editor carry
+    custom_conditions and the raw conditions; "All Users" and "Purchasers",
+    which GA4 creates itself, carry predefined), the audience slots used
+    against the limit (100, or 400 on a 360 property), and
+    google_ads_readiness: checks for the Google Ads link, personalized
+    advertising on it, Google signals, consent and list size, each with a
+    status (ok, warn or info). insights repeats the warnings. Reads the GA4
+    Admin API (audiences.list, googleAdsLinks.list, googleSignalsSettings).
+
+    Args:
+        property_id: GA4 property as "properties/123456789" or the bare
+            numeric ID. If empty, uses the default from config.
+    """
+    from adloop.ga4.audiences import list_ga4_audiences as _impl
+
+    return _impl(
+        current_config(),
+        property_id=property_id or current_config().ga4.property_id,
+    )
+
+
 @_tool(title="List Analytics custom definitions", annotations=_READONLY, tags={"ga4"})
 @_safe
 def list_ga4_custom_definitions(property_id: str = "") -> dict:
@@ -1658,10 +1714,12 @@ def get_merchant_feed_health(account_id: str = "") -> dict:
     """Merchant Center feed health — disapproved products + account issues.
 
     Disapproved feed items silently starve Shopping and Performance Max
-    campaigns; this reports approved/pending/disapproved counts per
-    reporting context (Shopping ads, free listings, ...), the top product
-    issues by affected products (with documentation links), and
-    account-level issues — CRITICAL ones stop offers serving entirely.
+    campaigns; this reports approved/pending/disapproved/expiring counts
+    per reporting context and country, each context marked paid (Shopping,
+    display, video ads, ...) or free (free listings), the top item issues
+    by affected products (with documentation links), and account-level
+    issues — CRITICAL ones stop offers serving entirely. A product counts
+    once per reporting context, so contexts are never added together.
     Product-status data lags reality by ~30 minutes.
 
     Args:
@@ -3451,7 +3509,7 @@ def get_audience_lists(customer_id: str = "") -> dict:
     Each user list comes with its type, membership status (OPEN or CLOSED),
     size for Search and Display, eligibility and membership duration;
     custom and combined segments with their id and description. Insights
-    flag lists below the 1,000 users Search needs and closed lists. Use the
+    flag lists below the 100 active users Search needs and closed lists. Use the
     ids with draft_audience_attachment; for Google's in-market and affinity
     segments use search_audience_segments.
 
@@ -3843,7 +3901,7 @@ def draft_campaign(
     daily_budget: float,
     bidding_strategy: str,
     geo_target_ids: _StrList,
-    language_ids: _StrList,
+    language_ids: _StrListOpt = None,
     customer_id: str = "",
     target_cpa: float = 0,
     target_roas: float = 0,
@@ -3859,11 +3917,14 @@ def draft_campaign(
     tracking_url_template: str | None = None,
     final_url_suffix: str | None = None,
     url_custom_parameters: _DictListOpt = None,
+    geo_exclude_ids: _StrListOpt = None,
+    ad_schedule: _DictListOpt = None,
 ) -> dict:
     """Draft a full campaign structure — returns a PREVIEW, does NOT create anything.
 
     Creates: CampaignBudget + Campaign (PAUSED) + AdGroup + optional Keywords
-    + geo targeting + language targeting.
+    + geo targeting + language targeting + optional geo exclusions and ad
+    schedule, all in one atomic request.
     Ads are NOT included — draft_responsive_search_ad adds them once the
     campaign exists. Only SEARCH campaigns can be created: Performance Max
     needs an asset group with all its assets in one request, and DISPLAY,
@@ -3885,7 +3946,10 @@ def draft_campaign(
         geo_target_ids: REQUIRED list of geo target constant IDs.
             Common: "2276" Germany, "2040" Austria, "2756" Switzerland, "2840" USA,
             "2826" UK, "2250" France. Full list: Google Ads API geo target constants.
-        language_ids: REQUIRED list of language constant IDs.
+        language_ids: Optional list of language constant IDs. Google retired
+            manual language targeting for Search campaigns in late September
+            2026 (ads match on the language of the ads and landing page), so
+            leave it out; when given it is still sent and the preview warns.
             Common: "1001" German, "1000" English, "1002" French, "1003" Spanish,
             "1004" Italian, "1014" Portuguese. Full list: Google Ads API
             language constants.
@@ -3930,6 +3994,15 @@ def draft_campaign(
         url_custom_parameters: List of {"key": "grp", "value": "b2c"}, used as
             {_grp} in the template. Keys alphanumeric, max 8 characters; values
             up to 250.
+        geo_exclude_ids: Geo target constant IDs to exclude (negative location
+            criteria), e.g. a city inside a targeted state. May not overlap
+            geo_target_ids.
+        ad_schedule: Windows the campaign serves in: list of {day_of_week
+            (MONDAY..SUNDAY), start_hour 0-23, end_hour 0-24, start_minute,
+            end_minute (0, 15, 30 or 45)}, whole numbers, in the account time
+            zone. No overlaps, at most six a day. Once the campaign is enabled it
+            serves only inside them; the preview warns about that. No double
+            confirmation, since the campaign is created PAUSED.
     """
     from adloop.ads.write import draft_campaign as _impl
 
@@ -3955,6 +4028,8 @@ def draft_campaign(
         tracking_url_template=tracking_url_template,
         final_url_suffix=final_url_suffix,
         url_custom_parameters=url_custom_parameters,
+        geo_exclude_ids=geo_exclude_ids,
+        ad_schedule=ad_schedule,
     )
 
 
@@ -4023,16 +4098,19 @@ def update_campaign(
     final_url_suffix: str | None = None,
     url_custom_parameters: _DictListOpt = None,
     keyword_match_type: str = "",
+    geo_exclude_ids: _StrListOpt = None,
+    ad_schedule: _DictListOpt = None,
 ) -> dict:
     """Draft an update to an existing campaign — returns a PREVIEW, does NOT apply.
 
     Only the parameters passed are changed; omitted ones stay as they are, and at
     least one change is required. Replacing geo targets keeps the campaign's
-    negative geo exclusions (the preview lists them). A budget change shows the
-    current amount; when the budget is shared with other campaigns, the
-    preview names them and needs a double confirmation, because the new amount
-    covers all of them. A bidding change on a campaign in a portfolio bid
-    strategy takes it out of the portfolio, also with a double confirmation.
+    negative geo exclusions (the preview lists them) unless geo_exclude_ids is
+    passed too. A budget change shows the current amount; when the budget is
+    shared with other campaigns, the preview names them and needs a double
+    confirmation, because the new amount covers all of them. A bidding change
+    on a campaign in a portfolio bid strategy takes it out of the portfolio,
+    also with a double confirmation.
 
     Returns a preview with a plan_id plus any warnings; nothing changes until
     confirm_and_apply applies it.
@@ -4054,8 +4132,11 @@ def update_campaign(
         geo_target_ids: REPLACES all positive geo targets; must not be empty
             when given. Common IDs: "2276" Germany, "2040" Austria, "2756"
             Switzerland, "2840" USA, "2826" UK.
-        language_ids: REPLACES all language targets; must not be empty when
-            given. Common IDs: "1001" German, "1000" English, "1002" French,
+        language_ids: REPLACES all campaign-level language targets; []
+            removes them. Not for Search campaigns: Google retired manual
+            language targeting there in late September 2026 and documents
+            that existing criteria can only be removed; the preview warns.
+            Common IDs: "1001" German, "1000" English, "1002" French,
             "1003" Spanish, "1004" Italian.
         search_partners_enabled: Include ads on Search partners. Omitted leaves
             the setting unchanged.
@@ -4098,6 +4179,20 @@ def update_campaign(
             non-Smart bidding_strategy is refused unless the same call passes
             UNSPECIFIED. The preview shows the current value. Empty leaves it
             unchanged.
+        geo_exclude_ids: REPLACES the campaign's negative location criteria.
+            Omitted leaves them unchanged; [] removes them. May not overlap
+            geo_target_ids. The preview shows the current ones
+            (current_geo_exclude_ids); dropping any needs a double confirmation,
+            because the campaign can serve there again. A location can move
+            between geo_target_ids and geo_exclude_ids in one call: its old
+            criterion is removed before the new one is created.
+        ad_schedule: REPLACES the campaign's schedule windows (shape as in
+            draft_campaign). Omitted leaves them unchanged; [] removes them, so
+            the campaign serves at all hours. The preview shows the current ones
+            (current_ad_schedule). A first schedule and clearing a schedule both
+            need a double confirmation. Only windows that differ are removed or
+            added, removals first. Apply refuses if the exclusions or windows
+            changed after the preview.
     """
     from adloop.ads.write import update_campaign as _impl
 
@@ -4121,6 +4216,8 @@ def update_campaign(
         final_url_suffix=final_url_suffix,
         url_custom_parameters=url_custom_parameters,
         keyword_match_type=keyword_match_type,
+        geo_exclude_ids=geo_exclude_ids,
+        ad_schedule=ad_schedule,
     )
 
 
@@ -4961,6 +5058,8 @@ def draft_callouts(
     ad_group_id: str = "",
     scope: str = "",
     customer_id: str = "",
+    start_date: str = "",
+    end_date: str = "",
 ) -> dict:
     """Draft callout assets for an ad group, a campaign or the account — returns a PREVIEW.
 
@@ -4979,6 +5078,9 @@ def draft_callouts(
         scope: Empty (follows the id), "campaign", "ad_group" or "account".
         customer_id: Google Ads customer ID (digits, dashes optional). Defaults to
             the configured account.
+        start_date: First day the callouts show, YYYY-MM-DD. Empty: from now.
+        end_date: Last day the callouts show, YYYY-MM-DD, so seasonal callouts
+            switch off by themselves. Empty: no end.
     """
     from adloop.ads.assets import draft_callouts as _impl
 
@@ -4989,6 +5091,8 @@ def draft_callouts(
         ad_group_id=ad_group_id,
         scope=scope,
         callouts=callouts,
+        start_date=start_date,
+        end_date=end_date,
     )
 
 
@@ -5472,20 +5576,27 @@ def link_asset_to_customer(
 @_safe
 def update_callout(
     asset_id: str,
-    callout_text: str,
+    callout_text: str = "",
     customer_id: str = "",
+    start_date: str = "",
+    end_date: str = "",
+    clear_fields: _StrList = [],  # noqa: B006
 ) -> dict:
-    """Draft changing a callout asset's text in place — returns a PREVIEW.
+    """Draft changing a callout asset in place — returns a PREVIEW.
 
-    The asset keeps its ID and performance history, and the new text shows
-    everywhere it is linked. The preview pins the current text; if someone
-    edits the asset in Google Ads before the apply, nothing is sent.
+    Only what is passed changes. The asset keeps its ID and performance
+    history, and the change shows everywhere it is linked. The preview pins
+    the current values; if someone edits the asset in Google Ads before the
+    apply, nothing is sent.
 
     Args:
         asset_id: Numeric ID of the callout asset.
-        callout_text: The new text, at most 25 characters.
+        callout_text: The new text, at most 25 characters. Empty keeps it.
         customer_id: Google Ads customer ID (digits, dashes optional). Defaults to
             the configured account.
+        start_date: First day the callout shows, YYYY-MM-DD. Empty keeps it.
+        end_date: Last day the callout shows, YYYY-MM-DD. Empty keeps it.
+        clear_fields: "start_date" and/or "end_date" to remove that date.
     """
     from adloop.ads.assets import update_callout as _impl
 
@@ -5494,6 +5605,9 @@ def update_callout(
         customer_id=customer_id or current_config().ads.customer_id,
         asset_id=asset_id,
         callout_text=callout_text,
+        start_date=start_date,
+        end_date=end_date,
+        clear_fields=clear_fields,
     )
 
 
@@ -5506,6 +5620,9 @@ def update_sitelink(
     description1: str = "",
     description2: str = "",
     customer_id: str = "",
+    start_date: str = "",
+    end_date: str = "",
+    clear_fields: _StrList = [],  # noqa: B006
 ) -> dict:
     """Draft changing a sitelink asset in place — returns a PREVIEW.
 
@@ -5523,6 +5640,9 @@ def update_sitelink(
             Google needs both description lines or neither.
         customer_id: Google Ads customer ID (digits, dashes optional). Defaults to
             the configured account.
+        start_date: First day the sitelink shows, YYYY-MM-DD. Empty keeps it.
+        end_date: Last day the sitelink shows, YYYY-MM-DD. Empty keeps it.
+        clear_fields: "start_date" and/or "end_date" to remove that date.
     """
     from adloop.ads.assets import update_sitelink as _impl
 
@@ -5534,6 +5654,9 @@ def update_sitelink(
         final_url=final_url,
         description1=description1,
         description2=description2,
+        start_date=start_date,
+        end_date=end_date,
+        clear_fields=clear_fields,
     )
 
 
@@ -5759,7 +5882,9 @@ def draft_sitelinks(
             required, max 25 chars) — the clickable text shown; final_url (str,
             required) — destination URL for this sitelink; description1 (str,
             optional, max 35 chars) — first description line; description2
-            (str, optional, max 35 chars) — second description line.
+            (str, optional, max 35 chars) — second description line;
+            start_date / end_date (str, optional, YYYY-MM-DD) — first and last
+            day the sitelink shows, so seasonal links switch off by themselves.
         campaign_id: Numeric ID of the campaign to attach sitelinks to. Leave
             empty with scope="account".
         customer_id: Google Ads customer ID (digits, dashes optional). Defaults to
@@ -8373,6 +8498,92 @@ def draft_ga4_annotation(
     )
 
 
+@_tool(title="Draft an Analytics audience", annotations=_DESTRUCTIVE, tags={"ga4"})
+@_safe
+def draft_ga4_audience(
+    action: str = "create",
+    display_name: str = "",
+    include_events: _StrList = [],  # noqa: B006
+    exclude_events: _StrList = [],  # noqa: B006
+    membership_duration_days: int = 30,
+    exclude_permanently: bool = False,
+    description: str | None = None,
+    audience: str = "",
+    property_id: str = "",
+    include_pages: _StrList = [],  # noqa: B006
+    exclude_pages: _StrList = [],  # noqa: B006
+    sequence: _StrOrDictListOpt = None,
+) -> dict:
+    """Draft creating, renaming or archiving a GA4 audience — returns a PREVIEW.
+
+    An audience is the users who sent certain events, viewed certain
+    pages, or did a sequence of both in order. A linked Google Ads
+    account receives it as a remarketing list within one to two days, to
+    attach to campaigns with draft_audience_attachment: this is how to
+    build a list of site visitors, of buyers, of visitors who did not
+    buy, or of people who saw the pricing page without signing up. GA4
+    fixes the conditions and the membership duration at creation;
+    afterwards only the name and description can change, and archiving is
+    permanent (it needs a double confirmation). The draft refuses a taken
+    name and a full property, and the preview warns when the property's
+    audiences would not reach Google Ads (see list_ga4_audiences). Nothing
+    changes until confirm_and_apply applies the plan_id.
+
+    Args:
+        action: "create" (default), "update" (name and description only) or
+            "archive".
+        display_name: Name of the audience; required for create, the new
+            name for update.
+        include_events: Create only. Users who sent ANY of these events
+            join, e.g. ["session_start"] for every visitor, ["purchase"]
+            for buyers, ["sign_up", "generate_lead"] for leads. Together
+            with include_pages it is still "any of".
+        exclude_events: Create only. Users who sent any of these are kept
+            out, e.g. include ["session_start"] and exclude ["purchase"]
+            for visitors who did not buy.
+        include_pages: Create only. Users who viewed a page whose full
+            URL contains ANY of these texts join, e.g. ["/pricing"]
+            (also matches /pricing/enterprise and /en/pricing). Not case
+            sensitive.
+        exclude_pages: Create only. Users who viewed such a page are kept
+            out, e.g. ["/thank-you"].
+        sequence: Create only, instead of include_events / include_pages.
+            2 to 10 steps the user must do in this order. Each is an event
+            name ("begin_checkout") or an object: {"event": "..."} or
+            {"page": "/pricing"}, optionally with "directly_followed": true
+            (no other event in between) and "within_minutes": 30 (after
+            the step before). Exclusions can be added as usual.
+        membership_duration_days: Create only. Days a user stays after
+            last meeting the conditions, 1 to 540 (default 30).
+        exclude_permanently: Create only. True keeps users out for good
+            once they sent an excluded event; False (default) only while
+            they keep meeting the exclusion within the membership window.
+        description: Optional for create (one is written from the events);
+            the new description for update.
+        audience: For update and archive: the audience's display name or
+            resource name from list_ga4_audiences.
+        property_id: GA4 property as "properties/123456789" or the bare
+            numeric ID. If empty, uses the default from config.
+    """
+    from adloop.ga4.audiences import draft_ga4_audience as _impl
+
+    return _impl(
+        current_config(),
+        property_id=property_id or current_config().ga4.property_id,
+        action=action,
+        display_name=display_name,
+        description=description,
+        include_events=include_events,
+        exclude_events=exclude_events,
+        membership_duration_days=membership_duration_days,
+        exclude_permanently=exclude_permanently,
+        audience=audience,
+        include_pages=include_pages,
+        exclude_pages=exclude_pages,
+        sequence=sequence,
+    )
+
+
 @_tool(title="Draft an Analytics custom dimension", annotations=_DESTRUCTIVE, tags={"ga4"})
 @_safe
 def draft_ga4_custom_dimension(
@@ -8574,9 +8785,8 @@ def draft_create_conversion_action(
             category). 0 leaves Google's default.
         primary_for_goal: True (default) makes it a Primary action that Smart
             Bidding optimizes toward; False makes it Secondary (recorded only).
-        include_in_conversions_metric: IMMUTABLE on create — Google derives it
-            from the category, so this value is not sent; change it later via
-            draft_update_conversion_action.
+        include_in_conversions_metric: IMMUTABLE — Google derives it from
+            primary_for_goal and the category's goal, so this value is not sent.
         click_through_window_days: Click-through attribution window in days,
             1-90. 0 leaves Google's default.
         view_through_window_days: View-through attribution window in days,
@@ -8625,12 +8835,14 @@ def draft_update_conversion_action(
     view_through_window_days: int = 0,
     attribution_model: str = "",
     customer_id: str = "",
+    category: str = "",
 ) -> dict:
     """Draft a partial UPDATE of an existing ConversionAction — returns PREVIEW.
 
     Only parameters passed non-empty/non-default are sent to the API.
     Covers renaming, demoting a Primary to Secondary, changing value,
-    adjusting the call-duration threshold, or changing attribution.
+    adjusting the call-duration threshold, changing attribution, or moving
+    the action to another goal with category.
     SMART_CAMPAIGN_* and GOOGLE_HOSTED types reject mutations with
     MUTATE_NOT_ALLOWED at apply time. Returns a preview with a plan_id (plus
     warnings where relevant); nothing changes until confirm_and_apply applies
@@ -8655,9 +8867,10 @@ def draft_update_conversion_action(
             unchanged.
         phone_call_duration_seconds: Minimum call length in seconds for a call
             to count. 0 leaves it unchanged.
-        include_in_conversions_metric: True shows the action in the
-            "Conversions" column; False in "All conversions" only. Mutable here
-            (unlike on create). Omit to leave unchanged.
+        include_in_conversions_metric: Refused when passed: Google answers
+            IMMUTABLE_FIELD at apply, and a dry run does not catch it. It derives
+            the value from primary_for_goal and whether the goal of the action's
+            category is biddable; use those instead.
         click_through_window_days: Click-through attribution window in days,
             1-90. 0 leaves it unchanged.
         view_through_window_days: View-through attribution window in days,
@@ -8666,6 +8879,11 @@ def draft_update_conversion_action(
             GOOGLE_SEARCH_ATTRIBUTION_DATA_DRIVEN. Empty leaves it unchanged.
         customer_id: Google Ads customer ID (digits, dashes allowed). Defaults
             to the configured account.
+        category: ConversionActionCategory to move the action to, e.g.
+            PHONE_CALL_LEAD; that decides which goal it belongs to. The preview
+            pins the current one (current_category); if the category is changed
+            in Google Ads before the apply, nothing is sent. Empty leaves it
+            unchanged.
     """
     from adloop.ads.conversion_actions import (
         draft_update_conversion_action as _impl,
@@ -8686,6 +8904,7 @@ def draft_update_conversion_action(
         click_through_window_days=click_through_window_days,
         view_through_window_days=view_through_window_days,
         attribution_model=attribution_model,
+        category=category,
     )
 
 

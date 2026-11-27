@@ -59,6 +59,31 @@
   dd ul { margin: 0; padding-left: 1.1em; white-space: normal; }
   dd li + li { margin-top: 4px; }
   .more { grid-column: 1 / -1; color: var(--fg-2); font-size: 12px; }
+  .wide { grid-column: 1 / -1; }
+  dt.wide { margin-top: 4px; }
+  dd.wide { min-width: 0; }
+  .hint { color: var(--fg-2); font-size: 12px; margin-left: 6px; white-space: normal; }
+  .was { color: var(--fg-2); }
+  .arrow { color: var(--fg-2); margin: 0 6px; }
+  .unset { grid-column: 1 / -1; color: var(--fg-2); font-size: 12px; white-space: normal; }
+  dl.nested { background: transparent; padding: 0 0 0 10px; border-left: 2px solid var(--border); border-radius: 0; }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; white-space: normal; }
+  th { text-align: left; font-weight: 500; font-size: 12px; color: var(--fg-2); padding: 0 10px 4px 0; }
+  td { padding: 4px 10px 4px 0; border-top: 1px solid var(--border); vertical-align: top; overflow-wrap: anywhere; }
+  th:last-child, td:last-child { padding-right: 0; }
+  .item { white-space: normal; padding: 4px 0; }
+  .item + .item { border-top: 1px solid var(--border); }
+  .item b { font-weight: 500; }
+  .item div { color: var(--fg-2); font-size: 12px; }
+  .ad { background: var(--bg); border: 1px solid var(--border); border-radius: 8px; padding: 10px 12px; white-space: normal; }
+  .ad .ad-url { font-size: 12px; color: var(--fg-2); overflow-wrap: anywhere; }
+  .ad .ad-url b { font-weight: 600; color: var(--fg); margin-right: 6px; }
+  .ad .ad-head { color: var(--accent); font-size: 15px; font-weight: 500; margin: 2px 0; }
+  .ad .ad-text { font-size: 13px; }
+  dd > button.link:first-child, dd > pre.hidden + button.link { margin-top: 0; font-size: 13px; }
+  pre { margin: 0; font: 12px/1.4 var(--mono); white-space: pre-wrap; overflow-wrap: anywhere; }
+  button.link { border: 0; padding: 0; margin-top: 4px; text-align: left; background: none; color: var(--accent); font-size: 12px; font-weight: 400; }
+  button.link.more { justify-self: start; margin-top: 0; }
   .note { margin-top: 10px; padding: 8px 10px; border-radius: 8px; font-size: 13px; overflow-wrap: anywhere; }
   .note.warn { color: var(--warn); background: var(--warn-bg); }
   .note.ok { color: var(--ok); background: var(--ok-bg); }
@@ -107,6 +132,8 @@
       testForced: "Live changes are switched off, so only test runs are possible.",
       applied: "Applied.", discarded: "Discarded. Nothing was changed.",
       failed: "Not applied:", more: "more fields not shown",
+      showFields: "Show {n} more fields", showField: "Show 1 more field", showAll: "Show all {n}", showDetails: "Show details",
+      unset: "Not set:", andMore: "and {n} more", sponsored: "Sponsored",
       msgApplied: "Applied on the AdLoop approval card: {op} (plan {id}).",
       msgAnnotate: " Suggested GA4 annotation for {date}: \u201c{title}\u201d (draft_ga4_annotation, needs approval).",
       msgDiscarded: "Discarded on the AdLoop approval card: {op} (plan {id}). Nothing was changed.",
@@ -124,6 +151,8 @@
       testForced: "Echte Änderungen sind ausgeschaltet, daher sind nur Testläufe möglich.",
       applied: "Angewendet.", discarded: "Verworfen. Nichts wurde geändert.",
       failed: "Nicht angewendet:", more: "weitere Felder nicht angezeigt",
+      showFields: "{n} weitere Felder anzeigen", showField: "1 weiteres Feld anzeigen", showAll: "Alle {n} anzeigen", showDetails: "Details anzeigen",
+      unset: "Nicht gesetzt:", andMore: "und {n} weitere", sponsored: "Gesponsert",
       msgApplied: "Auf der AdLoop-Freigabekarte angewendet: {op} (Plan {id}).",
       msgAnnotate: " Vorgeschlagene GA4-Anmerkung für den {date}: \u201e{title}\u201c (draft_ga4_annotation, braucht Freigabe).",
       msgDiscarded: "Auf der AdLoop-Freigabekarte verworfen: {op} (Plan {id}). Nichts wurde geändert.",
@@ -136,6 +165,7 @@
   };
   const PLATFORMS = { google: "Google Ads", reddit: "Reddit Ads", microsoft: "Microsoft Advertising", chatgpt: "ChatGPT Ads", ga4: "Google Analytics", gtm: "Tag Manager", google_ga4: "Google Ads · Analytics" };
   const MAX_ROWS = 14;
+  const MAX_ITEMS = 8; // of a list or table, before "Show all"
 
   let lang = "en";
   // Until the host says otherwise, follow the system theme.
@@ -219,6 +249,150 @@
     dl.append(dt, dd);
   }
 
+  // --- The readable view the server sends with the plan (meta.view). Rows
+  // are text, change, list, table, stack, group, code or unset; an older
+  // server sends none and the card lists the raw fields as before.
+
+  function el(tag, className, text) {
+    const node = document.createElement(tag);
+    if (className) node.className = className;
+    if (text !== undefined) node.textContent = text;
+    return node;
+  }
+
+  // Hide what is over the limit behind one link, so nothing is cut off for good.
+  function foldAfter(nodes, limit, labelKey, container) {
+    if (nodes.length <= limit) return;
+    const hidden = nodes.slice(limit);
+    for (const node of hidden) node.classList.add("hidden");
+    const link = el("button", "link", t(labelKey).replace("{n}", labelKey === "showFields" ? hidden.length : nodes.length));
+    link.type = "button";
+    link.addEventListener("click", () => {
+      for (const node of hidden) node.classList.remove("hidden");
+      link.remove();
+      reportSize();
+    });
+    container.append(link);
+  }
+
+  function moreLine(row, container) {
+    if (row.more > 0) container.append(el("div", "hint", t("andMore").replace("{n}", row.more)));
+  }
+
+  function viewValue(row) {
+    const dd = el("dd");
+    if (row.kind === "change") {
+      dd.append(el("span", "was", row.from || "–"), el("span", "arrow", "→"), el("span", "", row.to || "–"));
+    } else if (row.kind === "list") {
+      const ul = el("ul");
+      const items = (row.items || []).map((item) => el("li", "", item));
+      ul.append(...items);
+      dd.append(ul);
+      foldAfter(items, MAX_ITEMS, "showAll", dd);
+      moreLine(row, dd);
+    } else if (row.kind === "table") {
+      const table = el("table");
+      const head = el("tr");
+      for (const column of row.columns || []) head.append(el("th", "", column));
+      table.append(head);
+      const lines = (row.rows || []).map((cells) => {
+        const tr = el("tr");
+        for (const cell of cells) tr.append(el("td", "", cell));
+        return tr;
+      });
+      table.append(...lines);
+      dd.append(table);
+      foldAfter(lines, MAX_ITEMS, "showAll", dd);
+      moreLine(row, dd);
+    } else if (row.kind === "stack") {
+      const items = (row.items || []).map((item) => {
+        const block = el("div", "item");
+        block.append(el("b", "", item.title));
+        for (const line of item.lines || []) block.append(el("div", "", line));
+        return block;
+      });
+      dd.append(...items);
+      foldAfter(items, MAX_ITEMS, "showAll", dd);
+      moreLine(row, dd);
+    } else if (row.kind === "group") {
+      const nested = el("dl", "nested");
+      viewRows(nested, row.rows || [], Infinity);
+      dd.append(nested);
+    } else if (row.kind === "ad") {
+      const ad = el("div", "ad");
+      const url = el("div", "ad-url");
+      url.append(el("b", "", t("sponsored")), document.createTextNode(row.url || ""));
+      ad.append(url, el("div", "ad-head", row.headline || ""), el("div", "ad-text", row.text || ""));
+      dd.append(ad);
+    } else if (row.kind === "code") {
+      const pre = el("pre", "", row.text);
+      dd.append(pre);
+      if (row.folded) {
+        pre.classList.add("hidden");
+        const link = el("button", "link", t("showDetails"));
+        link.type = "button";
+        link.addEventListener("click", () => {
+          pre.classList.remove("hidden");
+          link.remove();
+          dd.dispatchEvent(new Event("unfold"));
+          reportSize();
+        });
+        dd.append(link);
+      }
+    } else {
+      dd.textContent = row.text === undefined ? "" : String(row.text);
+    }
+    if (row.hint && INLINE.has(row.kind)) dd.append(el("span", "hint", row.hint));
+    return dd;
+  }
+
+  // Tables, blocks, groups and code take the full width under their label.
+  const WIDE = new Set(["table", "stack", "group", "code", "ad"]);
+  // A hint follows a one-line value; under anything taller it goes to the label.
+  const INLINE = new Set(["text", "change"]);
+
+  function viewRows(dl, rows, limit) {
+    const fields = [];
+    for (const row of rows) {
+      if (!row || typeof row !== "object") continue;
+      if (row.kind === "unset") {
+        // One line, always shown: it is what says that nothing else was left out.
+        dl.append(el("div", "unset", t("unset") + " " + (row.labels || []).join(", ")));
+        continue;
+      }
+      const dt = el("dt", "", row.label || "");
+      if (row.hint && !INLINE.has(row.kind)) dt.append(el("span", "hint", row.hint));
+      const dd = viewValue(row);
+      const widen = () => { dt.classList.add("wide"); dd.classList.add("wide"); };
+      // Folded details sit next to their label until they are opened.
+      if (row.kind === "code" && row.folded) dd.addEventListener("unfold", widen);
+      else if (WIDE.has(row.kind)) widen();
+      dl.append(dt, dd);
+      fields.push([dt, dd]);
+    }
+    if (fields.length > limit) {
+      const hidden = fields.slice(limit).flat();
+      for (const node of hidden) node.classList.add("hidden");
+      const extra = fields.length - limit;
+      const link = el("button", "link more", t(extra === 1 ? "showField" : "showFields").replace("{n}", extra));
+      link.type = "button";
+      link.addEventListener("click", () => {
+        for (const node of hidden) node.classList.remove("hidden");
+        link.remove();
+        reportSize();
+      });
+      dl.append(link);
+    }
+    return fields.length;
+  }
+
+  function accountLabel(id) {
+    const digits = String(id).replace(/-/g, "");
+    return /^\d{10}$/.test(digits)
+      ? "account " + digits.slice(0, 3) + "-" + digits.slice(3, 6) + "-" + digits.slice(6)
+      : String(id);
+  }
+
   function note(container, kind, text) {
     const div = document.createElement("div");
     div.className = "note " + kind;
@@ -229,7 +403,8 @@
   function render() {
     const p = plan.preview;
     $("platform").textContent = PLATFORMS[platformOf(p)];
-    $("title").textContent = humanize(p.operation);
+    const view = plan.view;
+    $("title").textContent = (view && typeof view.title === "string" && view.title) || humanize(p.operation);
     // Names resolved at draft time (pause, enable, remove) sit in changes;
     // the IDs stay visible next to them, and the card falls back to IDs.
     const ch = p.changes || {};
@@ -241,12 +416,17 @@
       sub.push(target);
     }
     if (ch.account) sub.push(String(ch.account));
-    else if (p.customer_id) sub.push(String(p.customer_id));
+    else if (p.customer_id) sub.push(accountLabel(p.customer_id));
     sub.push("plan " + plan.planId);
     $("subtitle").textContent = sub.join(" · ");
 
     const dl = $("changes");
     dl.replaceChildren();
+    if (view && Array.isArray(view.rows)) {
+      if (!viewRows(dl, view.rows, MAX_ROWS)) dl.classList.add("hidden");
+      showCard(p);
+      return;
+    }
     const SHOWN_ELSEWHERE = new Set(["account", "entity_name", "warnings"]);
     // Bookkeeping for the apply, not for the reader: the before/after rows
     // already show what "after" holds, and the fingerprint is a hash.
@@ -262,9 +442,15 @@
       dl.append(more);
     }
     if (!entries.length) dl.classList.add("hidden");
+    showCard(p);
+  }
 
+  function showCard(p) {
     const warnings = $("warnings");
     warnings.replaceChildren();
+    // What applying does, from the server's view, in the card's language.
+    const effect = plan.view && plan.view.effect;
+    if (effect && (effect[lang] || effect.en)) note(warnings, "info", effect[lang] || effect.en);
     const list = [].concat(p.warnings || [], (p.changes && p.changes.warnings) || []);
     for (const w of list) note(warnings, "warn", typeof w === "string" ? w : JSON.stringify(w));
 
@@ -368,7 +554,7 @@
     const meta = (result._meta && result._meta[META_KEY]) || null;
     if (!meta || !meta.code || !meta.plan_id) { reportSize(); return; }
     const preview = resultPayload(result);
-    plan = { planId: meta.plan_id, code: meta.code, tool: meta.tool || "approve_change", preview };
+    plan = { planId: meta.plan_id, code: meta.code, tool: meta.tool || "approve_change", preview, view: meta.view };
     render();
   }
 
